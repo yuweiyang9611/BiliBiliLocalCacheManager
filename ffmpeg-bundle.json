@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "provider": "BtbN/FFmpeg-Builds",
+  "tag": "autobuild-2026-06-30-13-34",
+  "asset": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1.zip",
+  "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1.zip",
+  "sha256": "3b9eceb438016b647e0755a51ce3a388cd4ed5679e2427cb83a01e1ae2cd0eba"
+}

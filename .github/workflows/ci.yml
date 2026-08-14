@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.3xx
+
+      - name: Restore
+        run: dotnet restore BiliBiliLocalCacheManager.slnx
+
+      - name: Build
+        run: dotnet build BiliBiliLocalCacheManager.slnx --configuration Release --no-restore --nologo
+
+      - name: Test non-UI suites
+        run: dotnet test BiliBiliLocalCacheManager.slnx --configuration Release --no-build --nologo --filter "Category!=UI&Category!=FFmpegIntegration"
+
+      - name: Cache pinned FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/ffmpeg
+            ~/AppData/Local/BiliBiliLocalCacheManager/ffmpeg
+          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('ffmpeg-bundle.json') }}
+
+      - name: Prepare manifest-pinned FFmpeg archive
+        shell: pwsh
+        run: ./scripts/prepare-ffmpeg-integration.ps1 -EnvironmentFile $env:GITHUB_ENV
+
+      - name: Test real FFmpeg integration
+        env:
+          BILIBILI_RUN_FFMPEG_INTEGRATION_TESTS: "1"
+        run: dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj --configuration Release --no-build --nologo --filter "Category=FFmpegIntegration"
+
+      - name: Publish CLI
+        run: dotnet publish BiliBiliLocalCacheManager.Cli/BiliBiliLocalCacheManager.Cli.csproj --configuration Release --no-build --output artifacts/cli
+
+      - name: Publish WPF
+        run: dotnet publish BiliBiliLocalCacheManager.Wpf/BiliBiliLocalCacheManager.Wpf.csproj --configuration Release --no-build --output artifacts/wpf
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BiliBiliLocalCacheManager-cli-framework-dependent
+          path: artifacts/cli
+
+      - name: Upload WPF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BiliBiliLocalCacheManager-wpf-framework-dependent
+          path: artifacts/wpf

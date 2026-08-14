@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.3xx
+
+      - name: Validate release tag
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_name }}" -notmatch '^v\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
+            throw "Release tags must look like v0.3.0 or v0.3.0-beta.1"
+          }
+
+      - name: Cache pinned FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/ffmpeg
+            ~/AppData/Local/BiliBiliLocalCacheManager/ffmpeg
+          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('ffmpeg-bundle.json') }}
+
+      - name: Prepare manifest-pinned FFmpeg archive
+        shell: pwsh
+        run: ./scripts/prepare-ffmpeg-integration.ps1 -EnvironmentFile $env:GITHUB_ENV
+
+      - name: Build release artifacts
+        shell: pwsh
+        run: ./scripts/build-release.ps1 -Version "${{ github.ref_name }}" -RunFfmpegIntegrationTests
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(
+            Get-ChildItem -LiteralPath artifacts/release -Filter '*.zip' | Select-Object -ExpandProperty FullName
+            (Resolve-Path -LiteralPath artifacts/release/SHA256SUMS.txt).Path
+          )
+          gh release create "${{ github.ref_name }}" @assets --verify-tag --title "BiliBili Local Cache Manager ${{ github.ref_name }}" --generate-notes
