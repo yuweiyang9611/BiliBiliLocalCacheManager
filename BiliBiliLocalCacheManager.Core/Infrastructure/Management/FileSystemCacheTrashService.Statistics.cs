@@ -23,10 +23,13 @@ public sealed partial class FileSystemCacheTrashService
             return new CacheTrashStatistics(trashRoot, 0, 0, 0, 0, 0, null);
         }
 
-        using var trashRootLease = OpenPhysicalDirectoryLease(
-            trashRoot,
-            "The application trash directory",
-            allowDelete: false);
+        EnsurePhysicalDirectory(trashRoot, "The application trash directory");
+        using var trashRootLease = OperatingSystem.IsWindows()
+            ? OpenPhysicalDirectoryLease(
+                trashRoot,
+                "The application trash directory",
+                allowDelete: false)
+            : null;
 
         var managedEntryCount = 0;
         var fileCount = 0;
@@ -71,10 +74,13 @@ public sealed partial class FileSystemCacheTrashService
                         1);
                     continue;
                 }
-                using var entryLease = OpenPhysicalDirectoryLease(
-                    path,
-                    "The managed trash entry",
-                    allowDelete: false);
+                EnsurePhysicalDirectory(path, "The managed trash entry");
+                using var entryLease = OperatingSystem.IsWindows()
+                    ? OpenPhysicalDirectoryLease(
+                        path,
+                        "The managed trash entry",
+                        allowDelete: false)
+                    : null;
 
 
                 var originalPath = Path.Combine(
@@ -86,9 +92,15 @@ public sealed partial class FileSystemCacheTrashService
                     pendingPurgeEntryCount = FileSystemCacheStorageStatisticsService.SaturatingAdd(
                         pendingPurgeEntryCount,
                         1);
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        throw new UntrustedTrashEntryException(
+                            "A pending Windows purge journal cannot be physically validated on Linux.");
+                    }
+
                     EnsurePurgeJournalMatchesPhysicalEntry(
                         journalState.Journal,
-                        entryLease,
+                        entryLease!,
                         "The managed trash entry");
                     EnsurePurgeJournalMatchesInternalState(path, journalState.Journal);
                 }

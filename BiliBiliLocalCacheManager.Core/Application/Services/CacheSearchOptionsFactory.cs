@@ -3,7 +3,7 @@ using BiliBiliLocalCacheManager.Core.Application.Models;
 namespace BiliBiliLocalCacheManager.Core.Application.Services;
 
 /// <summary>
-/// Helpers for building and parsing search options shared by CLI/WPF.
+/// Helpers for building and parsing search options shared by CLI and desktop clients.
 /// </summary>
 public static class CacheSearchOptionsFactory
 {

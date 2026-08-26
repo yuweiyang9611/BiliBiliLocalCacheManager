@@ -1,112 +1,120 @@
 # BiliBiliLocalCacheManager
 
-用于扫描、搜索、播放和管理本地哔哩哔哩缓存的 .NET 工具集，提供 CLI 与 WPF 两种入口。
+用于扫描、搜索、播放、导出和安全管理本地哔哩哔哩缓存的工具集。项目提供 .NET 10 CLI，以及基于 Electron 44、内置 Chromium 和 React/TypeScript 的桌面应用；桌面界面通过受限的 IPC 与独立 .NET Host 通信，不在渲染进程中开放 Node.js。
 
 ## 主要能力
 
-- 从 `根目录\avid\分段目录\entry.json` 构建内存索引
-- 按标题、分段名、UP 主、Bvid、Avid 搜索
-- 识别新版 DASH、中期 DASH、旧版 Lua 和混合缓存结构
-- 使用系统默认播放器、mpv 或 VLC 播放缓存
-- 把缓存导出成按标题命名的普通 MP4，支持单条另存与多选批量导出，命中转码缓存时秒出
-- 按 avid 查看和删除缓存；CLI 与 WPF 一样默认移入应用回收站，`--permanent` 才永久删除，另有 `--dry-run`
-- CLI `trash` 子命令组：列出、还原、统计和永久清空应用回收站
-- 在 WPF 中查看分段详情、空间统计、更新时间和批量操作
-- 扫描/建索引过程中显示进度并支持取消
-- 使用可控页面队列逐项启动播放器，避免批量弹窗
-- FFmpeg 参与播放准备时显示独立进度窗口、完成百分比和预计剩余时间，并允许取消转码。
-- 复用持久化转码缓存；相同源视频再次播放时直接使用已有产物，不再重复运行 FFmpeg
-- 在窗口显示后执行非阻塞缓存维护，并在播放成功后自动应用保留期与容量策略
-- 在同一“存储管理”区域查看原始缓存、转码缓存、应用回收站和预计可释放空间
-- WPF 删除默认进入应用回收站，支持撤销最近一次批量删除，也可确认后永久清理其中由本应用管理的条目
-- 导出经过路径、令牌和媒体标题脱敏的诊断包，便于排查设置、存储与 FFmpeg 问题
+- 从 `根目录/avid/分段目录/entry.json` 建立缓存索引，识别新版 DASH、中期 DASH、旧版 Lua 和混合结构
+- 按标题、分段名、UP 主、Bvid 或 Avid 搜索，并报告损坏条目、未完成分段和不可访问目录
+- 使用系统默认播放器、mpv 或 VLC 播放，按队列逐项启动，避免批量弹窗
+- 将单条或多选缓存导出为普通 MP4，并复用已有转码产物
+- 统计原始缓存、转码缓存、应用回收站、总占用和预计可释放空间
+- 默认把删除内容移动到应用回收站，支持列表、恢复、撤销和受保护的永久清理
+- 设置转码产物保留期与容量上限，并执行非阻塞后台维护
+- 导出包含运行时、设置摘要、FFmpeg、转码缓存统计和最近事件的诊断 ZIP；最近事件会替换已知缓存路径、用户主目录、URL 与常见命名凭据
 
-## 可靠性策略
+## 桌面架构
 
-### 扫描报告
+Electron 44 自带运行所需的 Chromium，不依赖系统浏览器。桌面包还携带针对目标平台自包含发布的 .NET 10 Host，因此最终用户不需要安装 Node.js 或 .NET Runtime。
 
-扫描不会因为单个损坏条目而中断。CLI 和 WPF 会报告：
+安全边界如下：
 
-- 已收录分段数
-- 跳过的未完成分段数
-- 无法解析的 `entry.json` 数量
-- 无法访问的目录数量
+- `contextIsolation` 与渲染器 sandbox 启用，`nodeIntegration` 关闭。
+- Preload 只暴露显式允许的 API；任意导航、窗口创建和权限请求默认拒绝。
+- 渲染器资源通过只映射打包目录的 `blcm://` 自定义安全协议加载，不授予 `file://` 额外权限。
+- 打包时关闭 `ELECTRON_RUN_AS_NODE`、`NODE_OPTIONS` 和主进程调试参数，并限制应用只能从 ASAR 加载；Windows 包同时启用 ASAR 完整性校验。
+- 缓存和媒体操作在独立 Host 进程中执行，主进程通过逐行 JSON RPC 调用。
+- 桌面应用仅支持单实例；第二次启动会聚焦已有窗口。
+- Linux 构建固定使用 Chromium 的 X11/Ozone 后端；在 Wayland 桌面中依赖 XWayland 兼容层，不启用原生 Wayland 后端。
 
-具体问题明细默认最多保留 100 条，统计总数不受此限制。
+## 0.4.0 桌面发布目标
 
-### 播放产物
+| 平台 | 架构与桌面环境 | 发布形式与范围 |
+| --- | --- | --- |
+| Windows 10 / 11 | x64 | 第一优先级，发布 NSIS 安装器与免安装 zip |
+| Ubuntu 24.04 及更高版本 | x64，GNOME，XWayland | Linux 第一优先级，发布 deb |
+| Debian 13 | x64，GNOME 或 KDE，XWayland | 目标支持，发布 deb |
+| Fedora 43 | x64，至少 GNOME 或 KDE，XWayland | 目标支持，发布 rpm |
 
-需要转封装的媒体会写入：
+表中的桌面环境是兼容与发布目标；自动化覆盖范围和真实桌面会话测试的区别见“开发与验证”。
 
-```text
-%LOCALAPPDATA%\BiliBiliLocalCacheManager\TranscodeCache
+每次正式发布都应按 [桌面兼容性验收清单](docs/desktop-compatibility.md) 在真实机器或完整虚拟机中记录结果；Fedora 43 至少选择 GNOME 或 KDE 之一完成整套检查。
+
+以下环境不在支持承诺内：原生 Wayland 会话、Alpine/musl、NixOS、Flatpak、Linux ARM64、macOS，以及上表未列出的 Linux 桌面组合。Linux 用户必须能运行 XWayland；应用会显式选择 Chromium 的 X11/Ozone 后端。
+
+### Linux 运行依赖与安全限制
+
+Linux 桌面包与 CLI 是 `linux-x64` 自包含发布，但 **FFmpeg 不随 Linux 包分发**。deb 声明 `ffmpeg` 依赖，rpm 声明 Fedora 官方 `ffmpeg-free` 依赖；直接使用 CLI 压缩包时需要自行安装。播放准备和 MP4 导出要求系统 `PATH` 中存在可执行的 `ffmpeg` 与 `ffprobe`，建议在启动前验证：
+
+```bash
+ffmpeg -version
+ffprobe -version
 ```
 
-输出文件按处理配置版本、缓存结构、规范化源路径、大小和修改时间计算指纹。标题等展示元数据变化不会造成缓存失效；源文件未变化时，WPF 与 CLI 跨重启复用已有产物。
+Ubuntu 与 Debian 使用系统 `ffmpeg` 包；Fedora 43 的官方 `ffmpeg-free` 同时提供 `ffmpeg` 和 `ffprobe`，但支持的编解码器范围较窄。若媒体需要额外编解码器，请使用与系统包管理器兼容的可信软件源。
 
-生成过程使用唯一临时文件并在成功后原子替换；同一产物使用进程内与跨进程锁，避免多个实例重复生成。等待其他实例生成同一产物时会显示可取消的进度窗口，纯缓存命中仍直接播放。若源媒体在 FFmpeg 运行期间继续变化，本次结果会被丢弃，不会进入缓存。
+Linux 当前禁用不可逆删除：
 
-默认值为保留 30 天、总空间上限 20 GB；清理时会：
+- 桌面端不能永久清空应用回收站。
+- CLI 在 Linux 上拒绝执行非 dry-run 的 `--permanent` 删除；`--dry-run` 仍可用于检查目标。
+- 移入应用回收站、列出和恢复仍受支持。
 
-- 删除超过保留天数未使用的播放产物
-- 总空间超过容量上限时，从最旧文件开始清理
-- 临时保护刚创建、刚复用以及本次运行中最近交给播放器的产物；保护集合最多 8 项、最长 24 小时，并受容量上限约束（最新一项除外）
-- 统计并清理可安全取得生成锁的残留 `.building-*` 文件；正在生成的文件不会被删除
-- 将清理范围严格限制在上述受管目录
+这一限制会持续到 Unix 物理目录身份校验达到与 Windows 句柄绑定删除相同的安全保证。
 
-WPF 可直接设置“保留天数”（1–1825 天，最长 5 年）和“容量上限 (GB)”（1–128 GB）。设置会保存到本机用户配置，并用于下一次手动或后台维护。程序先显示主窗口，再在后台执行启动维护；成功启动播放器后也会请求一次合并后的后台维护，不阻塞主要操作。缓存管理区会显示当前数量、占用和按现有策略预计可释放的空间，并提供“打开缓存”“按策略清理”和确认后的“一键清空”；这些操作不会删除 B 站原始缓存。
+## 可靠性与数据安全
 
-FFmpeg 默认采用流复制完成转封装。DASH 会先快速探测音频编码：AAC 音视频全部直接复制，非 AAC 只转换音频并保持视频流不变；已有可靠时长元数据时跳过额外的视频时长分析。线程数、编码 preset 和 GPU 编码对当前流复制路径没有加速作用。
+扫描不会因为单个损坏条目中断，具体问题明细默认最多保留 100 条，统计总数不受此限制。
 
-运行时、CI 和 Release 共用仓库根目录的 `ffmpeg-bundle.json`，其中固定 BtbN 月末长期保留构建的 tag、asset、精确 URL 与 SHA-256。默认运行时始终使用并校验这份固定 bundle，不会被 PATH 中任意版本的 FFmpeg 覆盖；只有显式设置 `BILIBILI_LOCAL_CACHE_MANAGER_USE_SYSTEM_FFMPEG=1` 才会选择系统安装，显式 `BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_ARCHIVE_PATH` 仍可用于受控离线包。首次需要转封装时的下载、SHA-256 校验和解压均通过同一进度窗口显示阶段、百分比和预计剩余时间，并可取消；未完成的下载或解压不会被标记为可用安装。
+需要转封装的媒体写入当前用户的本地应用数据目录。桌面端默认保留 30 天、总空间上限 10 GB；清理只处理受管目录中的过期或超限产物，并保护正在生成、最近创建、最近复用和刚交给播放器的文件。产物根据处理配置、缓存结构、规范化源路径、大小和修改时间生成指纹；源媒体在处理期间发生变化时，本次结果会被丢弃。
 
-## WPF 使用体验
+Windows 使用仓库 `ffmpeg-bundle.json` 指定并校验的 FFmpeg bundle。Linux 始终把 FFmpeg 视为系统依赖，不下载 Windows bundle。
 
-- **扫描与搜索**：扫描或自动建立搜索索引时显示已处理分段数，可随时点击“取消”。
-- **播放队列**：“播放所选”只启动第一项，其余页面进入队列；使用“播放下一项”逐项推进，或“清空队列”终止后续启动。
-- **统一存储管理**：同时显示原始缓存、转码缓存、应用回收站、总占用和预计可释放空间；统计在后台刷新，新请求会取消已过时的扫描。应用回收站会分别显示已验证条目与“旧版未验证”条目的条目数、文件数和占用；旧版未验证占用单独列示，不并入已验证总占用或可释放空间。
-- **转码缓存**：可设置保留天数和容量上限；启动和播放后的维护不会占用全局操作状态，手动清理仍会显示明确结果。
-- **缓存命中体验**：命中已有转码产物时直接启动播放器，不再闪现 FFmpeg 进度窗口。
-- **播放器偏好**：可选择系统默认优先、仅系统默认、mpv 或 VLC。
-- **安全删除**：支持多选缓存，默认移动到缓存根目录下的 `.BiliBiliLocalCacheManager-Trash`；“撤销删除”可恢复最近一次操作，“清空回收站”则在确认后永久删除其中由本应用管理的条目。同一缓存根目录的移动、恢复、统计和彻底清空会跨实例串行。新条目使用 v1 身份元数据（avid、相对原路径、UTC 删除时间和唯一 ID）；Windows 上的移动、恢复和删除都绑定已校验的物理句柄。永久清理开始后会同时保留条目内状态和回收站根目录日志，根日志还绑定卷序列号与文件 ID；只有条目目录确认删除后才删除根日志，因此状态文件丢失、进程中断或日志删除失败都可安全重试，同名替换目录不会被误删。界面显示的已释放空间按清理前后真实净减少量计算，不会把本次临时创建的状态文件高报为收益。带有效元数据的旧版条目继续支持，并可在缓存根目录迁移后识别。缺少元数据但目录名符合旧版格式的条目会标记为“旧版未验证”，普通清空不会删除；仅在第二次明确确认后才会纳入永久清理。损坏、身份不匹配或未来 SchemaVersion 的条目始终保留并报告失败。
-- **空间摘要**：状态区显示当前列表、未完成缓存和已选择缓存的数量与空间；大小和更新时间列支持排序。
-- **设置持久化**：缓存根目录、搜索选项、播放器偏好和转码缓存策略保存在 `%LOCALAPPDATA%\BiliBiliLocalCacheManager\settings.json`。设置文件带有 SchemaVersion；旧值会迁移并提示，较新版本文件不会被旧程序覆盖，损坏文件会先备份再恢复默认值。若另一个实例已修改同版本设置，旧实例会停止自动维护并提示重启，不会用整份旧设置覆盖新值。
-- **诊断导出**：底部“导出诊断”生成 ZIP，包含运行环境、设置迁移状态、存储摘要、FFmpeg 来源和近期事件；缓存路径、用户目录、令牌、URL 私密部分及已知媒体标题会先脱敏。导出诊断不会初始化或下载 FFmpeg。
-
-- **导出 MP4**：底部“导出 MP4”或右键菜单可把所选缓存导出成普通 MP4。单条会弹出另存对话框，多条则选择目标文件夹并按“标题”或“标题 - P2 分段名”命名；文件名会清洗非法字符并自动去重。导出复用播放的转码产物，已生成过的内容不会重复转码。
-- **主题与外观**：跟随 Windows 深浅色设置，窗口标题显示版本号，列表额外显示 UP 主、BV 号和时长。
-- **键盘操作**：F5 扫描、Ctrl+F 聚焦关键字、Enter 搜索、Delete 删除、Ctrl+Z 撤销、Ctrl+E 导出、Esc 取消；双击列表行直接播放。
-- **省心启动**：记住的缓存目录会在启动时自动扫描，选完目录也会立即扫描；FFmpeg 在后台预热，首次播放不再等待下载。
-- **出错可追**：未处理异常会写入 `%LOCALAPPDATA%\BiliBiliLocalCacheManager\CrashReports\` 并提示，不再直接闪退。
-
-CLI 的 `delete` 默认移入应用回收站，可用 `trash restore` 还原；只有加 `--permanent` 才永久删除。两条路径在非交互终端下都必须显式加 `--yes` 才会执行。
-
-兼容提示：v0.3.0 等仅识别旧版目录格式的构建会忽略新建的 v1 回收站条目；降级不会自动删除这些条目，但也不能用旧版恢复或清空。请使用支持 v1 回收站元数据的版本处理。
+应用回收站使用版本化身份元数据。Windows 永久清理会进行物理句柄、卷与文件 ID 复核，并保留可恢复的清理日志直到删除提交；损坏、身份不匹配或未来 SchemaVersion 的条目会保留并报告失败。
 
 ## 项目结构
 
-- `BiliBiliLocalCacheManager.Core/`：缓存索引、扫描报告、搜索与删除逻辑
-- `BiliBiliLocalCacheManager.Playback/`：缓存结构识别、媒体整理、产物生命周期与播放
+- `BiliBiliLocalCacheManager.Core/`：索引、搜索、扫描报告和安全删除逻辑
+- `BiliBiliLocalCacheManager.Playback/`：缓存结构识别、媒体整理、FFmpeg 与产物生命周期
 - `BiliBiliLocalCacheManager.Cli/`：命令行界面
-- `BiliBiliLocalCacheManager.Wpf/`：WPF 桌面界面
-- `BiliBiliLocalCacheManager.Core.Tests/`：索引、搜索、删除与扫描报告测试
-- `BiliBiliLocalCacheManager.Playback.Tests/`：播放产物和目录结构回归测试
-- `BiliBiliLocalCacheManager.Cli.Tests/`：CLI 行为测试
-- `BiliBiliLocalCacheManager.Wpf.Tests/`：ViewModel 与交互桌面 UI 测试
-
-本地 `AI_Record/` 资料被保留，但不会提交到 Git。
+- `BiliBiliLocalCacheManager.Desktop/`：Electron 主进程、Preload、React 渲染器和前端测试
+- `BiliBiliLocalCacheManager.Desktop.Host/`：桌面应用的 .NET JSON-lines Host
+- `BiliBiliLocalCacheManager.Desktop.Host.Tests/`：桌面 Host 协议、持久化和诊断脱敏契约测试
+- `BiliBiliLocalCacheManager.Core.Tests/`、`Playback.Tests/`、`Cli.Tests/`：.NET 回归测试
 
 ## 开发与验证
 
-项目使用 .NET 10，SDK 版本由 `global.json` 固定在 `10.0.300` feature band。
+开发环境固定使用：
+
+- .NET SDK `10.0.400`
+- Node.js 24 与仓库锁定的 npm 依赖
+
+验证 .NET 与 Electron：
 
 ```powershell
 dotnet restore BiliBiliLocalCacheManager.slnx
 dotnet build BiliBiliLocalCacheManager.slnx --configuration Release --no-restore
-dotnet test BiliBiliLocalCacheManager.slnx --configuration Release --no-build --filter "Category!=UI&Category!=FFmpegIntegration"
+# Windows
+dotnet test BiliBiliLocalCacheManager.slnx --configuration Release --no-build --filter "Category!=FFmpegIntegration"
+# Linux
+dotnet test BiliBiliLocalCacheManager.slnx --configuration Release --no-build --filter "Category!=FFmpegIntegration&Category!=WindowsOnly"
+
+Push-Location BiliBiliLocalCacheManager.Desktop
+npm ci
+npm run check
+Pop-Location
 ```
 
-真实 FFmpeg 集成测试默认不下载外部工具。以下脚本从共享清单准备精确版本，最多重试 3 次并验证 SHA-256，然后可显式执行 5 个媒体集成场景：
+本地开发桌面应用：
+
+```powershell
+dotnet build BiliBiliLocalCacheManager.Desktop.Host/BiliBiliLocalCacheManager.Desktop.Host.csproj
+Push-Location BiliBiliLocalCacheManager.Desktop
+npm ci
+npm run dev
+Pop-Location
+```
+
+真实 FFmpeg 集成测试默认关闭。Windows 可从共享清单准备经过 SHA-256 校验的固定归档，然后显式运行：
 
 ```powershell
 $archive = ./scripts/prepare-ffmpeg-integration.ps1 -EnvironmentFile ""
@@ -115,7 +123,7 @@ $env:BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_ARCHIVE_PATH = $archive
 dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj --configuration Release --filter "Category=FFmpegIntegration"
 ```
 
-WPF UI 自动化测试需要 Windows 交互式桌面环境。Windows CI 与标签 Release 都从同一清单准备 FFmpeg，并运行上述 5 个真实媒体集成测试；更新 FFmpeg 只需在一次经过校验的变更中修改该清单。
+`.github/workflows/ci.yml` 使用 .NET `10.0.400` 与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查是项目发布清单中的人工验收要求，但当前 GitHub workflow 不自动核验测试记录，发布维护者必须在触发发布前完成。
 
 ## CLI 示例
 
@@ -123,58 +131,44 @@ WPF UI 自动化测试需要 Windows 交互式桌面环境。Windows CI 与标�
 dotnet run --project BiliBiliLocalCacheManager.Cli -- scan --root "D:\BilibiliDownload"
 dotnet run --project BiliBiliLocalCacheManager.Cli -- search "关键词" --root "D:\BilibiliDownload"
 dotnet run --project BiliBiliLocalCacheManager.Cli -- play 187742 --root "D:\BilibiliDownload" --segment 1
-dotnet run --project BiliBiliLocalCacheManager.Cli -- delete 187742 --root "D:\BilibiliDownload" --dry-run
 
-# 默认移入应用回收站（可还原），需要确认或 --yes
+# 默认移入应用回收站（可恢复）
 dotnet run --project BiliBiliLocalCacheManager.Cli -- delete av187742 --root "D:\BilibiliDownload" --yes
 dotnet run --project BiliBiliLocalCacheManager.Cli -- trash list --root "D:\BilibiliDownload"
 dotnet run --project BiliBiliLocalCacheManager.Cli -- trash restore 187742 --root "D:\BilibiliDownload"
 
-# 永久删除必须显式声明
+# Windows 上永久删除必须显式声明；Linux 只允许 --dry-run
 dotnet run --project BiliBiliLocalCacheManager.Cli -- delete 187742 --root "D:\BilibiliDownload" --permanent --yes
 ```
 
-Windows CI 位于 `.github/workflows/ci.yml`，负责还原、Release 构建、非 UI 测试、CLI/WPF 发布和产物上传。
-
 ## 下载与发布
 
-正式发布产物面向 Windows x64，采用自包含单文件发布，目标计算机无需预先安装 .NET：
+正式发布覆盖 `win-x64` 与 `linux-x64`，必须在对应原生操作系统上构建，不支持从 Windows 交叉生成 Linux Electron 包。
 
-- `BiliBiliLocalCacheManager-wpf-v<版本>-win-x64.zip`：桌面版，推荐普通用户使用
-- `BiliBiliLocalCacheManager-cli-v<版本>-win-x64.zip`：命令行版
-- `SHA256SUMS.txt`：两个 ZIP 的 SHA-256 校验值
+- `BiliBiliLocalCacheManager-<版本>-windows-x64.exe`：Windows NSIS 桌面安装器
+- `BiliBiliLocalCacheManager-<版本>-windows-x64.zip`：Windows 免安装桌面包
+- `BiliBiliLocalCacheManager-<版本>-linux-x64.deb`：Linux deb 桌面包
+- `BiliBiliLocalCacheManager-<版本>-linux-x64.rpm`：Linux rpm 桌面包
+- `BiliBiliLocalCacheManager-cli-v<版本>-win-x64.zip`：Windows CLI
+- `BiliBiliLocalCacheManager-cli-v<版本>-linux-x64.tar.gz`：Linux CLI
+- `SHA256SUMS-<rid>.txt`：本地脚本生成的当前平台校验值；GitHub Release 会合并为 `SHA256SUMS.txt`
 
-本地生成发布包：
+当前流水线没有仓库内置的代码签名证书；本地脚本与未配置发布密钥的 CI 所生成的 Windows 可执行文件默认未签名，可能触发 SmartScreen。维护者可通过 GitHub Actions secrets `WINDOWS_CSC_LINK` 与 `WINDOWS_CSC_KEY_PASSWORD` 提供 electron-builder 兼容的证书；一旦配置证书，构建会强制签名主程序、内置 Host 与安装器，签名失败即终止。SHA-256 校验值可检查下载完整性，但不能替代 Authenticode 发布者身份验证。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File ./scripts/build-release.ps1
-```
-
-指定版本或跳过重复测试：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File ./scripts/build-release.ps1 -Version 0.3.0
-powershell -ExecutionPolicy Bypass -File ./scripts/build-release.ps1 -Version 0.3.0 -SkipTests
-```
-
-产物写入 `artifacts/release/`。下载后可在该目录验证校验值：
+在当前原生平台生成对应产物：
 
 ```powershell
-Get-Content SHA256SUMS.txt
-Get-FileHash .\BiliBiliLocalCacheManager-wpf-v0.3.0-win-x64.zip -Algorithm SHA256
+pwsh ./scripts/build-release.ps1 -Version 0.4.0
 ```
 
-推送符合 `v<主版本>.<次版本>.<修订版本>` 格式的标签会触发 `.github/workflows/release.yml`，完成测试、打包并创建 GitHub Release。例如：
+Windows Release 可加 `-RunFfmpegIntegrationTests`；`-SkipTests` 与该选项不能同时使用。产物写入 `artifacts/release/`。推送 `v0.4.0` 形式的标签会触发 `.github/workflows/release.yml`，分别生成 Windows 与 Linux 包，合并校验值并创建 GitHub Release。
 
-```powershell
-git tag v0.3.0
-git push origin v0.3.0
-```
+发布前必须同步更新 `Directory.Build.props`、`BiliBiliLocalCacheManager.Desktop/package.json` 和 `CHANGELOG.md` 中的版本信息。
 
-发布前请同步更新 `Directory.Build.props` 中的 `VersionPrefix` 和 `CHANGELOG.md`。仓库当前尚未附带开源许可证；对外分发前应先明确并加入所选许可证。
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。CLI 与桌面发布产物均包含许可证文本。
 
 ## 仓库历史与隐私说明
 
-本公开仓库由原私有仓库的当前源码快照迁移而来。原私有仓库的提交元数据、Pull Request 及相关记录中包含不应公开的个人隐私信息（包括私人邮箱），因此迁移时删除了旧仓库及全部历史记录，并以当前源码快照重新初始化 Git 历史。
-
-本仓库当前的根提交仅代表公开迁移时的代码状态，不代表项目最初创建或开发的时间。后续提交统一使用 GitHub `noreply` 邮箱；本地推送检查和 GitHub 仓库规则会拒绝不符合该要求的提交。
+本公开仓库由原私有仓库的当前源码快照迁移而来。原私有仓库的历史元数据包含不应公开的个人隐私信息，因此公开迁移时删除旧历史并重新初始化。后续提交统一使用 GitHub `noreply` 邮箱，仓库检查会拒绝不符合要求的提交。

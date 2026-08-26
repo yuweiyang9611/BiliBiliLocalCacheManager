@@ -415,7 +415,7 @@ public sealed partial class PlaybackArtifactStore
             if (string.Equals(
                     Path.TrimEndingDirectorySeparator(current),
                     root,
-                    StringComparison.OrdinalIgnoreCase))
+                    PlaybackFileSystem.PathComparison))
             {
                 break;
             }

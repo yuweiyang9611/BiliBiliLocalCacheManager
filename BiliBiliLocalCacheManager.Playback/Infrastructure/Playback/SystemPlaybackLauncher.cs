@@ -74,11 +74,35 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
     {
         try
         {
-            var startInfo = new ProcessStartInfo
+            ProcessStartInfo startInfo;
+            if (OperatingSystem.IsLinux())
             {
-                FileName = filePath,
-                UseShellExecute = true
-            };
+                startInfo = new ProcessStartInfo
+                {
+                    FileName = "xdg-open",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                startInfo.ArgumentList.Add(filePath);
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                startInfo = new ProcessStartInfo
+                {
+                    FileName = "open",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                startInfo.ArgumentList.Add(filePath);
+            }
+            else
+            {
+                startInfo = new ProcessStartInfo
+                {
+                    FileName = filePath,
+                    UseShellExecute = true
+                };
+            }
 
             Process.Start(startInfo);
             return PlaybackLaunchResult.Success($"已尝试使用系统默认程序打开：{filePath}", "SystemDefault");
@@ -114,18 +138,33 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
 
     private static DiscoveredPlayer? DiscoverPlayer(PlayerKind kind)
     {
-        var candidates = new[]
-        {
-            new DiscoveredPlayer(PlayerKind.Mpv, "mpv", FindExecutable("mpv.exe", new[]
+        var mpvExecutable = OperatingSystem.IsWindows() ? "mpv.exe" : "mpv";
+        var vlcExecutable = OperatingSystem.IsWindows() ? "vlc.exe" : "vlc";
+        var mpvFallbacks = OperatingSystem.IsWindows()
+            ? new[]
             {
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "mpv", "mpv.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "mpv", "mpv.exe")
-            })),
-            new DiscoveredPlayer(PlayerKind.Vlc, "VLC", FindExecutable("vlc.exe", new[]
+            }
+            : Array.Empty<string>();
+        var vlcFallbacks = OperatingSystem.IsWindows()
+            ? new[]
             {
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "VideoLAN", "VLC", "vlc.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "VideoLAN", "VLC", "vlc.exe")
-            }))
+            }
+            : Array.Empty<string>();
+
+        var candidates = new[]
+        {
+            new DiscoveredPlayer(
+                PlayerKind.Mpv,
+                "mpv",
+                FindExecutable(mpvExecutable, mpvFallbacks)),
+            new DiscoveredPlayer(
+                PlayerKind.Vlc,
+                "VLC",
+                FindExecutable(vlcExecutable, vlcFallbacks))
         };
 
         foreach (var candidate in candidates)

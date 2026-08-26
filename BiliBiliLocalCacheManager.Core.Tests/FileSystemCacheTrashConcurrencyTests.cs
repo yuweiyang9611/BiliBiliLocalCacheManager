@@ -8,6 +8,10 @@ public sealed class FileSystemCacheTrashConcurrencyTests
     [Fact]
     public async Task Restore_ShouldWaitForPurgeAndNeverReportPartialRestoreSuccess()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
         var root = CreateTempRoot();
         using var purgeEntered = new ManualResetEventSlim();
         using var allowPurge = new ManualResetEventSlim();
@@ -78,6 +82,10 @@ public sealed class FileSystemCacheTrashConcurrencyTests
     [Fact]
     public async Task Statistics_ShouldWaitForPurgeOnSameRoot()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
         var root = CreateTempRoot();
         using var purgeEntered = new ManualResetEventSlim();
         using var allowPurge = new ManualResetEventSlim();
@@ -140,6 +148,10 @@ public sealed class FileSystemCacheTrashConcurrencyTests
     [Fact]
     public async Task MutationOnDifferentRoot_ShouldNotWaitForBlockedPurge()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
         var firstRoot = CreateTempRoot();
         var secondRoot = CreateTempRoot();
         using var firstPurgeEntered = new ManualResetEventSlim();
@@ -243,6 +255,7 @@ public sealed class FileSystemCacheTrashConcurrencyTests
             // Preserve the original assertion failure during cleanup.
         }
     }
+
 
     private static string CreateTempRoot()
     {

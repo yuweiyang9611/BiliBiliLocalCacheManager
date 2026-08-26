@@ -3,6 +3,7 @@ using BiliBiliLocalCacheManager.Core.Infrastructure.Management;
 
 namespace BiliBiliLocalCacheManager.Core.Tests;
 
+[Trait("Category", "WindowsOnly")]
 public sealed class FileSystemCacheTrashPurgeTests
 {
     [Fact]

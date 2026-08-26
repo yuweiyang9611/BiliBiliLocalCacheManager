@@ -32,8 +32,12 @@ public sealed class FfmpegIntegrationFixture : IDisposable
         BundledFfmpegBootstrapper.EnsureConfigured(bootstrapCancellation.Token);
 
         var binaryFolder = GlobalFFOptions.Current.BinaryFolder;
-        FfmpegPath = Path.Combine(binaryFolder, "ffmpeg.exe");
-        FfprobePath = Path.Combine(binaryFolder, "ffprobe.exe");
+        FfmpegPath = Path.Combine(
+            binaryFolder,
+            BundledFfmpegBootstrapper.FfmpegExecutableName);
+        FfprobePath = Path.Combine(
+            binaryFolder,
+            BundledFfmpegBootstrapper.FfprobeExecutableName);
         if (!File.Exists(FfmpegPath) || !File.Exists(FfprobePath))
         {
             throw new FileNotFoundException(

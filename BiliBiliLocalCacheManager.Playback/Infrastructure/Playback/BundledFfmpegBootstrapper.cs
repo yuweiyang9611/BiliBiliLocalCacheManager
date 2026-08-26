@@ -18,7 +18,8 @@ internal static class BundledFfmpegBootstrapper
     private const string ArchivePathOverrideEnvVar = "BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_ARCHIVE_PATH";
     private const string DownloadUrlOverrideEnvVar = "BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_DOWNLOAD_URL";
     private const string UseSystemFfmpegEnvVar = "BILIBILI_LOCAL_CACHE_MANAGER_USE_SYSTEM_FFMPEG";
-    private const string ProcessMutexName = @"Local\BiliBiliLocalCacheManager.FFmpegBootstrap";
+    private const string WindowsProcessMutexName = @"Local\BiliBiliLocalCacheManager.FFmpegBootstrap";
+    private const string UnixProcessMutexName = "BiliBiliLocalCacheManager.FFmpegBootstrap";
     private static readonly TimeSpan ProcessMutexTimeout = TimeSpan.FromMinutes(10);
 
     private static readonly SemaphoreSlim SyncRoot = new(1, 1);
@@ -28,6 +29,15 @@ internal static class BundledFfmpegBootstrapper
     internal static FfmpegDiagnosticState DiagnosticState { get; } = new();
 
     internal static FfmpegBundleManifest BundleManifest => FfmpegBundleManifest.Current;
+
+    internal static string FfmpegExecutableName =>
+        OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
+
+    internal static string FfprobeExecutableName =>
+        OperatingSystem.IsWindows() ? "ffprobe.exe" : "ffprobe";
+
+    private static string ProcessMutexName =>
+        OperatingSystem.IsWindows() ? WindowsProcessMutexName : UnixProcessMutexName;
 
     public static void EnsureConfigured(
         CancellationToken cancellationToken = default,
@@ -134,13 +144,27 @@ internal static class BundledFfmpegBootstrapper
         cancellationToken.ThrowIfCancellationRequested();
         if (IsArchiveOverrideConfigured())
         {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    "Linux does not use the Windows FFmpeg archive bundle. Install ffmpeg and ffprobe through the distribution package manager instead.");
+            }
+
             return ResolveBundleBinaryFolder(cancellationToken, reportProgress);
         }
 
-        if (IsSystemFfmpegOptInConfigured() &&
+        var shouldUseSystemFfmpeg =
+            !OperatingSystem.IsWindows() || IsSystemFfmpegOptInConfigured();
+        if (shouldUseSystemFfmpeg &&
             TryResolveInstalledBinaryFolder(cancellationToken, out var installedResolution))
         {
             return installedResolution;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new FileNotFoundException(
+                "未找到系统 FFmpeg。请使用发行版包管理器安装 ffmpeg，并确认 ffmpeg 与 ffprobe 均位于 PATH 中。");
         }
 
         return ResolveBundleBinaryFolder(cancellationToken, reportProgress);
@@ -175,7 +199,10 @@ internal static class BundledFfmpegBootstrapper
         CancellationToken cancellationToken,
         out BinaryFolderResolution resolution)
     {
-        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(
+            OperatingSystem.IsWindows()
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal);
         foreach (var directory in EnumeratePathDirectories())
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -208,8 +235,8 @@ internal static class BundledFfmpegBootstrapper
 
     private static bool HasRequiredBinaries(string directory)
     {
-        return File.Exists(Path.Combine(directory, "ffmpeg.exe")) &&
-            File.Exists(Path.Combine(directory, "ffprobe.exe"));
+        return File.Exists(Path.Combine(directory, FfmpegExecutableName)) &&
+            File.Exists(Path.Combine(directory, FfprobeExecutableName));
     }
 
     private static IEnumerable<string> EnumeratePathDirectories()
@@ -245,6 +272,11 @@ internal static class BundledFfmpegBootstrapper
 
     private static IEnumerable<string> GetFallbackBinaryDirectories()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return ["/usr/local/bin", "/usr/bin", "/bin"];
+        }
+
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -801,7 +833,7 @@ internal static class BundledFfmpegBootstrapper
         ArgumentNullException.ThrowIfNull(versionReader);
         try
         {
-            var version = versionReader(Path.Combine(binaryFolder, "ffmpeg.exe"));
+            var version = versionReader(Path.Combine(binaryFolder, FfmpegExecutableName));
             return string.IsNullOrWhiteSpace(version) ? null : version.Trim();
         }
         catch (Exception ex) when (!IsFatalException(ex))
@@ -812,6 +844,37 @@ internal static class BundledFfmpegBootstrapper
 
     private static string? ReadFfmpegVersionFromFile(string executablePath)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = executablePath,
+                Arguments = "-version",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            });
+            if (process is null)
+            {
+                return null;
+            }
+
+            var firstLine = process.StandardOutput.ReadLine();
+            if (!process.WaitForExit((int)TimeSpan.FromSeconds(3).TotalMilliseconds))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                }
+            }
+
+            return firstLine;
+        }
+
         var versionInfo = FileVersionInfo.GetVersionInfo(executablePath);
         return string.IsNullOrWhiteSpace(versionInfo.ProductVersion)
             ? versionInfo.FileVersion

@@ -158,6 +158,13 @@ public sealed class DeleteCommand : ICommand
             return 0;
         }
 
+        if (!OperatingSystem.IsWindows())
+        {
+            CliPrinter.WriteError(
+                "当前 Linux 版本已禁用 --permanent：尚未实现可抵御符号链接替换竞态的 Unix 句柄级永久删除。请使用默认的应用回收站流程。");
+            return 1;
+        }
+
         var probe = manager.DeleteByAvid(root, avid, dryRun: true);
         if (!probe.Found)
         {

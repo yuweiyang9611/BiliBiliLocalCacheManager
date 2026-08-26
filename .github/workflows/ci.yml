@@ -2,9 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 permissions:
   contents: read
@@ -12,7 +12,7 @@ permissions:
 jobs:
   commit-email-privacy:
     name: commit-email-privacy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout full history
@@ -29,7 +29,6 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
-
           zero_oid="0000000000000000000000000000000000000000"
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             range="$PR_BASE_SHA..$PR_HEAD_SHA"
@@ -43,49 +42,79 @@ jobs:
           for commit_oid in $(git rev-list "$range"); do
             author_email="$(git show -s --format=%ae "$commit_oid")"
             committer_email="$(git show -s --format=%ce "$commit_oid")"
-
             case "$author_email" in
               noreply@github.com|*@users.noreply.github.com) ;;
-              *)
-                echo "::error::Commit $commit_oid uses a non-noreply author email."
-                failed=1
-                ;;
+              *) echo "::error::Commit $commit_oid uses a non-noreply author email."; failed=1 ;;
             esac
-
             case "$committer_email" in
               noreply@github.com|*@users.noreply.github.com) ;;
-              *)
-                echo "::error::Commit $commit_oid uses a non-noreply committer email."
-                failed=1
-                ;;
+              *) echo "::error::Commit $commit_oid uses a non-noreply committer email."; failed=1 ;;
             esac
           done
-
           exit "$failed"
 
-  build-test-publish:
+  build-test-package:
+    name: build-test-package-${{ matrix.rid }}
     needs: commit-email-privacy
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            rid: win-x64
+            desktop_script: dist:win
+            host_executable: BiliBiliLocalCacheManager.Desktop.Host.exe
+          - os: ubuntu-24.04
+            rid: linux-x64
+            desktop_script: dist:linux
+            host_executable: BiliBiliLocalCacheManager.Desktop.Host
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET
+      - name: Setup .NET 10.0.400
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.3xx
+          dotnet-version: 10.0.400
 
-      - name: Restore
-        run: dotnet restore BiliBiliLocalCacheManager.slnx
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: BiliBiliLocalCacheManager.Desktop/package-lock.json
 
-      - name: Build
+      - name: Install Linux packaging and Xvfb dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            ffmpeg \
+            libasound2t64 \
+            libgbm1 \
+            libgtk-3-0t64 \
+            libnss3 \
+            rpm \
+            xauth \
+            xdg-utils \
+            xvfb
+
+      - name: Restore .NET
+        run: dotnet restore BiliBiliLocalCacheManager.slnx --nologo
+
+      - name: Build .NET
         run: dotnet build BiliBiliLocalCacheManager.slnx --configuration Release --no-restore --nologo
 
-      - name: Test non-UI suites
-        run: dotnet test BiliBiliLocalCacheManager.slnx --configuration Release --no-build --nologo --filter "Category!=UI&Category!=FFmpegIntegration"
+      - name: Test .NET
+        env:
+          DOTNET_TEST_FILTER: ${{ runner.os == 'Linux' && 'Category!=FFmpegIntegration&Category!=WindowsOnly' || 'Category!=FFmpegIntegration' }}
+        run: dotnet test BiliBiliLocalCacheManager.slnx --configuration Release --no-build --no-restore --nologo --filter "${{ env.DOTNET_TEST_FILTER }}"
 
-      - name: Cache pinned FFmpeg
+      - name: Cache pinned Windows FFmpeg
+        if: runner.os == 'Windows'
         uses: actions/cache@v4
         with:
           path: |
@@ -93,29 +122,230 @@ jobs:
             ~/AppData/Local/BiliBiliLocalCacheManager/ffmpeg
           key: ${{ runner.os }}-ffmpeg-${{ hashFiles('ffmpeg-bundle.json') }}
 
-      - name: Prepare manifest-pinned FFmpeg archive
+      - name: Prepare manifest-pinned Windows FFmpeg
+        if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/prepare-ffmpeg-integration.ps1 -EnvironmentFile $env:GITHUB_ENV
 
-      - name: Test real FFmpeg integration
+      - name: Test real FFmpeg integration on Windows
+        if: runner.os == 'Windows'
         env:
           BILIBILI_RUN_FFMPEG_INTEGRATION_TESTS: "1"
-        run: dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj --configuration Release --no-build --nologo --filter "Category=FFmpegIntegration"
+        run: dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj --configuration Release --no-build --no-restore --nologo --filter "Category=FFmpegIntegration"
 
-      - name: Publish CLI
-        run: dotnet publish BiliBiliLocalCacheManager.Cli/BiliBiliLocalCacheManager.Cli.csproj --configuration Release --no-build --output artifacts/cli
+      - name: Install Electron dependencies
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        run: npm ci
 
-      - name: Publish WPF
-        run: dotnet publish BiliBiliLocalCacheManager.Wpf/BiliBiliLocalCacheManager.Wpf.csproj --configuration Release --no-build --output artifacts/wpf
+      - name: Check Electron
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        run: npm run check
 
-      - name: Upload CLI artifact
+      - name: Publish self-contained CLI and Desktop Host
+        shell: pwsh
+        run: |
+          $rid = "${{ matrix.rid }}"
+          $common = @(
+            "--configuration", "Release",
+            "--runtime", $rid,
+            "--self-contained", "true",
+            "--nologo",
+            "-p:PublishSingleFile=true",
+            "-p:IncludeNativeLibrariesForSelfExtract=true",
+            "-p:PublishTrimmed=false",
+            "-p:DebugType=None",
+            "-p:DebugSymbols=false"
+          )
+          dotnet publish BiliBiliLocalCacheManager.Cli/BiliBiliLocalCacheManager.Cli.csproj @common --output "artifacts/ci/$rid/cli"
+          if ($LASTEXITCODE -ne 0) { throw "CLI publish failed." }
+          dotnet publish BiliBiliLocalCacheManager.Desktop.Host/BiliBiliLocalCacheManager.Desktop.Host.csproj @common --output BiliBiliLocalCacheManager.Desktop.Host/bin/Release/net10.0/publish
+          if ($LASTEXITCODE -ne 0) { throw "Desktop Host publish failed." }
+
+      - name: Smoke Electron on Windows
+        if: runner.os == 'Windows'
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        shell: pwsh
+        env:
+          CACHE_MANAGER_HOST_PATH: ${{ github.workspace }}\BiliBiliLocalCacheManager.Desktop.Host\bin\Release\net10.0\publish\${{ matrix.host_executable }}
+        run: npm run smoke
+
+      - name: Smoke Electron on Ubuntu Xvfb
+        if: runner.os == 'Linux'
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        shell: bash
+        env:
+          CACHE_MANAGER_HOST_PATH: ${{ github.workspace }}/BiliBiliLocalCacheManager.Desktop.Host/bin/Release/net10.0/publish/${{ matrix.host_executable }}
+        run: xvfb-run --auto-servernum npm run smoke
+
+      - name: Package Electron
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        shell: pwsh
+        env:
+          DESKTOP_HOST_PUBLISH_DIR: ${{ github.workspace }}/BiliBiliLocalCacheManager.Desktop.Host/bin/Release/net10.0/publish
+          CSC_LINK: ${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
+        run: npm run "${{ matrix.desktop_script }}"
+
+      - name: Verify packaged Electron fuses
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        shell: pwsh
+        run: |
+          $executable = if ($IsWindows) {
+            "release/win-unpacked/哔哩哔哩本地缓存管理器.exe"
+          }
+          else {
+            "release/linux-unpacked/bilibili-local-cache-manager"
+          }
+          $output = @(& npx --no-install electron-fuses read --app $executable 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "Electron fuse inspection failed.`n$($output -join "`n")" }
+          $text = $output -join "`n"
+          $expectedFuses = @(
+            "RunAsNode is Disabled",
+            "EnableCookieEncryption is Enabled",
+            "EnableNodeOptionsEnvironmentVariable is Disabled",
+            "EnableNodeCliInspectArguments is Disabled",
+            "EnableEmbeddedAsarIntegrityValidation is Enabled",
+            "OnlyLoadAppFromAsar is Enabled",
+            "LoadBrowserProcessSpecificV8Snapshot is Disabled",
+            "GrantFileProtocolExtraPrivileges is Disabled",
+            "WasmTrapHandlers is Enabled"
+          )
+          $reportedFuses = @($output | ForEach-Object { [string]$_ } | Where-Object {
+            $_ -match '^\s+\S+ is (Enabled|Disabled|Removed|Inherited)$'
+          })
+          if ($reportedFuses.Count -ne $expectedFuses.Count) {
+            throw "Expected $($expectedFuses.Count) named Electron fuses, found $($reportedFuses.Count).`n$text"
+          }
+          foreach ($expected in $expectedFuses) {
+            if ($text -notmatch [Regex]::Escape($expected)) {
+              throw "Missing Electron fuse state: $expected`n$text"
+            }
+          }
+
+      - name: Smoke packaged Electron on Windows
+        if: runner.os == 'Windows'
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        shell: pwsh
+        run: |
+          $env:CACHE_MANAGER_HOST_PATH = Join-Path $env:RUNNER_TEMP "must-not-run-host.exe"
+          $env:CACHE_MANAGER_DOTNET_PATH = Join-Path $env:RUNNER_TEMP "must-not-run-dotnet.exe"
+          $process = Start-Process `
+            -FilePath ".\release\win-unpacked\哔哩哔哩本地缓存管理器.exe" `
+            -ArgumentList "--smoke-test" `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged Electron smoke failed with exit code $($process.ExitCode)."
+          }
+
+      - name: Smoke packaged Electron on Ubuntu Xvfb
+        if: runner.os == 'Linux'
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        shell: bash
+        run: |
+          CACHE_MANAGER_HOST_PATH="$RUNNER_TEMP/must-not-run-host" \
+          CACHE_MANAGER_DOTNET_PATH="$RUNNER_TEMP/must-not-run-dotnet" \
+            xvfb-run --auto-servernum ./release/linux-unpacked/bilibili-local-cache-manager --smoke-test
+
+      - name: Smoke final Windows zip and NSIS packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = [string](Get-Content BiliBiliLocalCacheManager.Desktop/package.json -Raw | ConvertFrom-Json).version
+          ./scripts/test-windows-electron-packages.ps1 -Version $version
+
+      - name: Collect native packages
+        shell: pwsh
+        run: |
+          $rid = "${{ matrix.rid }}"
+          $desktopVersion = [string](Get-Content BiliBiliLocalCacheManager.Desktop/package.json -Raw | ConvertFrom-Json).version
+          $destination = "artifacts/ci/$rid/desktop"
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          if ($rid -eq "win-x64") {
+            foreach ($extension in @("exe", "zip")) {
+              $expected = "BiliBiliLocalCacheManager.Desktop/release/BiliBiliLocalCacheManager-$desktopVersion-windows-x64.$extension"
+              if (-not (Test-Path -LiteralPath $expected -PathType Leaf)) { throw "Missing $expected" }
+              Copy-Item -LiteralPath $expected -Destination $destination
+            }
+          }
+          else {
+            foreach ($extension in @("deb", "rpm")) {
+              $expected = "BiliBiliLocalCacheManager.Desktop/release/BiliBiliLocalCacheManager-$desktopVersion-linux-x64.$extension"
+              if (-not (Test-Path -LiteralPath $expected -PathType Leaf)) { throw "Missing $expected" }
+              Copy-Item -LiteralPath $expected -Destination $destination
+            }
+          }
+          Copy-Item README.md, CHANGELOG.md, LICENSE -Destination "artifacts/ci/$rid/cli"
+
+      - name: Upload native package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BiliBiliLocalCacheManager-cli-framework-dependent
-          path: artifacts/cli
+          name: BiliBiliLocalCacheManager-${{ matrix.rid }}
+          path: artifacts/ci/${{ matrix.rid }}
+          if-no-files-found: error
 
-      - name: Upload WPF artifact
-        uses: actions/upload-artifact@v4
+  linux-distro-xvfb-smoke:
+    name: packaged-x11-smoke-${{ matrix.name }}
+    needs: build-test-package
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian-13
+            image: debian:13
+            family: debian
+          - name: fedora-43
+            image: fedora:43
+            family: fedora
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - name: Bootstrap Debian 13
+        if: matrix.family == 'debian'
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --yes \
+            ca-certificates curl ffmpeg \
+            libasound2t64 libgbm1 libgtk-3-0t64 libicu76 libnss3 libssl3t64 \
+            xauth xdg-utils xvfb zlib1g
+
+      - name: Bootstrap Fedora 43
+        if: matrix.family == 'fedora'
+        shell: bash
+        run: |
+          dnf install --assumeyes \
+            alsa-lib ca-certificates curl ffmpeg-free findutils gtk3 libicu \
+            mesa-libgbm nss openssl-libs procps-ng xdg-utils \
+            xorg-x11-server-Xvfb xorg-x11-xauth zlib
+
+      - name: Download native Linux package
+        uses: actions/download-artifact@v4
         with:
-          name: BiliBiliLocalCacheManager-wpf-framework-dependent
-          path: artifacts/wpf
+          name: BiliBiliLocalCacheManager-linux-x64
+          path: artifacts
+
+      - name: Install deb package on Debian 13
+        if: matrix.family == 'debian'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb_path="$(find artifacts/desktop -maxdepth 1 -type f -name 'BiliBiliLocalCacheManager-*-linux-x64.deb' -print -quit)"
+          test -n "$deb_path"
+          DEBIAN_FRONTEND=noninteractive apt-get install --yes "./$deb_path"
+
+      - name: Install rpm package on Fedora 43
+        if: matrix.family == 'fedora'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rpm_path="$(find artifacts/desktop -maxdepth 1 -type f -name 'BiliBiliLocalCacheManager-*-linux-x64.rpm' -print -quit)"
+          test -n "$rpm_path"
+          dnf install --assumeyes "$rpm_path"
+
+      - name: Smoke installed Electron package under Xvfb
+        shell: bash
+        run: xvfb-run --auto-servernum bilibili-local-cache-manager --no-sandbox --smoke-test

@@ -65,6 +65,10 @@ public sealed class CliDeleteSafetyTests
     [Fact]
     public void Delete_ShouldDeletePermanently_OnlyWithExplicitFlag()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
         var root = CreateTempRoot();
         try
         {
@@ -181,6 +185,10 @@ public sealed class CliDeleteSafetyTests
     [Fact]
     public void TrashPurge_ShouldRequireConfirmation_InNonInteractiveShell()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
         var root = CreateTempRoot();
         try
         {
@@ -208,6 +216,38 @@ public sealed class CliDeleteSafetyTests
         Assert.Equal(1, new TrashCommand().Execute([]));
         Assert.Equal(0, new TrashCommand().Execute(["--help"]));
     }
+
+    [Fact]
+    public void PermanentDeleteAndTrashPurge_ShouldFailClosed_OnLinux()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTempRoot();
+        try
+        {
+            CreateEntry(root, avid: 100);
+            var cacheDirectory = Path.Combine(root, "100");
+
+            Assert.Equal(
+                1,
+                new DeleteCommand().Execute(
+                    ["100", "--root", root, "--permanent", "--yes"]));
+            Assert.True(Directory.Exists(cacheDirectory));
+
+            Assert.Equal(0, new DeleteCommand().Execute(["100", "--root", root, "--yes"]));
+            Assert.Single(new FileSystemCacheTrashService().ListEntries(root));
+            Assert.Equal(1, new TrashCommand().Execute(["purge", "--root", root, "--yes"]));
+            Assert.Single(new FileSystemCacheTrashService().ListEntries(root));
+        }
+        finally
+        {
+            SafeDelete(root);
+        }
+    }
+
 
     [Fact]
     public void TrashStats_ShouldSucceed()
