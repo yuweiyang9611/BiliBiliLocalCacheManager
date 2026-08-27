@@ -79,6 +79,27 @@ function Invoke-PackagedElectronSmokeTest {
         throw "Packaged Electron executable is missing: $ExecutablePath"
     }
 
+    $isLinuxPlatform = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [Runtime.InteropServices.OSPlatform]::Linux)
+    if ($isLinuxPlatform -and $env:GITHUB_ACTIONS -eq 'true') {
+        # GitHub-hosted Linux runners do not preserve the root ownership required
+        # by Chromium's SUID sandbox when electron-builder creates linux-unpacked.
+        $sandboxPath = Join-Path (Split-Path -Parent $ExecutablePath) 'chrome-sandbox'
+        if (-not (Test-Path -LiteralPath $sandboxPath -PathType Leaf)) {
+            throw "Packaged Electron SUID sandbox is missing: $sandboxPath"
+        }
+
+        & sudo chown root:root -- $sandboxPath
+        Assert-NativeCommandSucceeded 'Electron SUID sandbox ownership configuration'
+        & sudo chmod 4755 -- $sandboxPath
+        Assert-NativeCommandSucceeded 'Electron SUID sandbox mode configuration'
+        $sandboxState = [string](& stat '--format=%U:%G %a' -- $sandboxPath)
+        Assert-NativeCommandSucceeded 'Electron SUID sandbox state verification'
+        if ($sandboxState.Trim() -ne 'root:root 4755') {
+            throw "Packaged Electron SUID sandbox has unexpected ownership or mode: $sandboxState"
+        }
+    }
+
     $previousHostOverride = $env:CACHE_MANAGER_HOST_PATH
     $previousDotnetOverride = $env:CACHE_MANAGER_DOTNET_PATH
     $missingOverrideRoot = Join-Path `

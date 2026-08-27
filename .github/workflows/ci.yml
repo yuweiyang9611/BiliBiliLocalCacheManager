@@ -137,6 +137,16 @@ jobs:
         working-directory: BiliBiliLocalCacheManager.Desktop
         run: npm ci
 
+      - name: Configure Electron SUID sandbox for source smoke
+        if: runner.os == 'Linux'
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        shell: bash
+        run: |
+          sandbox_path=node_modules/electron/dist/chrome-sandbox
+          sudo chown root:root "$sandbox_path"
+          sudo chmod 4755 "$sandbox_path"
+          test "$(stat --format='%U:%G %a' "$sandbox_path")" = "root:root 4755"
+
       - name: Check Electron
         working-directory: BiliBiliLocalCacheManager.Desktop
         run: npm run check
@@ -185,6 +195,16 @@ jobs:
           CSC_LINK: ${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_LINK || '' }}
           CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
         run: npm run "${{ matrix.desktop_script }}"
+
+      - name: Configure Electron SUID sandbox for packaged smoke
+        if: runner.os == 'Linux'
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        shell: bash
+        run: |
+          sandbox_path=release/linux-unpacked/chrome-sandbox
+          sudo chown root:root "$sandbox_path"
+          sudo chmod 4755 "$sandbox_path"
+          test "$(stat --format='%U:%G %a' "$sandbox_path")" = "root:root 4755"
 
       - name: Verify packaged Electron fuses
         working-directory: BiliBiliLocalCacheManager.Desktop
