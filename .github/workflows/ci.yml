@@ -137,6 +137,10 @@ jobs:
         working-directory: BiliBiliLocalCacheManager.Desktop
         run: npm ci
 
+      - name: Install Electron runtime
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        run: node -e "require('electron')"
+
       - name: Configure Electron SUID sandbox for source smoke
         if: runner.os == 'Linux'
         working-directory: BiliBiliLocalCacheManager.Desktop
