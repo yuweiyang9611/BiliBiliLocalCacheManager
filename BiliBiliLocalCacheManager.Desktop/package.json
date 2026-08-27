@@ -23,9 +23,9 @@
     "check": "npm run typecheck && npm run test && npm run build",
     "smoke": "electron . --smoke-test",
     "pack": "npm run build && electron-builder --config electron-builder.config.cjs --dir",
-    "dist": "npm run build && electron-builder --config electron-builder.config.cjs",
-    "dist:win": "npm run build && electron-builder --config electron-builder.config.cjs --win nsis zip --x64",
-    "dist:linux": "npm run build && electron-builder --config electron-builder.config.cjs --linux deb rpm --x64"
+    "dist": "npm run build && electron-builder --config electron-builder.config.cjs --publish never",
+    "dist:win": "npm run build && electron-builder --config electron-builder.config.cjs --win nsis zip --x64 --publish never",
+    "dist:linux": "npm run build && electron-builder --config electron-builder.config.cjs --linux deb rpm --x64 --publish never"
   },
   "dependencies": {
     "react": "19.2.8",
