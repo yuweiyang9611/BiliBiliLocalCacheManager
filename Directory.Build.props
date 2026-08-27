@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <VersionPrefix>0.4.0</VersionPrefix>
+    <VersionPrefix>0.4.0-rc.1</VersionPrefix>
     <Product>BiliBili Local Cache Manager</Product>
     <Description>Scan, search, play, and safely manage local Bilibili cache files.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

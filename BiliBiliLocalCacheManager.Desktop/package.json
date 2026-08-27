@@ -1,6 +1,6 @@
 {
   "name": "bilibili-local-cache-manager-desktop",
-  "version": "0.4.0",
+  "version": "0.4.0-rc.1",
   "private": true,
   "description": "Bilibili local cache manager desktop client",
   "author": "BiliBiliLocalCacheManager contributors",
