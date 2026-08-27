@@ -100,7 +100,7 @@ public sealed partial class PlaybackArtifactStore
                     bufferSize: 1,
                     FileOptions.DeleteOnClose);
             }
-            catch (IOException ex) when ((ex.HResult & 0xFFFF) is 32 or 33)
+            catch (IOException ex) when (IsCrossProcessLockContention(ex))
             {
                 if (!waitReported)
                 {
@@ -121,6 +121,13 @@ public sealed partial class PlaybackArtifactStore
                 }
             }
         }
+    }
+
+    private static bool IsCrossProcessLockContention(IOException exception)
+    {
+        var nativeErrorCode = exception.HResult & 0xFFFF;
+        return nativeErrorCode is 32 or 33 ||
+               (OperatingSystem.IsLinux() && nativeErrorCode == 11);
     }
 
     private bool DeleteStaleBuildFileIfUnlocked(

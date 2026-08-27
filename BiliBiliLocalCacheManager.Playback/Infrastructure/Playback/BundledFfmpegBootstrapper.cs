@@ -21,6 +21,7 @@ internal static class BundledFfmpegBootstrapper
     private const string WindowsProcessMutexName = @"Local\BiliBiliLocalCacheManager.FFmpegBootstrap";
     private const string UnixProcessMutexName = "BiliBiliLocalCacheManager.FFmpegBootstrap";
     private static readonly TimeSpan ProcessMutexTimeout = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan ProcessMutexCancellationPollInterval = TimeSpan.FromMilliseconds(100);
 
     private static readonly SemaphoreSlim SyncRoot = new(1, 1);
     private static readonly HttpClient HttpClient = CreateHttpClient();
@@ -117,23 +118,42 @@ internal static class BundledFfmpegBootstrapper
     {
         ArgumentNullException.ThrowIfNull(processMutex);
         cancellationToken.ThrowIfCancellationRequested();
-
-        try
+        if (timeout < Timeout.InfiniteTimeSpan || timeout > TimeSpan.FromMilliseconds(int.MaxValue))
         {
-            var waitResult = WaitHandle.WaitAny(
-                new WaitHandle[] { processMutex, cancellationToken.WaitHandle },
-                timeout);
-            return waitResult switch
-            {
-                0 => true,
-                1 => throw new OperationCanceledException(cancellationToken),
-                WaitHandle.WaitTimeout => false,
-                _ => throw new InvalidOperationException($"Unexpected wait result: {waitResult}.")
-            };
+            throw new ArgumentOutOfRangeException(nameof(timeout));
         }
-        catch (AbandonedMutexException)
+
+        var waitTimer = Stopwatch.StartNew();
+        var waitIndefinitely = timeout == Timeout.InfiniteTimeSpan;
+        while (true)
         {
-            return true;
+            cancellationToken.ThrowIfCancellationRequested();
+            var waitDuration = ProcessMutexCancellationPollInterval;
+            if (!waitIndefinitely)
+            {
+                var remaining = timeout - waitTimer.Elapsed;
+                waitDuration = remaining <= TimeSpan.Zero
+                    ? TimeSpan.Zero
+                    : TimeSpan.FromTicks(Math.Min(remaining.Ticks, waitDuration.Ticks));
+            }
+
+            try
+            {
+                if (processMutex.WaitOne(waitDuration))
+                {
+                    return true;
+                }
+            }
+            catch (AbandonedMutexException)
+            {
+                return true;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!waitIndefinitely && waitTimer.Elapsed >= timeout)
+            {
+                return false;
+            }
         }
     }
 
