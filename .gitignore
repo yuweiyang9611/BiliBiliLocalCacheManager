@@ -3,6 +3,7 @@ obj/
 /packages/
 node_modules/
 dist/
+release/
 .npm-cache/
 .ci-cache/
 artifacts/

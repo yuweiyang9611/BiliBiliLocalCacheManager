@@ -21,6 +21,16 @@ public sealed partial class FileSystemCacheTrashService
             return new CacheTrashPurgeResult(0, 0, 0, 0, null);
         }
 
+        if (!OperatingSystem.IsWindows())
+        {
+            return new CacheTrashPurgeResult(
+                0,
+                0,
+                1,
+                0,
+                "当前 Linux 版本已禁用永久清空回收站：尚未实现与 Windows 物理目录句柄同等级的防符号链接竞态保护。请先还原需要保留的条目，再使用发行版文件管理器自行处理回收站目录。");
+        }
+
         using var trashRootLease = OpenPhysicalDirectoryLease(
             trashRoot,
             "The application trash directory",
@@ -557,6 +567,25 @@ public sealed partial class FileSystemCacheTrashService
 
     private static FileStream OpenStateFileLease(string path, string description)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            var attributes = File.GetAttributes(path);
+            if (attributes.HasFlag(FileAttributes.Directory) ||
+                attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                throw new InvalidDataException(
+                    $"{description} must be a physical file.");
+            }
+
+            return new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 4096,
+                FileOptions.SequentialScan);
+        }
+
         var handle = OpenWindowsHandle(
             path,
             GenericRead | DeleteAccess | FileReadAttributes,

@@ -40,25 +40,22 @@ public sealed partial class FileSystemCacheTrashService
         var mutexAcquired = false;
         try
         {
-            if (OperatingSystem.IsWindows())
+            processMutex = new Mutex(
+                initiallyOwned: false,
+                GetMutationMutexName(rootKey));
+            try
             {
-                processMutex = new Mutex(
-                    initiallyOwned: false,
-                    GetMutationMutexName(rootKey));
-                try
-                {
-                    mutexAcquired = processMutex.WaitOne(MutationLockTimeout);
-                }
-                catch (AbandonedMutexException)
-                {
-                    mutexAcquired = true;
-                }
+                mutexAcquired = processMutex.WaitOne(MutationLockTimeout);
+            }
+            catch (AbandonedMutexException)
+            {
+                mutexAcquired = true;
+            }
 
-                if (!mutexAcquired)
-                {
-                    throw new TimeoutException(
-                        "Timed out waiting for another process to finish a cache-trash operation on the same root.");
-                }
+            if (!mutexAcquired)
+            {
+                throw new TimeoutException(
+                    "Timed out waiting for another process to finish a cache-trash operation on the same root.");
             }
 
             AfterMutationLockAcquiredForTesting?.Invoke(operation, normalizedRoot);
@@ -94,7 +91,10 @@ public sealed partial class FileSystemCacheTrashService
     private static string GetMutationMutexName(string normalizedRootKey)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedRootKey));
-        return $@"Local\BiliBiliLocalCacheManager.Trash.{Convert.ToHexString(hash)}";
+        var prefix = OperatingSystem.IsWindows()
+            ? @"Local\BiliBiliLocalCacheManager.Trash."
+            : "BiliBiliLocalCacheManager.Trash.";
+        return $"{prefix}{Convert.ToHexString(hash)}";
     }
 
     private sealed class MutationTransactionLease(

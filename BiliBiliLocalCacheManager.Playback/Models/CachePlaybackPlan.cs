@@ -86,7 +86,7 @@ public sealed class CachePlaybackPlan
 
         var fileList = mediaFiles
             .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(PlaybackFileSystem.PathComparer)
             .ToList();
 
         if (fileList.Count == 0)

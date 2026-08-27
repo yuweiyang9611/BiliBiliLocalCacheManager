@@ -8,9 +8,50 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  release:
-    runs-on: windows-latest
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tag and shared versions
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
+            throw "Release tags must look like v0.4.0 or v0.4.0-beta.1"
+          }
+          $version = $tag.TrimStart('v')
+          [xml]$props = Get-Content Directory.Build.props -Raw
+          $dotnetVersion = [string]$props.Project.PropertyGroup.VersionPrefix
+          $desktopVersion = [string](Get-Content BiliBiliLocalCacheManager.Desktop/package.json -Raw | ConvertFrom-Json).version
+          if (-not [string]::Equals($version, $dotnetVersion, [StringComparison]::Ordinal) -or
+              -not [string]::Equals($version, $desktopVersion, [StringComparison]::Ordinal)) {
+            throw "Tag $version, Directory.Build.props $dotnetVersion, and Desktop package $desktopVersion must match."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+  build-native:
+    name: release-${{ matrix.rid }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            rid: win-x64
+          - os: ubuntu-24.04
+            rid: linux-x64
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -18,19 +59,36 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup .NET
+      - name: Setup .NET 10.0.400
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.3xx
+          dotnet-version: 10.0.400
 
-      - name: Validate release tag
-        shell: pwsh
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: BiliBiliLocalCacheManager.Desktop/package-lock.json
+
+      - name: Install Linux release dependencies
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
-          if ("${{ github.ref_name }}" -notmatch '^v\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
-            throw "Release tags must look like v0.3.0 or v0.3.0-beta.1"
-          }
+          sudo apt-get update
+          sudo apt-get install --yes \
+            ffmpeg \
+            libasound2t64 \
+            libgbm1 \
+            libgtk-3-0t64 \
+            libnss3 \
+            rpm \
+            xauth \
+            xdg-utils \
+            xvfb
 
-      - name: Cache pinned FFmpeg
+      - name: Cache pinned Windows FFmpeg
+        if: runner.os == 'Windows'
         uses: actions/cache@v4
         with:
           path: |
@@ -38,21 +96,90 @@ jobs:
             ~/AppData/Local/BiliBiliLocalCacheManager/ffmpeg
           key: ${{ runner.os }}-ffmpeg-${{ hashFiles('ffmpeg-bundle.json') }}
 
-      - name: Prepare manifest-pinned FFmpeg archive
-        shell: pwsh
-        run: ./scripts/prepare-ffmpeg-integration.ps1 -EnvironmentFile $env:GITHUB_ENV
-
-      - name: Build release artifacts
-        shell: pwsh
-        run: ./scripts/build-release.ps1 -Version "${{ github.ref_name }}" -RunFfmpegIntegrationTests
-
-      - name: Publish GitHub release
+      - name: Build Windows release artifacts
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: ./scripts/build-release.ps1 -Version "${{ needs.validate.outputs.version }}" -RunFfmpegIntegrationTests
+
+      - name: Smoke final Windows zip and NSIS packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-windows-electron-packages.ps1 -Version "${{ needs.validate.outputs.version }}" -PackageDirectory artifacts/release
+
+      - name: Build Linux release artifacts under Xvfb
+        if: runner.os == 'Linux'
+        shell: bash
+        run: xvfb-run --auto-servernum pwsh -File ./scripts/build-release.ps1 -Version "${{ needs.validate.outputs.version }}"
+
+      - name: Upload native release payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.rid }}
+          path: artifacts/release
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, build-native]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download native release payloads
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts/release
+          merge-multiple: true
+
+      - name: Create unified checksums
+        shell: bash
+        working-directory: artifacts/release
         run: |
-          $assets = @(
-            Get-ChildItem -LiteralPath artifacts/release -Filter '*.zip' | Select-Object -ExpandProperty FullName
-            (Resolve-Path -LiteralPath artifacts/release/SHA256SUMS.txt).Path
+          set -euo pipefail
+          find . -maxdepth 1 -type f -name 'SHA256SUMS-*.txt' -delete
+          version="${{ needs.validate.outputs.version }}"
+          expected=(
+            "BiliBiliLocalCacheManager-cli-v${version}-linux-x64.tar.gz"
+            "BiliBiliLocalCacheManager-cli-v${version}-win-x64.zip"
+            "BiliBiliLocalCacheManager-${version}-linux-x64.deb"
+            "BiliBiliLocalCacheManager-${version}-linux-x64.rpm"
+            "BiliBiliLocalCacheManager-${version}-windows-x64.exe"
+            "BiliBiliLocalCacheManager-${version}-windows-x64.zip"
           )
-          gh release create "${{ github.ref_name }}" @assets --verify-tag --title "BiliBili Local Cache Manager ${{ github.ref_name }}" --generate-notes
+          mapfile -d '' expected_sorted < <(printf '%s\0' "${expected[@]}" | sort -z)
+          mapfile -d '' payloads < <(find . -maxdepth 1 -type f -printf '%f\0' | sort -z)
+          if [ "${#payloads[@]}" -ne "${#expected_sorted[@]}" ]; then
+            printf 'Expected %s release payloads, found %s\n' "${#expected_sorted[@]}" "${#payloads[@]}" >&2
+            printf 'Actual payload: %s\n' "${payloads[@]}" >&2
+            exit 1
+          fi
+          for index in "${!expected_sorted[@]}"; do
+            if [[ "${payloads[$index]}" != "${expected_sorted[$index]}" ]]; then
+              printf 'Release payload mismatch: expected %s, found %s\n' \
+                "${expected_sorted[$index]}" "${payloads[$index]}" >&2
+              exit 1
+            fi
+          done
+          sha256sum "${payloads[@]}" > SHA256SUMS.txt
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find artifacts/release -maxdepth 1 -type f -print0 | sort -z)
+          release_flags=()
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            --repo "$RELEASE_REPOSITORY" \
+            --verify-tag \
+            --title "BiliBili Local Cache Manager $RELEASE_TAG" \
+            "${release_flags[@]}" \
+            --generate-notes

@@ -2,9 +2,9 @@
   <Project Path="BiliBiliLocalCacheManager.Core/BiliBiliLocalCacheManager.Core.csproj" />
   <Project Path="BiliBiliLocalCacheManager.Playback/BiliBiliLocalCacheManager.Playback.csproj" />
   <Project Path="BiliBiliLocalCacheManager.Cli/BiliBiliLocalCacheManager.Cli.csproj" />
-  <Project Path="BiliBiliLocalCacheManager.Wpf/BiliBiliLocalCacheManager.Wpf.csproj" />
+  <Project Path="BiliBiliLocalCacheManager.Desktop.Host/BiliBiliLocalCacheManager.Desktop.Host.csproj" />
+  <Project Path="BiliBiliLocalCacheManager.Desktop.Host.Tests/BiliBiliLocalCacheManager.Desktop.Host.Tests.csproj" />
   <Project Path="BiliBiliLocalCacheManager.Core.Tests/BiliBiliLocalCacheManager.Core.Tests.csproj" />
   <Project Path="BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj" />
   <Project Path="BiliBiliLocalCacheManager.Cli.Tests/BiliBiliLocalCacheManager.Cli.Tests.csproj" />
-  <Project Path="BiliBiliLocalCacheManager.Wpf.Tests/BiliBiliLocalCacheManager.Wpf.Tests.csproj" />
 </Solution>

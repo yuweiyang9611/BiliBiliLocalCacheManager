@@ -10,7 +10,7 @@ namespace BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
 {
     private static readonly ConcurrentDictionary<string, PathLock> PathLocks =
-        new(StringComparer.OrdinalIgnoreCase);
+        new(PlaybackFileSystem.PathComparer);
 
     public static PlaybackArtifactStore Shared { get; } = new();
 
@@ -84,7 +84,7 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
                     if (!string.Equals(
                             outputPath,
                             BuildOutputPath(plan, normalizedExtension),
-                            StringComparison.OrdinalIgnoreCase))
+                            PlaybackFileSystem.PathComparison))
                     {
                         throw new IOException("Source media changed while the playback artifact was being generated.");
                     }
@@ -142,7 +142,7 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
 
     private HashSet<string> SnapshotProtectedPaths(IEnumerable<string> paths)
     {
-        var protectedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var protectedPaths = new HashSet<string>(PlaybackFileSystem.PathComparer);
         foreach (var path in paths)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(path);

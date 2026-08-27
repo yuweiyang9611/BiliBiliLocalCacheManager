@@ -36,7 +36,7 @@ public sealed partial class PlaybackArtifactStore
         var deletedCount = 0;
         var failedCount = 0;
         var freedBytes = 0L;
-        var attemptedManagedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var attemptedManagedPaths = new HashSet<string>(PlaybackFileSystem.PathComparer);
         foreach (var candidate in plan.Candidates)
         {
             if (!candidate.IsStaleBuild)
@@ -156,7 +156,7 @@ public sealed partial class PlaybackArtifactStore
 
         var retentionPaths = retentionCandidates
             .Select(file => file.File.FullName)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .ToHashSet(PlaybackFileSystem.PathComparer);
         var capacityCutoff = nowUtc - policy.CapacityEvictionGracePeriod;
         foreach (var file in managedFiles
                      .Where(file =>
@@ -164,7 +164,7 @@ public sealed partial class PlaybackArtifactStore
                          !policy.ProtectedPaths.Contains(file.File.FullName) &&
                          file.LastWriteTimeUtc < capacityCutoff)
                      .OrderBy(file => file.LastWriteTimeUtc)
-                     .ThenBy(file => file.File.FullName, StringComparer.OrdinalIgnoreCase))
+                     .ThenBy(file => file.File.FullName, PlaybackFileSystem.PathComparer))
         {
             if (projectedRemainingBytes <= policy.MaxTotalBytes)
             {
@@ -207,7 +207,7 @@ public sealed partial class PlaybackArtifactStore
                          !policy.ProtectedPaths.Contains(file.File.FullName) &&
                          file.LastWriteTimeUtc < capacityCutoff)
                      .OrderBy(file => file.LastWriteTimeUtc)
-                     .ThenBy(file => file.File.FullName, StringComparer.OrdinalIgnoreCase))
+                     .ThenBy(file => file.File.FullName, PlaybackFileSystem.PathComparer))
         {
             if (totalBytes <= policy.MaxTotalBytes)
             {

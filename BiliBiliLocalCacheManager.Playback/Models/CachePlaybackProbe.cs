@@ -20,13 +20,13 @@ public sealed class CachePlaybackProbe
 
         var childDirectoryList = (childDirectories ?? Enumerable.Empty<string>())
             .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(PlaybackFileSystem.PathComparer)
             .ToList();
 
         _rootFiles = new ReadOnlyCollection<string>(
             (rootFiles ?? Enumerable.Empty<string>())
             .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(PlaybackFileSystem.PathComparer)
             .ToList());
         _childDirectories = new ReadOnlyCollection<string>(childDirectoryList);
         _childDirectoryNames = new ReadOnlyCollection<string>(
@@ -34,7 +34,7 @@ public sealed class CachePlaybackProbe
         _nestedFiles = new ReadOnlyCollection<string>(
             (nestedFiles ?? Enumerable.Empty<string>())
             .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(PlaybackFileSystem.PathComparer)
             .ToList());
     }
 

@@ -1,8 +1,9 @@
 <Project>
   <PropertyGroup>
-    <VersionPrefix>0.3.0</VersionPrefix>
+    <VersionPrefix>0.4.0</VersionPrefix>
     <Product>BiliBili Local Cache Manager</Product>
     <Description>Scan, search, play, and safely manage local Bilibili cache files.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/yuweiyang9611/BiliBiliLocalCacheManager</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <Deterministic>true</Deterministic>

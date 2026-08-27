@@ -317,7 +317,10 @@ public sealed partial class CachePlaybackService : ICachePlaybackService
         var rootFiles = SafeEnumerateFiles(segmentDirectory, SearchOption.TopDirectoryOnly);
         var childDirectories = SafeEnumerateDirectories(segmentDirectory);
         var nestedFiles = SafeEnumerateFiles(segmentDirectory, SearchOption.AllDirectories)
-            .Where(path => !string.Equals(Path.GetDirectoryName(path), segmentDirectory, StringComparison.OrdinalIgnoreCase))
+            .Where(path => !string.Equals(
+                Path.GetDirectoryName(path),
+                segmentDirectory,
+                PlaybackFileSystem.PathComparison))
             .ToList();
 
         return new CachePlaybackProbe(segment, rootFiles, childDirectories, nestedFiles);

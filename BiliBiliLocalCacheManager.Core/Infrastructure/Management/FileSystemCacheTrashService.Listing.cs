@@ -24,10 +24,13 @@ public sealed partial class FileSystemCacheTrashService
             return Array.Empty<CacheTrashEntry>();
         }
 
-        using var trashRootLease = OpenPhysicalDirectoryLease(
-            trashRoot,
-            "The application trash directory",
-            allowDelete: false);
+        EnsurePhysicalDirectory(trashRoot, "The application trash directory");
+        using var trashRootLease = OperatingSystem.IsWindows()
+            ? OpenPhysicalDirectoryLease(
+                trashRoot,
+                "The application trash directory",
+                allowDelete: false)
+            : null;
 
         var entries = new List<CacheTrashEntry>();
 
@@ -65,10 +68,13 @@ public sealed partial class FileSystemCacheTrashService
                     continue;
                 }
 
-                using var entryLease = OpenPhysicalDirectoryLease(
-                    path,
-                    "The managed trash entry",
-                    allowDelete: false);
+                EnsurePhysicalDirectory(path, "The managed trash entry");
+                using var entryLease = OperatingSystem.IsWindows()
+                    ? OpenPhysicalDirectoryLease(
+                        path,
+                        "The managed trash entry",
+                        allowDelete: false)
+                    : null;
 
                 var pendingPurge = ReadPurgeJournalState(trashRoot, path) is not null ||
                     HasPurgeMarker(path);
