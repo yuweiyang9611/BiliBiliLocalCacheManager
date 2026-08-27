@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0-rc.1] - 2026-08-27
+
 ### Added
 
 - Add the MIT License and include it in CI and release artifacts.
@@ -118,5 +120,6 @@ All notable changes to this project are documented in this file.
 - Desktop batch playback no longer launches all selected pages at once.
 - Desktop deletion moves caches to the application trash; CLI deletion was permanent in this historical release.
 
-[Unreleased]: https://github.com/yuweiyang9611/BiliBiliLocalCacheManager/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/yuweiyang9611/BiliBiliLocalCacheManager/compare/v0.4.0-rc.1...HEAD
+[0.4.0-rc.1]: https://github.com/yuweiyang9611/BiliBiliLocalCacheManager/releases/tag/v0.4.0-rc.1
 [0.3.0]: https://github.com/yuweiyang9611/BiliBiliLocalCacheManager/releases/tag/v0.3.0
