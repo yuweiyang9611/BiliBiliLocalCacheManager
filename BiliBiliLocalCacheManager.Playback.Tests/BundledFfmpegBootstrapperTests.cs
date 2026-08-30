@@ -316,6 +316,31 @@ public sealed class BundledFfmpegBootstrapperTests
         }
     }
 
+    [Fact]
+    public void ArchiveOverride_ShouldRejectArchiveThatDoesNotMatchTrustedManifestHash()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var archivePath = Path.Combine(root, "untrusted-ffmpeg.zip");
+            File.WriteAllText(archivePath, "not the manifest-pinned FFmpeg archive");
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                BundledFfmpegBootstrapper.VerifyBundleArchive(
+                    archivePath,
+                    CancellationToken.None));
+
+            Assert.Contains(
+                BundledFfmpegBootstrapper.BundleManifest.Sha256,
+                exception.Message,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            SafeDeleteDirectory(root);
+        }
+    }
+
     private static string CreateTempRoot()
     {
         var path = Path.Combine(Path.GetTempPath(), $"bili_ffmpeg_bootstrap_{Guid.NewGuid():N}");

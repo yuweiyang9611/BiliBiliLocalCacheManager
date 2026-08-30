@@ -19,6 +19,9 @@ public sealed class DesktopHostContractTests
     public async Task InitialState_UsesTheElectronWireContract()
     {
         using var workspace = new HostTestWorkspace();
+        File.WriteAllBytes(
+            Path.Combine(workspace.TranscodeRoot, "must-not-be-measured.bin"),
+            new byte[32]);
         var application = workspace.CreateApplication();
 
         var result = await DispatchAsync(application, "initialState", "{}");
@@ -26,6 +29,8 @@ public sealed class DesktopHostContractTests
         Assert.Equal(JsonValueKind.Object, result.ValueKind);
         var settings = result.GetProperty("settings");
         Assert.Equal(string.Empty, settings.GetProperty("rootPath").GetString());
+        Assert.True(settings.GetProperty("rememberRootPath").GetBoolean());
+        Assert.False(settings.GetProperty("scanOnStartup").GetBoolean());
         Assert.True(settings.GetProperty("includePartName").GetBoolean());
         Assert.True(settings.GetProperty("includeOwnerName").GetBoolean());
         Assert.True(settings.GetProperty("includeBvid").GetBoolean());
@@ -34,14 +39,50 @@ public sealed class DesktopHostContractTests
         Assert.Equal("system", settings.GetProperty("playerPreference").GetString());
 
         Assert.Equal(JsonValueKind.Array, result.GetProperty("items").ValueKind);
-        Assert.Equal(JsonValueKind.Array, result.GetProperty("trash").ValueKind);
+        Assert.Empty(result.GetProperty("trash").EnumerateArray());
         var storage = result.GetProperty("storage");
         Assert.Equal(0, storage.GetProperty("originalCache").GetProperty("bytes").GetInt64());
+        Assert.Equal(0, storage.GetProperty("transcodeCache").GetProperty("bytes").GetInt64());
         Assert.Equal(0, storage.GetProperty("trash").GetProperty("itemCount").GetInt32());
+        var settingsState = result.GetProperty("settingsState");
+        Assert.True(settingsState.GetProperty("canSave").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, settingsState.GetProperty("sourceSchemaVersion").ValueKind);
+        Assert.Equal(JsonValueKind.Null, settingsState.GetProperty("message").ValueKind);
 
         var capabilities = result.GetProperty("capabilities");
         Assert.Equal(OperatingSystem.IsWindows(), capabilities.GetProperty("trashPurge").GetBoolean());
         Assert.False(capabilities.GetProperty("nativeWayland").GetBoolean());
+    }
+
+    [Fact]
+    public async Task InitialState_ReportsSchemaOneMigrationWithoutSavingIt()
+    {
+        using var workspace = new HostTestWorkspace();
+        File.WriteAllText(
+            workspace.SettingsPath,
+            JsonSerializer.Serialize(new
+            {
+                SchemaVersion = 1,
+                RootPath = workspace.CacheRoot,
+                IncludeIncomplete = true
+            }));
+
+        var result = await DispatchAsync(workspace.CreateApplication(), "initialState", "{}");
+
+        var settings = result.GetProperty("settings");
+        Assert.Equal(workspace.CacheRoot, settings.GetProperty("rootPath").GetString());
+        Assert.True(settings.GetProperty("rememberRootPath").GetBoolean());
+        Assert.False(settings.GetProperty("scanOnStartup").GetBoolean());
+        var settingsState = result.GetProperty("settingsState");
+        Assert.True(settingsState.GetProperty("canSave").GetBoolean());
+        Assert.Equal(1, settingsState.GetProperty("sourceSchemaVersion").GetInt32());
+        Assert.Contains(
+            "migrated from schema v1",
+            settingsState.GetProperty("message").GetString(),
+            StringComparison.OrdinalIgnoreCase);
+
+        using var persisted = JsonDocument.Parse(File.ReadAllBytes(workspace.SettingsPath));
+        Assert.Equal(1, persisted.RootElement.GetProperty("SchemaVersion").GetInt32());
     }
 
     [Fact]
@@ -76,6 +117,164 @@ public sealed class DesktopHostContractTests
         Assert.Equal(workspace.CacheRoot, persisted.GetProperty("rootPath").GetString());
         Assert.Equal(45, persisted.GetProperty("transcodeCacheRetentionDays").GetInt32());
         Assert.Equal(12, persisted.GetProperty("transcodeCacheMaxSizeGigabytes").GetInt32());
+    }
+
+    [Fact]
+    public async Task SettingsUpdate_DisablingRememberRootClearsPrivatePathAndStartupScan()
+    {
+        using var workspace = new HostTestWorkspace();
+        var application = workspace.CreateApplication();
+        var parameters = JsonSerializer.Serialize(new
+        {
+            patch = new
+            {
+                rootPath = workspace.CacheRoot,
+                rememberRootPath = false,
+                scanOnStartup = true,
+                includeIncomplete = true
+            }
+        });
+
+        var updated = await DispatchAsync(application, "settings.update", parameters);
+
+        Assert.Equal(string.Empty, updated.GetProperty("rootPath").GetString());
+        Assert.False(updated.GetProperty("rememberRootPath").GetBoolean());
+        Assert.False(updated.GetProperty("scanOnStartup").GetBoolean());
+        Assert.True(updated.GetProperty("includeIncomplete").GetBoolean());
+        using var persisted = JsonDocument.Parse(File.ReadAllBytes(workspace.SettingsPath));
+        Assert.Equal(DesktopSettings.CurrentSchemaVersion, persisted.RootElement.GetProperty("SchemaVersion").GetInt32());
+        Assert.Equal(string.Empty, persisted.RootElement.GetProperty("RootPath").GetString());
+        Assert.False(persisted.RootElement.GetProperty("RememberRootPath").GetBoolean());
+        Assert.False(persisted.RootElement.GetProperty("ScanOnStartup").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Scan_PersistSettingsFalseLeavesSettingsUntouched()
+    {
+        using var workspace = new HostTestWorkspace();
+        var application = workspace.CreateApplication();
+        var parameters = JsonSerializer.Serialize(new
+        {
+            rootPath = workspace.CacheRoot,
+            includeIncomplete = true,
+            persistSettings = false
+        });
+
+        await DispatchAsync(application, "scan", parameters);
+
+        var settings = await DispatchAsync(application, "settings.get", "{}");
+        Assert.Equal(string.Empty, settings.GetProperty("rootPath").GetString());
+        Assert.False(settings.GetProperty("includeIncomplete").GetBoolean());
+        Assert.False(File.Exists(workspace.SettingsPath));
+    }
+
+    [Fact]
+    public async Task Scan_WhenRootIsNotRememberedPersistsOnlyNonSensitiveOptions()
+    {
+        using var workspace = new HostTestWorkspace();
+        var application = workspace.CreateApplication();
+        await DispatchAsync(
+            application,
+            "settings.update",
+            """{"patch":{"rememberRootPath":false}}""");
+        var parameters = JsonSerializer.Serialize(new
+        {
+            rootPath = workspace.CacheRoot,
+            includeIncomplete = true
+        });
+
+        await DispatchAsync(application, "scan", parameters);
+
+        var settings = await DispatchAsync(application, "settings.get", "{}");
+        Assert.Equal(string.Empty, settings.GetProperty("rootPath").GetString());
+        Assert.False(settings.GetProperty("rememberRootPath").GetBoolean());
+        Assert.False(settings.GetProperty("scanOnStartup").GetBoolean());
+        Assert.True(settings.GetProperty("includeIncomplete").GetBoolean());
+        using var persisted = JsonDocument.Parse(File.ReadAllBytes(workspace.SettingsPath));
+        Assert.Equal(string.Empty, persisted.RootElement.GetProperty("RootPath").GetString());
+    }
+
+    [Fact]
+    public async Task SettingsUpdate_PreservesTheIndexFromTheValidationScan()
+    {
+        using var workspace = new HostTestWorkspace();
+        var application = workspace.CreateApplication();
+        await DispatchAsync(
+            application,
+            "scan",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                includeIncomplete = true,
+                persistSettings = false
+            }));
+
+        await DispatchAsync(
+            application,
+            "settings.update",
+            JsonSerializer.Serialize(new
+            {
+                patch = new
+                {
+                    rootPath = workspace.CacheRoot,
+                    includeIncomplete = true
+                }
+            }));
+
+        var destination = Path.Combine(workspace.Root, "index-session.zip");
+        await DispatchAsync(
+            application,
+            "diagnostics.export",
+            JsonSerializer.Serialize(new
+            {
+                outputPath = destination,
+                rootPath = workspace.CacheRoot
+            }));
+        using var archive = ZipFile.OpenRead(destination);
+        var diagnosticsEntry = Assert.Single(
+            archive.Entries,
+            entry => entry.FullName == "diagnostics.json");
+        using var diagnosticsStream = diagnosticsEntry.Open();
+        using var diagnostics = await JsonDocument.ParseAsync(diagnosticsStream);
+        Assert.True(
+            diagnostics.RootElement
+                .GetProperty("session")
+                .GetProperty("includeIncomplete")
+                .GetBoolean());
+    }
+
+    [Fact]
+    public async Task InitialState_DoesNotLoadExistingTrash()
+    {
+        using var workspace = new HostTestWorkspace();
+        var application = workspace.CreateApplication();
+        await DispatchAsync(
+            application,
+            "settings.update",
+            JsonSerializer.Serialize(new
+            {
+                patch = new { rootPath = workspace.CacheRoot }
+            }));
+        Directory.CreateDirectory(Path.Combine(workspace.CacheRoot, "123"));
+        var moved = await DispatchAsync(
+            application,
+            "trash.move",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                avids = new[] { "123" }
+            }));
+        Assert.Contains("123", moved.GetProperty("moved").EnumerateArray().Select(item => item.GetString()));
+
+        var result = await DispatchAsync(workspace.CreateApplication(), "initialState", "{}");
+
+        Assert.Empty(result.GetProperty("trash").EnumerateArray());
+        Assert.Equal(0, result.GetProperty("storage").GetProperty("trash").GetProperty("itemCount").GetInt32());
+        var listed = await DispatchAsync(
+            application,
+            "trash.list",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        Assert.Single(listed.EnumerateArray());
     }
 
     [Fact]
@@ -137,6 +336,157 @@ public sealed class DesktopHostContractTests
     }
 
     [Fact]
+    public async Task TrashPurge_RequiresExplicitRootAndNonEmptyCompleteSelection()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new HostTestWorkspace();
+        var application = workspace.CreateApplication();
+        await DispatchAsync(
+            application,
+            "settings.update",
+            JsonSerializer.Serialize(new
+            {
+                patch = new { rootPath = workspace.CacheRoot }
+            }));
+
+        var missingRoot = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "trash.purge",
+                """{"confirmed":true,"entryIds":["not-used"]}"""));
+        Assert.Equal("invalid_params", missingRoot.Code);
+
+        var missingIds = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "trash.purge",
+                JsonSerializer.Serialize(new
+                {
+                    rootPath = workspace.CacheRoot,
+                    confirmed = true
+                })));
+        Assert.Equal("invalid_params", missingIds.Code);
+
+        Directory.CreateDirectory(Path.Combine(workspace.CacheRoot, "321"));
+        Directory.CreateDirectory(Path.Combine(workspace.CacheRoot, "654"));
+        await DispatchAsync(
+            application,
+            "trash.move",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                avids = new[] { "321", "654" }
+            }));
+        var entries = await DispatchAsync(
+            application,
+            "trash.list",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        var entryIds = entries.EnumerateArray()
+            .Select(entry => entry.GetProperty("id").GetString()!)
+            .ToArray();
+        Assert.Equal(2, entryIds.Length);
+
+        var trashDirectory = Path.GetDirectoryName(entryIds[0])!;
+        var aboveLegacyBatchLimit = new[] { entryIds[0] }
+            .Concat(Enumerable.Range(0, 1000).Select(index =>
+                Path.Combine(trashDirectory, $"snapshot-placeholder-{index}")))
+            .ToArray();
+        var acceptedCompleteSnapshotSize = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "trash.purge",
+                JsonSerializer.Serialize(new
+                {
+                    rootPath = workspace.CacheRoot,
+                    confirmed = true,
+                    entryIds = aboveLegacyBatchLimit
+                })));
+        Assert.Equal("unsupported_operation", acceptedCompleteSnapshotSize.Code);
+
+        var partialSelection = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "trash.purge",
+                JsonSerializer.Serialize(new
+                {
+                    rootPath = workspace.CacheRoot,
+                    confirmed = true,
+                    entryIds = new[] { entryIds[0] }
+                })));
+        Assert.Equal("unsupported_operation", partialSelection.Code);
+        var partialDetails = JsonSerializer.SerializeToElement(partialSelection.Details);
+        Assert.Equal(
+            "trash_snapshot_changed",
+            partialDetails.GetProperty("reason").GetString());
+        var remaining = await DispatchAsync(
+            application,
+            "trash.list",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        Assert.Equal(2, remaining.GetArrayLength());
+
+        Directory.CreateDirectory(Path.Combine(workspace.CacheRoot, "987"));
+        await DispatchAsync(
+            application,
+            "trash.move",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                avids = new[] { "987" }
+            }));
+        var staleSnapshot = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "trash.purge",
+                JsonSerializer.Serialize(new
+                {
+                    rootPath = workspace.CacheRoot,
+                    confirmed = true,
+                    entryIds
+                })));
+        Assert.Equal("unsupported_operation", staleSnapshot.Code);
+        var staleDetails = JsonSerializer.SerializeToElement(staleSnapshot.Details);
+        Assert.Equal(
+            "trash_snapshot_changed",
+            staleDetails.GetProperty("reason").GetString());
+        remaining = await DispatchAsync(
+            application,
+            "trash.list",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        Assert.Equal(3, remaining.GetArrayLength());
+        entryIds = remaining.EnumerateArray()
+            .Select(entry => entry.GetProperty("id").GetString()!)
+            .ToArray();
+
+        var purged = await DispatchAsync(
+            application,
+            "trash.purge",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                confirmed = true,
+                entryIds
+            }));
+        var pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        Assert.Equal(
+            entryIds.OrderBy(value => value, pathComparer),
+            purged.GetProperty("purged").EnumerateArray()
+                .Select(item => item.GetString()!)
+                .OrderBy(value => value, pathComparer));
+        Assert.Empty(purged.GetProperty("failed").EnumerateArray());
+        var empty = await DispatchAsync(
+            application,
+            "trash.list",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        Assert.Empty(empty.EnumerateArray());
+    }
+
+    [Fact]
     public async Task JsonLinesServer_ReturnsStructuredErrors()
     {
         using var workspace = new HostTestWorkspace();
@@ -154,6 +504,24 @@ public sealed class DesktopHostContractTests
         var missing = Assert.Single(messages, message =>
             message.TryGetProperty("id", out var id) && id.GetString() == "missing");
         Assert.Equal("method_not_found", missing.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task JsonLinesServer_InitialStateIncludesNullableSettingsMetadata()
+    {
+        using var workspace = new HostTestWorkspace();
+        var input = new StringReader(
+            """{"id":"initial","method":"initialState","params":{}}""" + "\n");
+        var output = new StringWriter();
+        var server = new JsonLineRpcServer(workspace.CreateApplication(), input, output);
+
+        await server.RunAsync();
+
+        var message = Assert.Single(ParseLines(output.ToString()));
+        var settingsState = message.GetProperty("result").GetProperty("settingsState");
+        Assert.True(settingsState.GetProperty("canSave").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, settingsState.GetProperty("sourceSchemaVersion").ValueKind);
+        Assert.Equal(JsonValueKind.Null, settingsState.GetProperty("message").ValueKind);
     }
 
     [Fact]
@@ -190,12 +558,13 @@ public sealed class DesktopHostContractTests
         await exporter.ExportAsync(
             destination,
             new SettingsState(
-                new DesktopSettings { RootPath = workspace.CacheRoot },
+                new DesktopSettings { RememberRootPath = false },
                 CanSave: true,
                 SourceSchemaVersion: DesktopSettings.CurrentSchemaVersion,
                 Message: $"Settings backup under {workspace.CacheRoot}; api_key=diagnostic-secret"),
             sessionState: new { rootConfigured = true },
-            CancellationToken.None);
+            sessionRootPath: workspace.CacheRoot,
+            cancellationToken: CancellationToken.None);
 
         using var archive = ZipFile.OpenRead(destination);
         var entry = Assert.Single(archive.Entries, item => item.FullName == "recent-events.json");
@@ -257,6 +626,7 @@ public sealed class DesktopHostContractTests
                 $"bili_desktop_host_tests_{Guid.NewGuid():N}");
             CacheRoot = Path.Combine(Root, "cache");
             TranscodeRoot = Path.Combine(Root, "transcode");
+            SettingsPath = Path.Combine(Root, "settings.json");
             Directory.CreateDirectory(CacheRoot);
             Directory.CreateDirectory(TranscodeRoot);
 
@@ -266,7 +636,7 @@ public sealed class DesktopHostContractTests
                 "BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT");
             Environment.SetEnvironmentVariable(
                 "BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH",
-                Path.Combine(Root, "settings.json"));
+                SettingsPath);
             Environment.SetEnvironmentVariable(
                 "BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT",
                 TranscodeRoot);
@@ -277,6 +647,8 @@ public sealed class DesktopHostContractTests
         public string CacheRoot { get; }
 
         public string TranscodeRoot { get; }
+
+        public string SettingsPath { get; }
 
         public DesktopHostApplication CreateApplication() => new();
 

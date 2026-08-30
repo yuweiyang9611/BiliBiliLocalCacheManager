@@ -8,9 +8,11 @@ public sealed partial class FileSystemCacheTrashService
 {
     public CacheTrashPurgeResult Purge(
         string rootDirectory,
-        bool includeUntrustedLegacyEntries = false)
+        bool includeUntrustedLegacyEntries = false,
+        IReadOnlyCollection<string>? expectedEntryIds = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
+        var expectedSnapshot = expectedEntryIds?.ToArray();
         var root = Path.GetFullPath(rootDirectory);
         using var transaction = EnterMutationTransaction(root, CacheTrashMutationOperation.Purge);
         ValidateRoot(root);
@@ -18,6 +20,10 @@ public sealed partial class FileSystemCacheTrashService
         EnsureDirectChild(root, trashRoot);
         if (!Directory.Exists(trashRoot))
         {
+            EnsureExpectedPurgeSnapshotMatches(
+                trashRoot,
+                expectedSnapshot,
+                Array.Empty<string>());
             return new CacheTrashPurgeResult(0, 0, 0, 0, null);
         }
 
@@ -35,6 +41,10 @@ public sealed partial class FileSystemCacheTrashService
             trashRoot,
             "The application trash directory",
             allowDelete: true);
+        EnsureExpectedPurgeSnapshotMatches(
+            trashRoot,
+            expectedSnapshot,
+            CaptureManagedPurgeEntrySnapshot(trashRoot));
 
         var deletedCount = 0;
         var failedCount = 0;
@@ -250,6 +260,90 @@ public sealed partial class FileSystemCacheTrashService
             partiallyDeletedCount,
             pendingPurgeCount,
             nonRestorableTrashPaths.ToArray());
+    }
+
+    private static IReadOnlyCollection<string> CaptureManagedPurgeEntrySnapshot(
+        string trashRoot)
+    {
+        var paths = new List<string>();
+        foreach (var path in Directory.EnumerateFileSystemEntries(
+                     trashRoot,
+                     "*",
+                     SearchOption.TopDirectoryOnly))
+        {
+            var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
+            if (!TryParseManagedTrashEntryName(name, out _))
+            {
+                continue;
+            }
+
+            try
+            {
+                var attributes = File.GetAttributes(path);
+                if (!attributes.HasFlag(FileAttributes.Directory) ||
+                    attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    continue;
+                }
+            }
+            catch (Exception ex) when (IsPurgeFailure(ex))
+            {
+                // ListEntries also reports an inaccessible managed directory as a blocked
+                // entry. Keep it in the snapshot so permanent deletion fails closed.
+            }
+
+            paths.Add(Path.GetFullPath(path));
+        }
+
+        return paths;
+    }
+
+    private static void EnsureExpectedPurgeSnapshotMatches(
+        string trashRoot,
+        IReadOnlyCollection<string>? expectedEntryIds,
+        IReadOnlyCollection<string> actualEntryIds)
+    {
+        if (expectedEntryIds is null)
+        {
+            return;
+        }
+
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var expected = new HashSet<string>(comparer);
+        var expectedIsValid = true;
+        foreach (var entryId in expectedEntryIds)
+        {
+            if (string.IsNullOrWhiteSpace(entryId))
+            {
+                expectedIsValid = false;
+                continue;
+            }
+
+            try
+            {
+                var normalizedEntryId = Path.GetFullPath(entryId);
+                EnsureDirectChild(trashRoot, normalizedEntryId);
+                expected.Add(normalizedEntryId);
+            }
+            catch (Exception ex) when (
+                ex is ArgumentException or
+                    InvalidOperationException or
+                    NotSupportedException or
+                    PathTooLongException)
+            {
+                expectedIsValid = false;
+            }
+        }
+
+        var actual = actualEntryIds.ToHashSet(comparer);
+        if (!expectedIsValid || !expected.SetEquals(actual))
+        {
+            throw new CacheTrashSnapshotMismatchException(
+                expectedEntryIds.Count,
+                actual.Count);
+        }
     }
 
     private static bool TryParseManagedTrashEntryName(

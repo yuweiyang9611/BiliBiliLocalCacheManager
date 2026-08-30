@@ -184,6 +184,8 @@ dl { margin: 0; } dl > div { display: flex; justify-content: space-between; padd
 .modal-backdrop { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 20px; background: rgba(3,7,14,.72); backdrop-filter: blur(3px); }
 .modal { width: min(450px, 100%); padding: 18px; background: #131d30; border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: 0 24px 80px rgba(0,0,0,.48); }
 .modal-header { display: flex; align-items: center; justify-content: space-between; }.modal h2 { margin: 0; font-size: 15px; }.modal p { color: var(--muted); font-size: 12px; line-height: 1.7; }.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.migration-path { overflow-wrap: anywhere; padding: 10px 12px; color: var(--text) !important; background: rgba(3, 7, 14, .45); border: 1px solid var(--border); border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.migration-actions { flex-wrap: wrap; }
 
 @media (max-width: 1180px) {
   .app-shell { grid-template-columns: 188px minmax(0, 1fr); }

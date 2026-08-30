@@ -114,8 +114,10 @@ describe('IPC export destinations', () => {
     await invoke(
       channels.exportMedia,
       event,
+      path.resolve('cache'),
       [{ avid: '123', pageIndexes: [1] }],
       '../../renderer-controlled.mp4',
+      false,
     );
 
     expect(electronMocks.showSaveDialog).toHaveBeenCalledWith(expect.objectContaining({
@@ -140,7 +142,7 @@ describe('IPC export destinations', () => {
       filePaths: [selectedDirectory],
     });
 
-    await invoke(channels.exportMedia, event, targets, 'batch.mp4');
+    await invoke(channels.exportMedia, event, path.resolve('cache'), targets, 'batch.mp4', false);
 
     expect(electronMocks.showOpenDialog).toHaveBeenCalledWith(expect.objectContaining({
       title: '选择 MP4 导出目录',
@@ -149,6 +151,56 @@ describe('IPC export destinations', () => {
     expect(electronMocks.showSaveDialog).not.toHaveBeenCalled();
     expect(fake.calls.find((call) => call.method === 'export')?.params.outputPath)
       .toBe(selectedDirectory);
+  });
+});
+
+describe('IPC trash root safety', () => {
+  it('requires an explicit root and a non-empty entry snapshot before showing confirmation', async () => {
+    const fake = createImmediateBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(29);
+
+    await expect(invoke(channels.trashPurge, event, '', ['entry-1'])).rejects.toThrow('rootPath');
+    await expect(invoke(channels.trashPurge, event, path.resolve('cache'), [])).rejects.toThrow('至少包含 1 项');
+
+    expect(electronMocks.showMessageBox).not.toHaveBeenCalled();
+    expect(fake.calls.some((call) => call.method === 'trash.purge')).toBe(false);
+  });
+
+  it('binds permanent purge to the displayed root and complete entry id snapshot', async () => {
+    const fake = createImmediateBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(31);
+    const rootPath = path.resolve('cache-b');
+    electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
+
+    await invoke(channels.trashPurge, event, rootPath, ['entry-1', 'entry-2']);
+
+    expect(electronMocks.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.stringContaining(rootPath),
+    }));
+    expect(fake.calls.find((call) => call.method === 'trash.purge')?.params).toEqual({
+      rootPath,
+      entryIds: ['entry-1', 'entry-2'],
+      confirmed: true,
+    });
+  });
+
+  it('accepts a complete purge snapshot larger than the generic batch limit', async () => {
+    const fake = createImmediateBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(33);
+    const rootPath = path.resolve('large-trash');
+    const entryIds = Array.from({ length: 1_001 }, (_, index) => `entry-${index}`);
+    electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
+
+    await invoke(channels.trashPurge, event, rootPath, entryIds);
+
+    expect(fake.calls.find((call) => call.method === 'trash.purge')?.params).toEqual({
+      rootPath,
+      entryIds,
+      confirmed: true,
+    });
   });
 });
 
@@ -229,6 +281,8 @@ function invoke(channel: string, event: IpcMainInvokeEvent, ...args: unknown[]):
 
 function validSearchRequest(): JsonObject {
   return {
+    rootPath: path.resolve('cache'),
+    includeIncomplete: false,
     keyword: 'demo',
     matchMode: 'contains',
     splitKeywords: true,
