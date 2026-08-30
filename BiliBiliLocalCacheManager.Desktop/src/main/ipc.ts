@@ -23,7 +23,7 @@ import { isRecord } from './protocol';
 import { packagedRendererUrl } from './renderer-protocol';
 
 const allowedSettingKeys = new Set<keyof AppSettings>([
-  'rootPath', 'includeIncomplete', 'keyword', 'splitKeywords', 'anyKeywords',
+  'rootPath', 'rememberRootPath', 'scanOnStartup', 'includeIncomplete', 'keyword', 'splitKeywords', 'anyKeywords',
   'includePartName', 'includeOwnerName', 'includeBvid', 'includeAvid',
   'caseSensitive', 'matchMode', 'playerPreference',
   'transcodeCacheRetentionDays', 'transcodeCacheMaxSizeGigabytes',
@@ -84,6 +84,9 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     const call = host<ScanResult>('scan', {
       rootPath: assertPath(options.rootPath, 'rootPath'),
       includeIncomplete: assertBoolean(options.includeIncomplete, 'includeIncomplete'),
+      ...(options.persistSettings === undefined
+        ? {}
+        : { persistSettings: assertBoolean(options.persistSettings, 'persistSettings') }),
     });
     return track(event, call);
   });
@@ -100,9 +103,12 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     const call = host<CacheEntry[]>('search', validateSearchRequest(request) as unknown as JsonObject);
     return track(event, call);
   });
-  handle(channels.storageGet, (event) => {
+  handle(channels.storageGet, (event, rootPath) => {
     assertTrusted(event);
-    return host<StorageSnapshot>('storage.get').promise;
+    return host<StorageSnapshot>(
+      'storage.get',
+      rootPath === undefined || rootPath === '' ? {} : { rootPath: assertPath(rootPath, 'rootPath') },
+    ).promise;
   });
   handle(channels.artifactsCleanup, (event) => {
     assertTrusted(event);
@@ -140,27 +146,34 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     if (openError) throw new Error(`无法打开转码缓存目录：${openError}`);
     return true;
   });
-  handle(channels.trashMove, (event, avids) => {
+  handle(channels.trashMove, (event, rootPath, avids) => {
     assertTrusted(event);
-    return host<{ moved: string[]; failed: string[] }>('trash.move', { avids: validateStringArray(avids, 'avids') }).promise;
+    return host<{ moved: string[]; failed: string[] }>('trash.move', {
+      rootPath: assertPath(rootPath, 'rootPath'),
+      avids: validateNonEmptyStringArray(avids, 'avids'),
+    }).promise;
   });
-  handle(channels.trashList, (event) => {
+  handle(channels.trashList, (event, rootPath) => {
     assertTrusted(event);
-    return host<TrashEntry[]>('trash.list').promise;
+    return host<TrashEntry[]>('trash.list', { rootPath: assertPath(rootPath, 'rootPath') }).promise;
   });
-  handle(channels.trashRestore, (event, entryIds) => {
+  handle(channels.trashRestore, (event, rootPath, entryIds) => {
     assertTrusted(event);
-    return host<{ restored: string[]; failed: string[] }>('trash.restore', { entryIds: validateStringArray(entryIds, 'entryIds') }).promise;
+    return host<{ restored: string[]; failed: string[] }>('trash.restore', {
+      rootPath: assertPath(rootPath, 'rootPath'),
+      entryIds: validateNonEmptyStringArray(entryIds, 'entryIds'),
+    }).promise;
   });
-  handle(channels.trashPurge, async (event, entryIds) => {
+  handle(channels.trashPurge, async (event, rootPath, entryIds) => {
     assertTrusted(event);
-    const validatedIds = entryIds === undefined ? [] : validateStringArray(entryIds, 'entryIds');
+    const validatedRoot = assertPath(rootPath, 'rootPath');
+    const validatedIds = validateNonEmptyStringArray(entryIds, 'entryIds', 10_000);
     const parent = BrowserWindow.fromWebContents(event.sender) ?? getWindow() ?? undefined;
     const options = {
       type: 'warning' as const,
       title: '永久清空应用回收站',
       message: '确定要永久删除应用回收站中的缓存吗？',
-      detail: '此操作无法撤销。Electron 主进程会在确认后才向 Desktop Host 发送永久清理授权。',
+      detail: '此操作无法撤销。将清理 ' + validatedRoot + ' 中界面列出的 ' + validatedIds.length + ' 项；Host 会再次核对目录和完整条目集合。',
       buttons: ['永久删除', '取消'],
       defaultId: 1,
       cancelId: 1,
@@ -171,20 +184,24 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       : await dialog.showMessageBox(options);
     if (confirmation.response !== 0) return { purged: [], failed: [] };
     return host<{ purged: string[]; failed: string[] }>('trash.purge', {
+      rootPath: validatedRoot,
       entryIds: validatedIds,
       confirmed: true,
     }).promise;
   });
-  handle(channels.play, async (event, targets, playerPreference) => {
+  handle(channels.play, async (event, rootPath, targets, playerPreference, includeIncomplete) => {
     assertTrusted(event);
     const call = host<{ queued: number }>('play', {
+      rootPath: assertPath(rootPath, 'rootPath'),
       targets: validateTargets(targets) as never,
       playerPreference: validatePlayer(playerPreference),
+      includeIncomplete: assertBoolean(includeIncomplete, 'includeIncomplete'),
     });
     return track(event, call);
   });
-  handle(channels.exportMedia, async (event, targets, suggestedName) => {
+  handle(channels.exportMedia, async (event, rootPath, targets, suggestedName, includeIncomplete) => {
     assertTrusted(event);
+    const validatedRoot = assertPath(rootPath, 'rootPath');
     const validatedTargets = validateTargets(targets);
     const outputPath = await chooseExportDestination(
       event,
@@ -194,17 +211,20 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     );
     if (!outputPath) return null;
     const call = host<{ outputPath: string }>('export', {
+      rootPath: validatedRoot,
       targets: validatedTargets as never,
       outputPath,
+      includeIncomplete: assertBoolean(includeIncomplete, 'includeIncomplete'),
     });
     return track(event, call);
   });
-  handle(channels.exportDiagnostics, async (event, suggestedName) => {
+  handle(channels.exportDiagnostics, async (event, suggestedName, rootPath) => {
     assertTrusted(event);
     const outputPath = await chooseExportDestination(event, getWindow, suggestedName, 'diagnostics');
     if (!outputPath) return null;
     const call = host<{ outputPath: string }>('diagnostics.export', {
       outputPath,
+      ...(rootPath === undefined || rootPath === '' ? {} : { rootPath: assertPath(rootPath, 'rootPath') }),
     });
     return track(event, call);
   });
@@ -305,6 +325,8 @@ function validateSearchRequest(value: unknown): SearchRequest {
   if (!isRecord(value)) throw new TypeError('搜索参数必须是对象。');
   const patch = validateSettingsPatch(value);
   return {
+    rootPath: assertPath(patch.rootPath, 'rootPath'),
+    includeIncomplete: patch.includeIncomplete ?? false,
     keyword: patch.keyword ?? '',
     matchMode: patch.matchMode ?? 'contains',
     splitKeywords: patch.splitKeywords ?? true,
@@ -334,9 +356,17 @@ function validateTargets(value: unknown): SelectionTarget[] {
   });
 }
 
-function validateStringArray(value: unknown, name: string): string[] {
-  if (!Array.isArray(value) || value.length > 1_000) throw new TypeError(`${name} 必须是最多包含 1000 项的数组。`);
+function validateStringArray(value: unknown, name: string, maximumCount = 1_000): string[] {
+  if (!Array.isArray(value) || value.length > maximumCount) {
+    throw new TypeError(`${name} 必须是最多包含 ${maximumCount} 项的数组。`);
+  }
   return value.map((item) => assertString(item, name, 1_024));
+}
+
+function validateNonEmptyStringArray(value: unknown, name: string, maximumCount = 1_000): string[] {
+  const result = validateStringArray(value, name, maximumCount);
+  if (result.length === 0) throw new TypeError(name + ' 必须至少包含 1 项。');
+  return result;
 }
 
 function validatePlayer(value: unknown): PlayerPreference {

@@ -51,6 +51,7 @@ internal sealed class SettingsStore
             }
 
             var updated = ApplyPatch(_state.Settings.Clone(), patch);
+            Normalize(updated);
             Validate(updated);
             SaveCore(updated);
             _state = new SettingsState(
@@ -101,6 +102,15 @@ internal sealed class SettingsStore
                                document.RootElement.GetRawText(),
                                FileSerializerOptions) ??
                            new DesktopSettings();
+            if (sourceVersion == 1)
+            {
+                // Schema v1 always remembered the last root and scanned it implicitly.
+                // Preserve the root for an explicit UI migration decision, but make the
+                // new startup behavior opt-in.
+                settings.RememberRootPath = true;
+                settings.ScanOnStartup = false;
+            }
+
             Normalize(settings);
             Validate(settings);
             settings.SchemaVersion = DesktopSettings.CurrentSchemaVersion;
@@ -186,6 +196,10 @@ internal sealed class SettingsStore
         }
 
         settings.RootPath = patch.OptionalString("rootPath") ?? settings.RootPath;
+        settings.RememberRootPath =
+            patch.OptionalBoolean("rememberRootPath") ?? settings.RememberRootPath;
+        settings.ScanOnStartup =
+            patch.OptionalBoolean("scanOnStartup") ?? settings.ScanOnStartup;
         settings.IncludeIncomplete = patch.OptionalBoolean("includeIncomplete") ?? settings.IncludeIncomplete;
         if (patch.TryGetPropertyIgnoreCase("keyword", out var keywordElement))
         {
@@ -220,6 +234,11 @@ internal sealed class SettingsStore
     {
         settings.RootPath = settings.RootPath?.Trim() ?? string.Empty;
         settings.Keyword ??= string.Empty;
+        if (!settings.RememberRootPath)
+        {
+            settings.RootPath = string.Empty;
+            settings.ScanOnStartup = false;
+        }
     }
 
     private static CacheSearchMatchMode ParseMatchMode(
@@ -253,6 +272,14 @@ internal sealed class SettingsStore
 
     private static void Validate(DesktopSettings settings)
     {
+        if (!settings.RememberRootPath &&
+            (!string.IsNullOrEmpty(settings.RootPath) || settings.ScanOnStartup))
+        {
+            throw new RpcException(
+                "invalid_params",
+                "rootPath and scanOnStartup must be disabled when rememberRootPath is false.");
+        }
+
         if (!Enum.IsDefined(settings.MatchMode))
         {
             throw new RpcException("invalid_params", "The configured search match mode is invalid.");

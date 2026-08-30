@@ -15,6 +15,67 @@ interface PendingRequest {
 
 const MAX_HOST_REQUEST_BYTES = 1024 * 1024;
 
+const unsafePackagedHostEnvironmentVariables = new Set([
+  'CACHE_MANAGER_HOST_PATH',
+  'CACHE_MANAGER_DOTNET_PATH',
+  'BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH',
+  'BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT',
+  'BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_ARCHIVE_PATH',
+  'BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_DOWNLOAD_URL',
+  'BILIBILI_LOCAL_CACHE_MANAGER_USE_SYSTEM_FFMPEG',
+  'BILIBILI_RUN_FFMPEG_INTEGRATION_TESTS',
+  'FFMPEG_BUNDLE_TAG',
+  'FFMPEG_BUNDLE_ASSET',
+  'FFMPEG_BUNDLE_SHA256',
+]);
+
+// A packaged self-contained Host must not inherit runtime injection knobs from
+// the shell that launched Electron. These prefixes cover startup hooks, custom
+// GC/profiler libraries, additional dependency stores, diagnostic ports, and
+// single-file extraction overrides. The bridge adds back only its own benign
+// DOTNET_NOLOGO and telemetry settings at the spawn call site.
+const unsafePackagedHostEnvironmentPrefixes = [
+  'DOTNET_',
+  'CORECLR_',
+  'COMPLUS_',
+  'COR_',
+];
+
+const trustedHostEnvironmentOverrideVariables = new Set([
+  'BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH',
+  'BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT',
+]);
+
+export function createHostEnvironment(
+  source: NodeJS.ProcessEnv,
+  isPackaged: boolean,
+  trustedOverrides: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv {
+  const environment = { ...source };
+  if (isPackaged) {
+    for (const name of Object.keys(environment)) {
+      const normalizedName = name.toUpperCase();
+      if (unsafePackagedHostEnvironmentVariables.has(normalizedName) ||
+          unsafePackagedHostEnvironmentPrefixes.some((prefix) => normalizedName.startsWith(prefix))) {
+        delete environment[name];
+      }
+    }
+  }
+
+  for (const [name, value] of Object.entries(trustedOverrides)) {
+    const normalizedName = name.toUpperCase();
+    if (!trustedHostEnvironmentOverrideVariables.has(normalizedName)) {
+      throw new Error(`不允许向 Desktop Host 注入可信环境变量：${name}`);
+    }
+    if (value !== undefined) environment[normalizedName] = value;
+  }
+  return environment;
+}
+
+export interface DesktopHostBridgeOptions {
+  trustedEnvOverrides?: NodeJS.ProcessEnv;
+}
+
 export interface HostCall<T> {
   id: string;
   promise: Promise<T>;
@@ -38,6 +99,12 @@ export class DesktopHostBridge extends EventEmitter {
   #starting: Promise<void> | null = null;
   #stopping = false;
   #stderrTail = '';
+  readonly #trustedEnvOverrides: NodeJS.ProcessEnv;
+
+  constructor(options: DesktopHostBridgeOptions = {}) {
+    super();
+    this.#trustedEnvOverrides = { ...(options.trustedEnvOverrides ?? {}) };
+  }
 
   call<T>(method: string, params: JsonObject = {}, timeoutMs = 10 * 60_000): HostCall<T> {
     const id = randomUUID();
@@ -121,7 +188,11 @@ export class DesktopHostBridge extends EventEmitter {
     const child = spawn(launch.command, launch.args, {
       cwd: path.dirname(launch.hostPath),
       env: {
-        ...process.env,
+        ...createHostEnvironment(
+          process.env,
+          app.isPackaged,
+          this.#trustedEnvOverrides,
+        ),
         DOTNET_NOLOGO: '1',
         DOTNET_CLI_TELEMETRY_OPTOUT: '1',
       },

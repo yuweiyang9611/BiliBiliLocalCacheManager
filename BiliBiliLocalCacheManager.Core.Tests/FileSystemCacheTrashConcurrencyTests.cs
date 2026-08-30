@@ -6,6 +6,61 @@ namespace BiliBiliLocalCacheManager.Core.Tests;
 public sealed class FileSystemCacheTrashConcurrencyTests
 {
     [Fact]
+    public void Purge_WithExpectedSnapshot_ShouldValidateAfterMutationLockIsAcquired()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTempRoot();
+        var service = new FileSystemCacheTrashService();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "100"));
+            Directory.CreateDirectory(Path.Combine(root, "200"));
+            var first = service.MoveToTrash(root, 100);
+            var second = service.MoveToTrash(root, 200);
+            Assert.True(first.Succeeded);
+            Assert.True(second.Succeeded);
+
+            var heldSecondPath = Path.Combine(root, ".held-trash-entry");
+            Directory.Move(second.TrashPath!, heldSecondPath);
+            var expectedEntryIds = service.ListEntries(root)
+                .Select(entry => entry.TrashPath)
+                .ToArray();
+            Assert.Equal(new[] { first.TrashPath }, expectedEntryIds);
+
+            var insertedAfterLock = false;
+            service.AfterMutationLockAcquiredForTesting = (operation, _) =>
+            {
+                if (operation != CacheTrashMutationOperation.Purge || insertedAfterLock)
+                {
+                    return;
+                }
+
+                Directory.Move(heldSecondPath, second.TrashPath!);
+                insertedAfterLock = true;
+            };
+
+            var exception = Assert.Throws<CacheTrashSnapshotMismatchException>(() =>
+                service.Purge(root, expectedEntryIds: expectedEntryIds));
+
+            Assert.True(insertedAfterLock);
+            Assert.Equal(1, exception.ExpectedEntryCount);
+            Assert.Equal(2, exception.ActualEntryCount);
+            Assert.True(Directory.Exists(first.TrashPath));
+            Assert.True(Directory.Exists(second.TrashPath));
+            Assert.Equal(2, service.ListEntries(root).Count);
+        }
+        finally
+        {
+            service.AfterMutationLockAcquiredForTesting = null;
+            SafeDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
     public async Task Restore_ShouldWaitForPurgeAndNeverReportPartialRestoreSuccess()
     {
         if (!OperatingSystem.IsWindows())

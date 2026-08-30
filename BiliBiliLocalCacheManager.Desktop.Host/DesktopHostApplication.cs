@@ -173,32 +173,28 @@ internal sealed class DesktopHostApplication
         };
     }
 
-    private async Task<object> GetInitialStateAsync(
-        JsonElement parameters,
+    private Task<object> GetInitialStateAsync(
+        JsonElement _,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var settings = _settingsStore.GetState();
-        IReadOnlyList<CacheDto> items;
-        lock (_stateSync)
-        {
-            items = _currentIndex is null
-                ? Array.Empty<CacheDto>()
-                : MapCaches(_currentIndex.VideoCaches, cancellationToken);
-        }
 
-        var storage = await GetStorageAsync(parameters, cancellationToken);
-        var trash = await ListTrashForInitialStateAsync(settings.Settings, cancellationToken);
         var result = new
         {
             protocolVersion = 1,
             settings = ToWireSettings(settings.Settings),
-            items,
-            storage,
-            trash,
+            settingsState = ToWireSettingsState(settings),
+            // A previous non-persisting validation scan can target a different
+            // root than the saved settings. Never replay that process-local index
+            // after a renderer reload without an explicit root binding.
+            items = Array.Empty<CacheDto>(),
+            storage = CreateUnloadedStorage(settings.Settings),
+            trash = Array.Empty<TrashEntryDto>(),
             capabilities = GetCapabilities()
         };
         QueueInitialBackgroundWork();
-        return result;
+        return Task.FromResult<object>(result);
     }
 
     private object GetSettings()
@@ -211,8 +207,9 @@ internal sealed class DesktopHostApplication
     {
         var before = _settingsStore.GetState().Settings;
         var state = _settingsStore.Update(parameters);
-        if (!PathsEqual(before.RootPath, state.Settings.RootPath) ||
-            before.IncludeIncomplete != state.Settings.IncludeIncomplete)
+        if ((!PathsEqual(before.RootPath, state.Settings.RootPath) ||
+             before.IncludeIncomplete != state.Settings.IncludeIncomplete) &&
+            !CurrentIndexMatchesSettings(state.Settings))
         {
             ClearCurrentIndex();
         }
@@ -229,6 +226,7 @@ internal sealed class DesktopHostApplication
         var root = ResolveRequiredRoot(parameters, settings);
         var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ??
                                 settings.IncludeIncomplete;
+        var persistSettings = parameters.OptionalBoolean("persistSettings") ?? true;
         var maxReportedIssues = parameters.OptionalInt32("maxReportedIssues") ?? 100;
         if (maxReportedIssues is < 0 or > 10_000)
         {
@@ -274,7 +272,10 @@ internal sealed class DesktopHostApplication
             _lastScanCompletedAtUtc = completedAt;
         }
 
-        TryPersistScanSettings(root, includeIncomplete);
+        if (persistSettings)
+        {
+            TryPersistScanSettings(root, includeIncomplete);
+        }
         var items = MapCaches(report.Index.VideoCaches, cancellationToken);
         ReportProgress(new HostProgressEvent(
             requestId,
@@ -604,8 +605,8 @@ internal sealed class DesktopHostApplication
                 "trash.purge requires params.confirmed=true because it is irreversible.");
         }
 
-        var root = ResolveRequiredRoot(parameters, _settingsStore.GetState().Settings);
-        var requestedIds = ParseOptionalStringArray(parameters, "entryIds", maximumCount: 1000)
+        var root = ResolveExplicitRequiredRoot(parameters);
+        var requestedIds = ParseRequiredStringArray(parameters, "entryIds", maximumCount: 10_000)
             .Distinct(PathComparer)
             .ToArray();
         await _mutationGate.WaitAsync(cancellationToken);
@@ -613,20 +614,28 @@ internal sealed class DesktopHostApplication
         {
             return await Task.Run<object>(() =>
             {
-                var entries = _trashService.ListEntries(root, cancellationToken);
-                var allIds = entries.Select(entry => entry.TrashPath).ToHashSet(PathComparer);
-                var selectedIds = requestedIds.Length == 0
-                    ? allIds
-                    : requestedIds.ToHashSet(PathComparer);
-                if (!selectedIds.SetEquals(allIds))
+                var selectedIds = requestedIds.ToHashSet(PathComparer);
+                try
+                {
+                    _trashService.Purge(
+                        root,
+                        includeUntrustedLegacyEntries: false,
+                        expectedEntryIds: requestedIds);
+                }
+                catch (CacheTrashSnapshotMismatchException exception)
                 {
                     throw new RpcException(
                         "unsupported_operation",
-                        "Selective permanent purge is not available through the current Core safety API. " +
-                        "Select all trash entries or restore unselected entries first.");
+                        "The trash contents changed or the selection is incomplete. " +
+                        "Reload the trash and confirm permanent deletion again.",
+                        new
+                        {
+                            reason = "trash_snapshot_changed",
+                            exception.ExpectedEntryCount,
+                            exception.ActualEntryCount
+                        });
                 }
 
-                _trashService.Purge(root, includeUntrustedLegacyEntries: false);
                 var remaining = _trashService.ListEntries(root, cancellationToken)
                     .Select(entry => entry.TrashPath)
                     .ToHashSet(PathComparer);
@@ -648,7 +657,8 @@ internal sealed class DesktopHostApplication
     {
         var settings = _settingsStore.GetState().Settings;
         var root = ResolveRequiredRoot(parameters, settings);
-        var includeIncomplete = settings.IncludeIncomplete;
+        var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ??
+                                settings.IncludeIncomplete;
         var targets = ParseSelectionTargets(parameters);
         var player = ParseWirePlayerPreference(
             parameters.OptionalString("playerPreference"),
@@ -735,7 +745,8 @@ internal sealed class DesktopHostApplication
     {
         var settings = _settingsStore.GetState().Settings;
         var root = ResolveRequiredRoot(parameters, settings);
-        var includeIncomplete = settings.IncludeIncomplete;
+        var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ??
+                                settings.IncludeIncomplete;
         var selections = ParseSelectionTargets(parameters);
         var requestedOutputPath = Path.GetFullPath(parameters.RequireString("outputPath"));
         var requestedParent = Path.GetDirectoryName(requestedOutputPath);
@@ -866,10 +877,12 @@ internal sealed class DesktopHostApplication
         CancellationToken cancellationToken)
     {
         var destination = parameters.RequireString("outputPath");
+        var sessionRootPath = parameters.OptionalString("rootPath");
         return await _diagnosticExporter.ExportAsync(
             destination,
             _settingsStore.GetState(),
             GetSessionState(),
+            sessionRootPath,
             cancellationToken);
     }
 
@@ -1201,6 +1214,8 @@ internal sealed class DesktopHostApplication
         return new
         {
             settings.RootPath,
+            settings.RememberRootPath,
+            settings.ScanOnStartup,
             settings.IncludeIncomplete,
             settings.Keyword,
             settings.SplitKeywords,
@@ -1227,6 +1242,44 @@ internal sealed class DesktopHostApplication
         };
     }
 
+    private static object ToWireSettingsState(SettingsState state)
+    {
+        return new SettingsStateDto(
+            state.CanSave,
+            state.SourceSchemaVersion,
+            state.Message);
+    }
+
+    private object CreateUnloadedStorage(DesktopSettings settings)
+    {
+        var rootPath = string.IsNullOrWhiteSpace(settings.RootPath)
+            ? null
+            : settings.RootPath;
+        return new
+        {
+            originalCache = new
+            {
+                bytes = 0L,
+                itemCount = 0,
+                path = rootPath
+            },
+            transcodeCache = new
+            {
+                bytes = 0L,
+                itemCount = 0,
+                path = _artifactStore.RootDirectory
+            },
+            trash = new
+            {
+                bytes = 0L,
+                itemCount = 0,
+                path = (string?)null
+            },
+            totalBytes = 0L,
+            lastMaintenanceSummary = "Storage statistics have not been loaded."
+        };
+    }
+
     private static IReadOnlyList<TrashEntryDto> MapTrashEntries(
         IEnumerable<CacheTrashEntry> entries)
     {
@@ -1238,42 +1291,6 @@ internal sealed class DesktopHostApplication
                 entry.DeletedAtUtc,
                 entry.OriginalPath))
             .ToArray();
-    }
-
-    private async Task<IReadOnlyList<TrashEntryDto>> ListTrashForInitialStateAsync(
-        DesktopSettings settings,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(settings.RootPath))
-        {
-            return Array.Empty<TrashEntryDto>();
-        }
-
-        try
-        {
-            var root = Path.GetFullPath(settings.RootPath);
-            if (!Directory.Exists(root))
-            {
-                return Array.Empty<TrashEntryDto>();
-            }
-
-            return await Task.Run(
-                () => MapTrashEntries(_trashService.ListEntries(root, cancellationToken)),
-                cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            _eventRecorder.Record(
-                "Trash",
-                "Warning",
-                $"Initial trash listing failed: {exception.Message}",
-                exception);
-            return Array.Empty<TrashEntryDto>();
-        }
     }
 
     private static string CreateBatchExportDirectory(string requestedOutputPath)
@@ -1352,11 +1369,18 @@ internal sealed class DesktopHostApplication
     {
         try
         {
-            _settingsStore.Update(JsonSerializer.SerializeToElement(new
-            {
-                rootPath = root,
-                includeIncomplete
-            }));
+            var settings = _settingsStore.GetState().Settings;
+            var patch = settings.RememberRootPath
+                ? JsonSerializer.SerializeToElement(new
+                {
+                    rootPath = root,
+                    includeIncomplete
+                })
+                : JsonSerializer.SerializeToElement(new
+                {
+                    includeIncomplete
+                });
+            _settingsStore.Update(patch);
         }
         catch (Exception exception)
         {
@@ -1390,6 +1414,20 @@ internal sealed class DesktopHostApplication
         return root;
     }
 
+    private static string ResolveExplicitRequiredRoot(JsonElement parameters)
+    {
+        var root = Path.GetFullPath(parameters.RequireString("rootPath"));
+        if (!Directory.Exists(root))
+        {
+            throw new RpcException(
+                "not_found",
+                $"Cache root directory not found: {root}",
+                new { rootPath = root });
+        }
+
+        return root;
+    }
+
     private object GetSessionState()
     {
         lock (_stateSync)
@@ -1401,6 +1439,25 @@ internal sealed class DesktopHostApplication
                 cacheCount = _currentIndex?.VideoCaches.Count ?? 0,
                 lastScanCompletedAtUtc = _lastScanCompletedAtUtc
             };
+        }
+    }
+
+    private bool CurrentIndexMatchesSettings(DesktopSettings settings)
+    {
+        lock (_stateSync)
+        {
+            if (_currentIndex is null ||
+                _currentIncludeIncomplete != settings.IncludeIncomplete)
+            {
+                return false;
+            }
+
+            // When the root is intentionally not persisted, the current index is
+            // still the validated root for this process lifetime. Otherwise it is
+            // reusable only when it matches the newly saved root.
+            return !settings.RememberRootPath
+                ? !string.IsNullOrWhiteSpace(_currentRoot)
+                : PathsEqual(_currentRoot, settings.RootPath);
         }
     }
 

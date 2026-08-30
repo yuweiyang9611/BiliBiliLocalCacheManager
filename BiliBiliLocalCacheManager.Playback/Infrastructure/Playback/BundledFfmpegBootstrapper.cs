@@ -322,7 +322,7 @@ internal static class BundledFfmpegBootstrapper
         {
             if (File.Exists(overrideArchivePath))
             {
-                var overrideHash = ComputeSha256(
+                var overrideHash = VerifyBundleArchive(
                     overrideArchivePath,
                     cancellationToken,
                     percentage => ReportProgress(reportProgress, "正在校验 FFmpeg 压缩包", percentage));
@@ -784,6 +784,24 @@ internal static class BundledFfmpegBootstrapper
         return ComputeSha256Async(filePath, cancellationToken, reportProgress)
             .GetAwaiter()
             .GetResult();
+    }
+
+    internal static string VerifyBundleArchive(
+        string filePath,
+        CancellationToken cancellationToken,
+        Action<double?>? reportProgress = null)
+    {
+        var actualHash = ComputeSha256(filePath, cancellationToken, reportProgress);
+        if (!string.Equals(
+                actualHash,
+                BundleManifest.Sha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"FFmpeg 压缩包校验失败。预期 SHA256 为 {BundleManifest.Sha256}，实际为 {actualHash}。");
+        }
+
+        return actualHash;
     }
 
     private static async Task<string> ComputeSha256Async(

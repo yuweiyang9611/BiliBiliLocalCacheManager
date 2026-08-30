@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Add independent desktop settings for remembering the cache root and scanning it on startup; startup scanning is opt-in, and schema-v1 users with a saved root must explicitly choose whether to forget it, remember it without scanning, or enable startup scans.
+
+### Changed
+
+- Keep startup lightweight by loading storage statistics and application-trash entries only when their pages are opened, instead of traversing those directories while the window connects.
+- Validate a newly selected cache root with a non-persisting scan before committing the settings change, and retain that validated index instead of traversing the directory again; disabling root persistence now forgets it on the next launch while retaining the validated root for the current session.
+
+### Fixed
+
+- Bind every Electron trash mutation to an explicit cache root, and require permanent cleanup to carry the complete non-empty entry snapshot shown by the UI; Core now validates that snapshot after acquiring the per-root cross-process mutation lock and deletes nothing when it is stale, cross-root, or incomplete.
+- Prevent a persisted search keyword or an unbound process-local index from bypassing the startup-scan choice or exposing another root's cache rows after a renderer reload.
+- Strip development, test, Host-path, FFmpeg, and .NET runtime injection variables before launching a packaged Desktop Host, while preserving only explicitly trusted smoke-test data paths.
+- Require a locally overridden Windows FFmpeg archive to match the SHA-256 pinned in the bundled manifest before it can be extracted or executed.
+
 ## [0.4.0-rc.1] - 2026-08-27
 
 ### Added

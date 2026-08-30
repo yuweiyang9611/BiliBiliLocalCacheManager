@@ -30,6 +30,7 @@ internal sealed class DiagnosticExporter(
         string destinationPath,
         SettingsState settingsState,
         object? sessionState,
+        string? sessionRootPath,
         CancellationToken cancellationToken)
     {
         var outputPath = Path.GetFullPath(destinationPath);
@@ -46,6 +47,7 @@ internal sealed class DiagnosticExporter(
                 Message = RedactText(
                     item.Message,
                     settingsState.Settings.RootPath,
+                    sessionRootPath,
                     artifactStore.RootDirectory)
             })
             .ToArray();
@@ -100,6 +102,7 @@ internal sealed class DiagnosticExporter(
                                 : RedactText(
                                     settingsState.Message,
                                     settingsState.Settings.RootPath,
+                                    sessionRootPath,
                                     artifactStore.RootDirectory)
                         },
                         ffmpeg = RedactFfmpeg(ffmpegDiagnosticsProvider.GetSnapshot()),
@@ -157,10 +160,12 @@ internal sealed class DiagnosticExporter(
 
     private static string RedactText(
         string value,
-        string? cacheRoot,
+        string? savedCacheRoot,
+        string? sessionCacheRoot,
         string? transcodeCacheRoot)
     {
-        var redacted = ReplaceKnownPath(value, cacheRoot, "[CACHE_ROOT]");
+        var redacted = ReplaceKnownPath(value, savedCacheRoot, "[CACHE_ROOT]");
+        redacted = ReplaceKnownPath(redacted, sessionCacheRoot, "[CACHE_ROOT]");
         redacted = ReplaceKnownPath(redacted, transcodeCacheRoot, "[TRANSCODE_CACHE_ROOT]");
         redacted = ReplaceKnownPath(
             redacted,

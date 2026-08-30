@@ -23,5 +23,6 @@ public interface ICacheTrashService
 
     CacheTrashPurgeResult Purge(
         string rootDirectory,
-        bool includeUntrustedLegacyEntries = false);
+        bool includeUntrustedLegacyEntries = false,
+        IReadOnlyCollection<string>? expectedEntryIds = null);
 }

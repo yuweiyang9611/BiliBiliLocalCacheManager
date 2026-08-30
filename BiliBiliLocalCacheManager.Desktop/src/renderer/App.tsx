@@ -20,6 +20,9 @@ type Page = 'library' | 'storage' | 'trash' | 'settings' | 'diagnostics';
 type Notice = { id: number; kind: 'success' | 'error' | 'info'; message: string };
 type Activity = { time: Date; kind: 'success' | 'error' | 'info'; message: string };
 type UndoDeleteBatch = { rootPath: string; avids: string[] };
+type RootBoundState<T> = { rootPath: string | null; value: T };
+type LegacySettingsMigration = { rootPath: string };
+type IndexBinding = { rootPath: string; includeIncomplete: boolean };
 
 const navigation: Array<{ id: Page; label: string; icon: IconName }> = [
   { id: 'library', label: '缓存库', icon: 'library' },
@@ -34,8 +37,9 @@ export function App() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [draftSettings, setDraftSettings] = useState<AppSettings>(defaultSettings);
   const [items, setItems] = useState<CacheEntry[]>([]);
-  const [storage, setStorage] = useState<StorageSnapshot>(emptyStorage);
-  const [trash, setTrash] = useState<TrashEntry[]>([]);
+  const [indexBinding, setIndexBinding] = useState<IndexBinding | null>(null);
+  const [storageState, setStorageState] = useState<RootBoundState<StorageSnapshot>>({ rootPath: null, value: emptyStorage });
+  const [trashState, setTrashState] = useState<RootBoundState<TrashEntry[]>>({ rootPath: null, value: [] });
   const [health, setHealth] = useState<HostHealth | null>(null);
   const [capabilities, setCapabilities] = useState<DesktopCapabilities>({ playback: true, exportMedia: true, trashPurge: false, nativeWayland: false });
   const [desktop, setDesktop] = useState<DesktopInfo | null>(null);
@@ -49,11 +53,19 @@ export function App() {
   const [notices, setNotices] = useState<Notice[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [confirm, setConfirm] = useState<{ title: string; body: string; destructive?: boolean; action(): void } | null>(null);
+  const [legacySettingsMigration, setLegacySettingsMigration] = useState<LegacySettingsMigration | null>(null);
   const [undoDeleteBatch, setUndoDeleteBatch] = useState<UndoDeleteBatch | null>(null);
   const noticeId = useRef(0);
   const searchInput = useRef<HTMLInputElement>(null);
   const searchWasActive = useRef(false);
   const operationInFlight = useRef(true);
+  const activeRootPath = settings.rootPath.trim();
+  const activeRootPathRef = useRef(activeRootPath);
+  activeRootPathRef.current = activeRootPath;
+  const storage = storageState.rootPath === activeRootPath ? storageState.value : emptyStorage;
+  const trash = trashState.rootPath === activeRootPath ? trashState.value : [];
+  const hasActiveIndex = indexBinding?.rootPath === activeRootPath &&
+    indexBinding.includeIncomplete === settings.includeIncomplete;
 
   const notify = useCallback((kind: Notice['kind'], message: string) => {
     const id = ++noticeId.current;
@@ -67,6 +79,24 @@ export function App() {
     setSelectedIds(new Set());
     setFocusedId(null);
     setSelectedSegmentIds(new Set());
+  }, []);
+
+  const invalidateRootViews = useCallback(() => {
+    setStorageState({ rootPath: null, value: emptyStorage });
+    setTrashState({ rootPath: null, value: [] });
+    setSelectedTrashIds(new Set());
+  }, []);
+
+  const invalidateStorage = useCallback(() => {
+    setStorageState({ rootPath: null, value: emptyStorage });
+  }, []);
+
+  const bindStorage = useCallback((rootPath: string, value: StorageSnapshot) => {
+    if (activeRootPathRef.current === rootPath) setStorageState({ rootPath, value });
+  }, []);
+
+  const bindTrash = useCallback((rootPath: string, value: TrashEntry[]) => {
+    if (activeRootPathRef.current === rootPath) setTrashState({ rootPath, value });
   }, []);
 
   const run = useCallback(async <T,>(label: string, operation: () => Promise<T>): Promise<T | undefined> => {
@@ -103,25 +133,33 @@ export function App() {
         setSettings(loadedSettings);
         setDraftSettings(loadedSettings);
         setItems(initial.items ?? []);
-        setStorage({ ...emptyStorage, ...(initial.storage ?? {}) });
-        setTrash(initial.trash ?? []);
+        setIndexBinding(null);
+        setStorageState({ rootPath: null, value: emptyStorage });
+        setTrashState({ rootPath: null, value: [] });
         setCapabilities(initial.capabilities ?? { playback: true, exportMedia: true, trashPurge: false, nativeWayland: false });
         setHealth(hostHealth);
         setDesktop(info);
         notify('success', 'Desktop Host 已连接。');
         setInitialized(true);
 
-        if (loadedSettings.rootPath.trim()) {
+        const legacyRootPath = loadedSettings.rootPath.trim();
+        const requiresLegacyChoice = legacyRootPath.length > 0
+          && typeof initial.settingsState?.sourceSchemaVersion === 'number'
+          && initial.settingsState.sourceSchemaVersion < 2;
+        if (requiresLegacyChoice) {
+          replaceLibraryItems();
+          setLegacySettingsMigration({ rootPath: legacyRootPath });
+        } else if (loadedSettings.scanOnStartup && legacyRootPath) {
           setBusy('正在自动扫描缓存…');
           try {
             const result = await window.cacheManager.scan({
-              rootPath: loadedSettings.rootPath,
+              rootPath: legacyRootPath,
               includeIncomplete: loadedSettings.includeIncomplete,
+              persistSettings: false,
             });
+            setIndexBinding({ rootPath: legacyRootPath, includeIncomplete: loadedSettings.includeIncomplete });
             replaceLibraryItems(result.items ?? []);
             notify('success', `已自动扫描记住的目录，共发现 ${result.items?.length ?? 0} 条缓存。`);
-            try { setStorage(await window.cacheManager.getStorage()); }
-            catch { setHealth(null); }
           } catch (error) {
             setHealth(null);
             notify('error', `自动扫描失败：${describeError(error)}`);
@@ -154,41 +192,54 @@ export function App() {
   }, [focusedItem, items, selectedIds, selectedSegmentIds]);
 
   const browse = useCallback(async () => {
-    const saved = await run('正在选择缓存目录…', async () => {
+    const completed = await run('正在验证缓存目录…', async () => {
       const rootPath = await window.cacheManager.chooseRootDirectory(settings.rootPath);
       if (!rootPath) return null;
-      return window.cacheManager.updateSettings({ rootPath });
+      const normalizedRootPath = rootPath.trim();
+      const result = await window.cacheManager.scan({
+        rootPath: normalizedRootPath,
+        includeIncomplete: settings.includeIncomplete,
+        persistSettings: false,
+      });
+      const saved = await window.cacheManager.updateSettings({
+        rootPath: normalizedRootPath,
+        includeIncomplete: settings.includeIncomplete,
+      });
+      const sessionSettings = { ...saved, rootPath: normalizedRootPath };
+      return { saved: sessionSettings, result, rootPath: normalizedRootPath };
     });
-    if (!saved) return;
-    setSettings(saved);
-    setDraftSettings(saved);
+    if (!completed) return;
+    setSettings(completed.saved);
+    setDraftSettings(completed.saved);
     setUndoDeleteBatch(null);
-    replaceLibraryItems();
-    if (!saved.rootPath.trim()) return;
-    const result = await run('正在扫描新目录…', () => window.cacheManager.scan({
-      rootPath: saved.rootPath,
-      includeIncomplete: saved.includeIncomplete,
-    }));
-    if (!result) return;
-    replaceLibraryItems(result.items ?? []);
-    notify('success', `目录已保存并扫描，共发现 ${result.items?.length ?? 0} 条缓存。`);
-    void window.cacheManager.getStorage().then(setStorage).catch(() => setHealth(null));
-  }, [notify, replaceLibraryItems, run, settings.rootPath]);
+    invalidateRootViews();
+    setIndexBinding({ rootPath: completed.rootPath, includeIncomplete: settings.includeIncomplete });
+    replaceLibraryItems(completed.result.items ?? []);
+    notify('success', `目录已验证并切换，共发现 ${completed.result.items?.length ?? 0} 条缓存。`);
+  }, [invalidateRootViews, notify, replaceLibraryItems, run, settings.includeIncomplete, settings.rootPath]);
 
   const scan = useCallback(async () => {
     if (!settings.rootPath.trim()) { notify('error', '请先选择 B 站缓存根目录。'); return; }
     const result = await run('正在扫描缓存…', () => window.cacheManager.scan({
-      rootPath: settings.rootPath,
+      rootPath: activeRootPath,
       includeIncomplete: settings.includeIncomplete,
+      persistSettings: true,
     }));
     if (!result) return;
+    setIndexBinding({ rootPath: activeRootPath, includeIncomplete: settings.includeIncomplete });
     replaceLibraryItems(result.items ?? []);
+    invalidateStorage();
     notify('success', `扫描完成，共发现 ${result.items?.length ?? 0} 条缓存。`);
-    void window.cacheManager.getStorage().then(setStorage).catch(() => setHealth(null));
-  }, [notify, replaceLibraryItems, run, settings.includeIncomplete, settings.rootPath]);
+  }, [activeRootPath, invalidateStorage, notify, replaceLibraryItems, run, settings.includeIncomplete]);
 
   const search = useCallback(async () => {
+    if (!hasActiveIndex) {
+      notify('info', '请先扫描当前缓存目录，再进行搜索。');
+      return;
+    }
     const result = await run('正在筛选…', () => window.cacheManager.search({
+      rootPath: activeRootPath,
+      includeIncomplete: settings.includeIncomplete,
       keyword: settings.keyword.trim(),
       matchMode: settings.matchMode,
       splitKeywords: settings.splitKeywords,
@@ -200,17 +251,19 @@ export function App() {
       caseSensitive: settings.caseSensitive,
     }));
     if (result) replaceLibraryItems(result);
-  }, [replaceLibraryItems, run, settings]);
+  }, [activeRootPath, hasActiveIndex, notify, replaceLibraryItems, run, settings]);
 
   useEffect(() => {
+    if (!initialized || legacySettingsMigration || !hasActiveIndex) return;
     const hasKeyword = Boolean(settings.keyword.trim());
     if (!hasKeyword && !searchWasActive.current) return;
     const timer = window.setTimeout(() => {
+      if (operationInFlight.current) return;
       searchWasActive.current = hasKeyword;
       void search();
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [search, settings.keyword]);
+  }, [hasActiveIndex, initialized, legacySettingsMigration, search, settings.keyword]);
 
   const updateSetting = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setSettings((current) => ({ ...current, [key]: value }));
@@ -219,63 +272,69 @@ export function App() {
   const play = useCallback(async (explicitTargets?: SelectionTarget[]) => {
     const requestedTargets = explicitTargets ?? targets;
     if (requestedTargets.length === 0) { notify('info', '请先选择缓存或分段。'); return; }
-    const result = await run('正在准备播放…', () => window.cacheManager.play(requestedTargets, settings.playerPreference));
+    if (!activeRootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
+    const result = await run('正在准备播放…', () => window.cacheManager.play(activeRootPath, requestedTargets, settings.playerPreference, settings.includeIncomplete));
     if (result) notify('success', `已将 ${result.queued} 个页面交给播放器。`);
-  }, [notify, run, settings.playerPreference, targets]);
+  }, [activeRootPath, notify, run, settings.includeIncomplete, settings.playerPreference, targets]);
 
   const exportMedia = useCallback(async () => {
     if (targets.length === 0) { notify('info', '请先选择要导出的缓存或分段。'); return; }
+    if (!activeRootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
     const title = targets.length === 1 && focusedItem ? safeName(focusedItem.title) : `缓存导出-${dateStamp()}`;
-    const result = await run('正在导出 MP4…', () => window.cacheManager.exportMedia(targets, `${title}.mp4`));
+    const result = await run('正在导出 MP4…', () => window.cacheManager.exportMedia(activeRootPath, targets, `${title}.mp4`, settings.includeIncomplete));
     if (result) notify('success', `已导出：${result.outputPath}`);
-  }, [focusedItem, notify, run, targets]);
+  }, [activeRootPath, focusedItem, notify, run, settings.includeIncomplete, targets]);
 
   const moveToTrash = useCallback(() => {
     const avids = items.filter((item) => selectedIds.has(item.id)).map((item) => item.avid);
     if (avids.length === 0) { notify('info', '请先选择要删除的缓存。'); return; }
+    const rootPath = activeRootPath;
+    if (!rootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
     setConfirm({
       title: `移入回收站（${avids.length} 项）`,
       body: '所选缓存将移动到应用回收站，之后仍可恢复。正在播放或导出的项目请先停止操作。',
       destructive: true,
       action: () => { void (async () => {
+        if (activeRootPathRef.current !== rootPath) {
+          notify('error', '缓存根目录已变化，已取消移动到回收站。');
+          return;
+        }
         const completed = await run('正在移动到回收站…', async () => {
-          const result = await window.cacheManager.moveToTrash(avids);
-          const [nextTrash, nextStorage] = await Promise.all([
-            window.cacheManager.listTrash(),
-            window.cacheManager.getStorage(),
-          ]);
-          return { result, nextTrash, nextStorage };
+          const result = await window.cacheManager.moveToTrash(rootPath, avids);
+          return { result };
         });
         if (!completed) return;
         setItems((current) => current.filter((item) => !completed.result.moved.includes(item.avid)));
+        if (completed.result.moved.length > 0) setIndexBinding(null);
         setSelectedIds(new Set());
         setFocusedId(null);
         setSelectedSegmentIds(new Set());
-        setTrash(completed.nextTrash);
-        setStorage(completed.nextStorage);
+        invalidateRootViews();
         setUndoDeleteBatch(completed.result.moved.length > 0
-          ? { rootPath: settings.rootPath.trim(), avids: completed.result.moved }
+          ? { rootPath, avids: completed.result.moved }
           : null);
         notify(completed.result.failed.length ? 'error' : 'success', `已移动 ${completed.result.moved.length} 项，失败 ${completed.result.failed.length} 项。${completed.result.moved.length ? '可按 Ctrl+Z 撤销。' : ''}`);
       })(); },
     });
-  }, [items, notify, run, selectedIds, settings.rootPath]);
+  }, [activeRootPath, invalidateRootViews, items, notify, run, selectedIds]);
 
   useEffect(() => {
-    setUndoDeleteBatch((current) => current && current.rootPath !== settings.rootPath.trim() ? null : current);
-  }, [settings.rootPath]);
+    invalidateRootViews();
+    setUndoDeleteBatch((current) => current && current.rootPath !== activeRootPath ? null : current);
+  }, [activeRootPath, invalidateRootViews]);
 
   const undoLastDelete = useCallback(async () => {
     const batch = undoDeleteBatch;
     if (!batch) { notify('info', '没有可撤销的删除操作。'); return; }
-    if (batch.rootPath !== settings.rootPath.trim()) {
+    if (batch.rootPath !== activeRootPath) {
       setUndoDeleteBatch(null);
       notify('info', '缓存根目录已变化，不能撤销之前目录中的删除。');
       return;
     }
+    const rootPath = batch.rootPath;
 
     const completed = await run('正在撤销删除…', async () => {
-      const entries = await window.cacheManager.listTrash();
+      const entries = await window.cacheManager.listTrash(rootPath);
       const requestedAvids = new Set(batch.avids);
       const newestByAvid = new Map<string, TrashEntry>();
       for (const entry of [...entries].sort((left, right) => trashTime(right) - trashTime(left))) {
@@ -286,49 +345,71 @@ export function App() {
         return entry ? [entry.id] : [];
       });
       const restoreResult = entryIds.length
-        ? await window.cacheManager.restoreTrash(entryIds)
+        ? await window.cacheManager.restoreTrash(rootPath, entryIds)
         : { restored: [], failed: [] };
-      const [nextTrash, nextStorage, scanResult] = await Promise.all([
-        window.cacheManager.listTrash(),
-        window.cacheManager.getStorage(),
-        restoreResult.restored.length
-          ? window.cacheManager.scan({ rootPath: settings.rootPath, includeIncomplete: settings.includeIncomplete })
-          : Promise.resolve<{ items: CacheEntry[] } | null>(null),
-      ]);
+      const scanResult = restoreResult.restored.length
+        ? await window.cacheManager.scan({
+          rootPath,
+          includeIncomplete: settings.includeIncomplete,
+          persistSettings: false,
+        })
+        : null;
       return {
         restoreResult,
-        nextTrash,
-        nextStorage,
         scanResult,
         missingCount: batch.avids.length - entryIds.length,
       };
     });
     if (!completed) return;
     setUndoDeleteBatch(null);
-    setTrash(completed.nextTrash);
-    setStorage(completed.nextStorage);
-    setSelectedTrashIds(new Set());
+    invalidateRootViews();
     if (completed.scanResult) {
+      setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete });
       replaceLibraryItems(completed.scanResult.items ?? []);
     }
     const failedCount = completed.restoreResult.failed.length + completed.missingCount;
     notify(failedCount ? 'error' : 'success', `已撤销 ${completed.restoreResult.restored.length} 项删除，失败 ${failedCount} 项。`);
-  }, [notify, replaceLibraryItems, run, settings.includeIncomplete, settings.rootPath, undoDeleteBatch]);
+  }, [activeRootPath, invalidateRootViews, notify, replaceLibraryItems, run, settings.includeIncomplete, undoDeleteBatch]);
 
-  const refreshStorage = useCallback(async () => {
-    const value = await run('正在统计存储…', () => window.cacheManager.getStorage());
-    if (value) { setStorage(value); notify('success', '存储统计已刷新。'); }
-  }, [notify, run]);
+  const refreshStorage = useCallback(async (announce = true) => {
+    const rootPath = activeRootPath;
+    const value = await run('正在统计存储…', () => window.cacheManager.getStorage(rootPath || undefined));
+    if (value) {
+      bindStorage(rootPath, value);
+      if (announce) notify('success', '存储统计已刷新。');
+    }
+  }, [activeRootPath, bindStorage, notify, run]);
+
+  const refreshTrash = useCallback(async (announce = true) => {
+    const rootPath = activeRootPath;
+    if (!rootPath) {
+      setTrashState({ rootPath, value: [] });
+      return;
+    }
+    const value = await run('正在读取回收站…', () => window.cacheManager.listTrash(rootPath));
+    if (value) {
+      bindTrash(rootPath, value);
+      setSelectedTrashIds(new Set());
+      if (announce) notify('success', '回收站已刷新。');
+    }
+  }, [activeRootPath, bindTrash, notify, run]);
+
+  useEffect(() => {
+    if (!initialized || busy || legacySettingsMigration) return;
+    if (page === 'storage' && storageState.rootPath !== activeRootPath) void refreshStorage(false);
+    if (page === 'trash' && trashState.rootPath !== activeRootPath) void refreshTrash(false);
+  }, [activeRootPath, busy, initialized, legacySettingsMigration, page, refreshStorage, refreshTrash, storageState.rootPath, trashState.rootPath]);
 
   const cleanupTranscodeCache = useCallback(async () => {
+    const rootPath = activeRootPath;
     const completed = await run('正在按策略清理转码缓存…', async () => {
       const result = await window.cacheManager.cleanupTranscodeCache();
-      return { result, snapshot: await window.cacheManager.getStorage() };
+      return { result, snapshot: await window.cacheManager.getStorage(rootPath || undefined) };
     });
     if (!completed) return;
-    setStorage(completed.snapshot);
+    bindStorage(rootPath, completed.snapshot);
     notify(completed.result.failedFileCount ? 'error' : 'success', artifactCleanupMessage('清理完成', completed.result));
-  }, [notify, run]);
+  }, [activeRootPath, bindStorage, notify, run]);
 
   const openTranscodeCache = useCallback(async () => {
     const opened = await run('正在打开转码缓存目录…', () => window.cacheManager.openTranscodeCache());
@@ -336,6 +417,7 @@ export function App() {
   }, [notify, run]);
 
   const requestClearTranscodeCache = useCallback(() => {
+    const rootPath = activeRootPath;
     setConfirm({
       title: '清空转码缓存',
       body: '将清空应用管理的转码产物，不会删除 B 站原始缓存。确认后系统还会再询问一次。',
@@ -344,14 +426,52 @@ export function App() {
         const completed = await run('正在清空转码缓存…', async () => {
           const result = await window.cacheManager.clearTranscodeCache();
           if (!result) return null;
-          return { result, snapshot: await window.cacheManager.getStorage() };
+          return { result, snapshot: await window.cacheManager.getStorage(rootPath || undefined) };
         });
         if (!completed) return;
-        setStorage(completed.snapshot);
+        bindStorage(rootPath, completed.snapshot);
         notify(completed.result.failedFileCount ? 'error' : 'success', artifactCleanupMessage('清空完成', completed.result));
       })(); },
     });
-  }, [notify, run]);
+  }, [activeRootPath, bindStorage, notify, run]);
+
+  const resolveLegacySettingsMigration = useCallback(async (choice: 'scan' | 'remember' | 'forget') => {
+    const migration = legacySettingsMigration;
+    if (!migration) return;
+    const patch: Partial<AppSettings> = choice === 'forget'
+      ? { rootPath: '', rememberRootPath: false, scanOnStartup: false }
+      : { rootPath: migration.rootPath, rememberRootPath: true, scanOnStartup: choice === 'scan' };
+    const saved = await run('正在保存启动扫描选择…', () => window.cacheManager.updateSettings(patch));
+    if (!saved) return;
+
+    const sessionSettings = choice === 'forget' ? saved : { ...saved, rootPath: migration.rootPath };
+    setSettings(sessionSettings);
+    setDraftSettings(sessionSettings);
+    setLegacySettingsMigration(null);
+    setUndoDeleteBatch(null);
+    invalidateRootViews();
+    replaceLibraryItems();
+    if (choice === 'forget') {
+      setIndexBinding(null);
+      notify('success', '已忘记旧缓存目录，启动时不会扫描。');
+      return;
+    }
+    if (choice === 'remember') {
+      notify('success', '已记住缓存目录；启动时不会自动扫描。');
+      return;
+    }
+
+    const result = await run('正在扫描旧缓存目录…', () => window.cacheManager.scan({
+      rootPath: migration.rootPath,
+      includeIncomplete: sessionSettings.includeIncomplete,
+      persistSettings: false,
+    }));
+    if (!result) return;
+    setIndexBinding({ rootPath: migration.rootPath, includeIncomplete: sessionSettings.includeIncomplete });
+    replaceLibraryItems(result.items ?? []);
+    invalidateStorage();
+    notify('success', `已启用启动扫描，共发现 ${result.items?.length ?? 0} 条缓存。`);
+  }, [invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, run]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -414,41 +534,65 @@ export function App() {
             clear={requestClearTranscodeCache}
             open={openTranscodeCache}
           />}
-          {page === 'trash' && <TrashPage entries={trash} selected={selectedTrashIds} setSelected={setSelectedTrashIds} busy={Boolean(busy)} canPurge={capabilities.trashPurge} restore={() => {
+          {page === 'trash' && <TrashPage entries={trash} selected={selectedTrashIds} setSelected={setSelectedTrashIds} busy={Boolean(busy)} canPurge={capabilities.trashPurge} refresh={refreshTrash} restore={() => {
             if (!selectedTrashIds.size) return notify('info', '请选择要恢复的条目。');
+            const rootPath = trashState.rootPath;
+            if (!rootPath || rootPath !== activeRootPath) return notify('error', '回收站内容与当前缓存目录不一致，请刷新后重试。');
+            const entryIds = trash.filter((entry) => selectedTrashIds.has(entry.id)).map((entry) => entry.id);
+            if (!entryIds.length) return notify('info', '请选择要恢复的条目。');
             void (async () => {
               const completed = await run('正在恢复缓存…', async () => {
-                const result = await window.cacheManager.restoreTrash([...selectedTrashIds]);
-                const [nextTrash, nextStorage, scanResult] = await Promise.all([
-                  window.cacheManager.listTrash(),
-                  window.cacheManager.getStorage(),
-                  result.restored.length && settings.rootPath.trim()
-                    ? window.cacheManager.scan({ rootPath: settings.rootPath, includeIncomplete: settings.includeIncomplete })
-                    : Promise.resolve<{ items: CacheEntry[] } | null>(null),
-                ]);
-                return { result, nextTrash, nextStorage, scanResult };
+                const result = await window.cacheManager.restoreTrash(rootPath, entryIds);
+                const scanResult = result.restored.length
+                  ? await window.cacheManager.scan({
+                    rootPath,
+                    includeIncomplete: settings.includeIncomplete,
+                    persistSettings: false,
+                  })
+                  : null;
+                return { result, scanResult };
               });
               if (!completed) return;
-              setTrash(completed.nextTrash); setStorage(completed.nextStorage); setSelectedTrashIds(new Set()); setUndoDeleteBatch(null);
-              if (completed.scanResult) replaceLibraryItems(completed.scanResult.items ?? []);
+              const restored = new Set(completed.result.restored);
+              if (activeRootPathRef.current === rootPath) {
+                setTrashState((current) => current.rootPath === rootPath
+                  ? { rootPath, value: current.value.filter((entry) => !restored.has(entry.id)) }
+                  : current);
+              }
+              invalidateStorage(); setSelectedTrashIds(new Set()); setUndoDeleteBatch(null);
+              if (completed.scanResult) {
+                setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete });
+                replaceLibraryItems(completed.scanResult.items ?? []);
+              }
               notify(completed.result.failed.length ? 'error' : 'success', `已恢复 ${completed.result.restored.length} 项。`);
             })();
           }} purge={(all) => setConfirm({
-            title: all ? '彻底清空回收站' : `永久删除（${selectedTrashIds.size} 项）`,
-            body: '此操作会永久删除文件，无法撤销。请确认这些缓存不再需要。', destructive: true,
+            title: (() => {
+              const count = all ? trash.length : selectedTrashIds.size;
+              return all ? `彻底清空回收站（${count} 项）` : `永久删除（${count} 项）`;
+            })(),
+            body: (() => {
+              const chosen = all ? trash : trash.filter((entry) => selectedTrashIds.has(entry.id));
+              return `缓存目录：${trashState.rootPath ?? '未加载'}；永久删除 ${chosen.length} 项，共 ${formatBytes(chosen.reduce((sum, entry) => sum + entry.sizeBytes, 0))}。此操作无法撤销。`;
+            })(), destructive: true,
             action: () => { void (async () => {
-              const ids = all ? undefined : [...selectedTrashIds];
-              if (!all && ids!.length === 0) { notify('info', '请选择要永久删除的条目。'); return; }
+              const rootPath = trashState.rootPath;
+              const chosen = all ? trash : trash.filter((entry) => selectedTrashIds.has(entry.id));
+              const ids = chosen.map((entry) => entry.id);
+              if (!rootPath || rootPath !== activeRootPathRef.current) { notify('error', '缓存根目录已变化，已取消永久删除。'); return; }
+              if (!ids.length) { notify('info', '没有可永久删除的条目。'); return; }
               const completed = await run('正在永久删除…', async () => {
-                const result = await window.cacheManager.purgeTrash(ids);
-                const [nextTrash, nextStorage] = await Promise.all([
-                  window.cacheManager.listTrash(),
-                  window.cacheManager.getStorage(),
-                ]);
-                return { result, nextTrash, nextStorage };
+                const result = await window.cacheManager.purgeTrash(rootPath, ids);
+                return { result };
               });
               if (!completed) return;
-              setTrash(completed.nextTrash); setStorage(completed.nextStorage); setSelectedTrashIds(new Set());
+              const purged = new Set(completed.result.purged);
+              if (activeRootPathRef.current === rootPath) {
+                setTrashState((current) => current.rootPath === rootPath
+                  ? { rootPath, value: current.value.filter((entry) => !purged.has(entry.id)) }
+                  : current);
+              }
+              invalidateStorage(); setSelectedTrashIds(new Set());
               notify(completed.result.failed.length ? 'error' : 'success', `已永久删除 ${completed.result.purged.length} 项。`);
             })(); },
           })} />}
@@ -456,29 +600,51 @@ export function App() {
             const value = await run('正在选择缓存目录…', () => window.cacheManager.chooseRootDirectory(draftSettings.rootPath));
             if (value) setDraftSettings((current) => ({ ...current, rootPath: value }));
           }} save={async () => {
-            const value = await run('正在保存设置…', () => window.cacheManager.updateSettings(draftSettings));
-            if (!value) return;
-            setSettings(value);
-            setDraftSettings(value);
+            const candidate = { ...draftSettings, rootPath: draftSettings.rootPath.trim() };
+            const rootChanged = candidate.rootPath !== activeRootPath;
+            const scanBehaviorChanged = candidate.includeIncomplete !== settings.includeIncomplete;
+            const completed = await run(rootChanged ? '正在验证并切换缓存目录…' : '正在保存设置…', async () => {
+              const scanResult = candidate.rootPath && (rootChanged || scanBehaviorChanged)
+                ? await window.cacheManager.scan({
+                  rootPath: candidate.rootPath,
+                  includeIncomplete: candidate.includeIncomplete,
+                  persistSettings: false,
+                })
+                : null;
+              const saved = await window.cacheManager.updateSettings(candidate);
+              const sessionSettings = candidate.rootPath ? { ...saved, rootPath: candidate.rootPath } : saved;
+              return { saved: sessionSettings, scanResult };
+            });
+            if (!completed) return;
+            setSettings(completed.saved);
+            setDraftSettings(completed.saved);
             setUndoDeleteBatch(null);
-            replaceLibraryItems();
-            if (!value.rootPath.trim()) {
+            if (rootChanged) invalidateRootViews();
+            if (completed.scanResult) {
+              setIndexBinding({
+                rootPath: candidate.rootPath,
+                includeIncomplete: candidate.includeIncomplete,
+              });
+              replaceLibraryItems(completed.scanResult.items ?? []);
+            }
+            if (!completed.saved.rootPath.trim()) {
+              setIndexBinding(null);
+              replaceLibraryItems();
               notify('success', '设置已保存；缓存根目录为空，列表已清空。');
               return;
             }
-            const result = await run('正在按新设置扫描…', () => window.cacheManager.scan({
-              rootPath: value.rootPath,
-              includeIncomplete: value.includeIncomplete,
-            }));
-            if (!result) return;
-            replaceLibraryItems(result.items ?? []);
-            notify('success', `设置已保存并重新扫描，共发现 ${result.items?.length ?? 0} 条缓存。`);
+            if (completed.scanResult) {
+              invalidateStorage();
+              notify('success', `设置已保存并重新扫描，共发现 ${completed.scanResult.items?.length ?? 0} 条缓存。`);
+            } else {
+              notify('success', '设置已保存。');
+            }
           }} busy={Boolean(busy)} />}
           {page === 'diagnostics' && <DiagnosticsPage health={health} desktop={desktop} activities={activities} refresh={async () => {
             const value = await run('正在检查运行环境…', () => window.cacheManager.health());
             if (value) { setHealth(value); notify(value.status === 'ok' ? 'success' : 'error', '运行环境检查完成。'); }
           }} exportReport={async () => {
-            const value = await run('正在导出诊断报告…', () => window.cacheManager.exportDiagnostics(`BLCM-diagnostics-${dateStamp()}.zip`));
+            const value = await run('正在导出诊断报告…', () => window.cacheManager.exportDiagnostics(`BLCM-diagnostics-${dateStamp()}.zip`, activeRootPath || undefined));
             if (value) notify('success', `诊断报告已导出：${value.outputPath}`);
           }} busy={Boolean(busy)} />}
         </section>
@@ -488,6 +654,7 @@ export function App() {
 
       <div className="toast-stack" aria-live="polite">{notices.map((notice) => <div key={notice.id} className={`toast ${notice.kind}`}><Icon name={notice.kind === 'error' ? 'warning' : 'check'} /><span>{notice.message}</span></div>)}</div>
       {confirm && <Modal title={confirm.title} onClose={() => setConfirm(null)}><p>{confirm.body}</p><div className="modal-actions"><button className="button ghost" onClick={() => setConfirm(null)}>取消</button><button className={confirm.destructive ? 'button danger' : 'button primary'} onClick={() => { const action = confirm.action; setConfirm(null); action(); }}>确认</button></div></Modal>}
+      {legacySettingsMigration && <Modal title="确认旧版缓存目录" onClose={() => undefined} closable={false}><p>旧版本记住了以下目录：</p><p className="migration-path">{legacySettingsMigration.rootPath}</p><p>请选择今后的启动行为。本次选择会保存，也可以稍后在“设置”中更改。</p><div className="modal-actions migration-actions"><button className="button ghost" disabled={Boolean(busy)} onClick={() => void resolveLegacySettingsMigration('forget')}>忘记目录</button><button className="button secondary" disabled={Boolean(busy)} onClick={() => void resolveLegacySettingsMigration('remember')}>仅记住，不扫描</button><button className="button primary" disabled={Boolean(busy)} onClick={() => void resolveLegacySettingsMigration('scan')}>启用并立即扫描</button></div></Modal>}
     </div>
   );
 }
@@ -517,7 +684,7 @@ function LibraryPage(props: LibraryProps) {
   const { settings, updateSetting } = props;
   return <div className="library-layout">
     <section className="card root-card">
-      <div className="field grow"><label htmlFor="root-path">缓存根目录</label><div className="input-action"><input id="root-path" value={settings.rootPath} onChange={(event) => updateSetting('rootPath', event.target.value)} placeholder="选择 B 站 download 缓存目录" /><button className="icon-button" aria-label="浏览缓存目录" onClick={() => void props.browse()} disabled={props.busy}><Icon name="folder" /></button></div></div>
+      <div className="field grow"><label htmlFor="root-path">缓存根目录</label><div className="input-action"><input id="root-path" value={settings.rootPath} readOnly title="请使用右侧按钮选择目录，或在设置页输入后验证切换" placeholder="选择 B 站 download 缓存目录" /><button className="icon-button" aria-label="浏览缓存目录" onClick={() => void props.browse()} disabled={props.busy}><Icon name="folder" /></button></div></div>
       <label className="toggle"><input type="checkbox" checked={settings.includeIncomplete} onChange={(event) => updateSetting('includeIncomplete', event.target.checked)} /><span />包含未完成缓存</label>
     </section>
     <section className="card search-card">
@@ -558,15 +725,15 @@ function StoragePage({ storage, settings, refresh, cleanup, clear, open, busy }:
     </section><section className="card policy-card"><div><h2>转码缓存策略</h2><p>超过 {settings.transcodeCacheRetentionDays} 天或总量超过 {settings.transcodeCacheMaxSizeGigabytes} GB 时进行维护。可在“设置”中调整。</p></div><div className="toolbar"><button className="button ghost" onClick={() => void open()} disabled={busy}><Icon name="folder" />打开转码缓存目录</button><button className="button secondary" onClick={() => void cleanup()} disabled={busy}><Icon name="refresh" />按策略清理</button><button className="button danger" onClick={clear} disabled={busy}><Icon name="delete" />清空转码缓存</button></div></section></div>;
 }
 
-function TrashPage({ entries, selected, setSelected, restore, purge, busy, canPurge }: { entries: TrashEntry[]; selected: Set<string>; setSelected(value: Set<string>): void; restore(): void; purge(all: boolean): void; busy: boolean; canPurge: boolean }) {
-  return <section className="card full-panel"><div className="panel-heading"><div><h2>应用回收站</h2><span>{entries.length} 项 · {formatBytes(entries.reduce((sum, item) => sum + item.sizeBytes, 0))}{!canPurge ? ' · 当前平台暂不支持永久清理' : ''}</span></div><div className="toolbar"><button className="button secondary" onClick={restore} disabled={!selected.size || busy}><Icon name="restore" />恢复所选</button>{canPurge && <button className="button danger" onClick={() => purge(true)} disabled={!entries.length || busy}>清空回收站</button>}</div></div>
+function TrashPage({ entries, selected, setSelected, refresh, restore, purge, busy, canPurge }: { entries: TrashEntry[]; selected: Set<string>; setSelected(value: Set<string>): void; refresh(): Promise<void>; restore(): void; purge(all: boolean): void; busy: boolean; canPurge: boolean }) {
+  return <section className="card full-panel"><div className="panel-heading"><div><h2>应用回收站</h2><span>{entries.length} 项 · {formatBytes(entries.reduce((sum, item) => sum + item.sizeBytes, 0))}{!canPurge ? ' · 当前平台暂不支持永久清理' : ''}</span></div><div className="toolbar"><button className="button ghost" onClick={() => void refresh()} disabled={busy}><Icon name="refresh" />刷新</button><button className="button secondary" onClick={restore} disabled={!selected.size || busy}><Icon name="restore" />恢复所选</button>{canPurge && <button className="button danger" onClick={() => purge(true)} disabled={!entries.length || busy}>清空回收站</button>}</div></div>
     {entries.length ? <div className="table-scroll"><table><thead><tr><th className="check-cell"><input aria-label="选择全部回收站条目" type="checkbox" checked={selected.size === entries.length} onChange={(event) => setSelected(event.target.checked ? new Set(entries.map((item) => item.id)) : new Set())} /></th><th>标题</th><th>AV 号</th><th>大小</th><th>删除时间</th><th>原位置</th></tr></thead><tbody>{entries.map((item) => <tr key={item.id}><td className="check-cell"><input aria-label={`选择 ${item.title}`} type="checkbox" checked={selected.has(item.id)} onChange={() => setSelected(toggleSet(selected, item.id))} /></td><td><strong>{item.title || '未命名缓存'}</strong></td><td>av{item.avid}</td><td>{formatBytes(item.sizeBytes)}</td><td>{formatDate(item.deletedAt)}</td><td className="path-cell" title={item.originalPath}>{item.originalPath ?? '—'}</td></tr>)}</tbody></table></div> : <Empty icon="trash" title="回收站为空" body="从缓存库删除的项目会先移到这里，避免误删。" />}
   </section>;
 }
 
 function SettingsPage({ value, setValue, browse, save, busy }: { value: AppSettings; setValue(value: AppSettings | ((current: AppSettings) => AppSettings)): void; browse(): Promise<void>; save(): Promise<void>; busy: boolean }) {
   const change = <K extends keyof AppSettings>(key: K, next: AppSettings[K]) => setValue((current) => ({ ...current, [key]: next }));
-  return <div className="settings-layout"><section className="card settings-section"><div className="section-title"><h2>缓存与扫描</h2><p>设置默认目录和扫描行为。</p></div><div className="settings-fields"><label>缓存根目录<div className="input-action"><input value={value.rootPath} onChange={(event) => change('rootPath', event.target.value)} /><button className="icon-button" onClick={() => void browse()} aria-label="选择缓存根目录" disabled={busy}><Icon name="folder" /></button></div></label><Check label="扫描时包含下载未完成的缓存" checked={value.includeIncomplete} onChange={(next) => change('includeIncomplete', next)} /></div></section>
+  return <div className="settings-layout"><section className="card settings-section"><div className="section-title"><h2>缓存与扫描</h2><p>设置默认目录和扫描行为。</p></div><div className="settings-fields"><label>缓存根目录<div className="input-action"><input value={value.rootPath} onChange={(event) => change('rootPath', event.target.value)} /><button className="icon-button" onClick={() => void browse()} aria-label="选择缓存根目录" disabled={busy}><Icon name="folder" /></button></div></label><Check label="记住缓存目录" checked={value.rememberRootPath} onChange={(next) => setValue((current) => ({ ...current, rememberRootPath: next, scanOnStartup: next ? current.scanOnStartup : false }))} /><Check label="启动时自动扫描记住的目录" checked={value.scanOnStartup} disabled={!value.rememberRootPath} onChange={(next) => setValue((current) => ({ ...current, rememberRootPath: next ? true : current.rememberRootPath, scanOnStartup: next }))} /><Check label="扫描时包含下载未完成的缓存" checked={value.includeIncomplete} onChange={(next) => change('includeIncomplete', next)} /></div></section>
     <section className="card settings-section"><div className="section-title"><h2>播放与导出</h2><p>选择外部播放器；导出由 FFmpeg 后端完成。</p></div><div className="settings-fields"><label>首选播放器<select value={value.playerPreference} onChange={(event) => change('playerPreference', event.target.value as PlayerPreference)}><option value="system">系统默认</option><option value="mpv">mpv</option><option value="vlc">VLC</option></select></label></div></section>
     <section className="card settings-section"><div className="section-title"><h2>转码缓存维护</h2><p>限制临时播放与导出产物的保留周期和总量。</p></div><div className="settings-fields inline-fields"><label>保留天数<input type="number" min="1" max="1825" value={value.transcodeCacheRetentionDays} onChange={(event) => change('transcodeCacheRetentionDays', Number(event.target.value))} /><small>1–1825 天</small></label><label>容量上限<input type="number" min="1" max="128" value={value.transcodeCacheMaxSizeGigabytes} onChange={(event) => change('transcodeCacheMaxSizeGigabytes', Number(event.target.value))} /><small>1–128 GB</small></label></div></section>
     <div className="settings-actions"><button className="button primary" disabled={busy} onClick={() => void save()}>保存设置</button></div></div>;
@@ -580,9 +747,9 @@ function DiagnosticsPage({ health, desktop, activities, refresh, exportReport, b
 }
 
 function Metric({ label, value, detail, color }: { label: string; value: string; detail: string; color: string }) { return <div className={`metric-card ${color}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
-function Check({ label, checked, onChange }: { label: string; checked: boolean; onChange(value: boolean): void }) { return <label className="check"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>; }
+function Check({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange(value: boolean): void }) { return <label className="check"><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>; }
 function Empty({ icon, title, body, compact = false }: { icon: IconName; title: string; body: string; compact?: boolean }) { return <div className={compact ? 'empty compact' : 'empty'}><Icon name={icon} /><h3>{title}</h3><p>{body}</p></div>; }
-function Modal({ title, onClose, children }: { title: string; onClose(): void; children: ReactNode }) { return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-header"><h2 id="modal-title">{title}</h2><button className="icon-button" aria-label="关闭" onClick={onClose}>×</button></div>{children}</div></div>; }
+function Modal({ title, onClose, children, closable = true }: { title: string; onClose(): void; children: ReactNode; closable?: boolean }) { return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (closable && event.target === event.currentTarget) onClose(); }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-header"><h2 id="modal-title">{title}</h2>{closable && <button className="icon-button" aria-label="关闭" onClick={onClose}>×</button>}</div>{children}</div></div>; }
 function Description({ rows }: { rows: Array<[string, string | undefined]> }) { return <dl>{rows.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value || '—'}</dd></div>)}</dl>; }
 
 function toggleSet(current: Set<string>, value: string): Set<string> { const next = new Set(current); if (next.has(value)) next.delete(value); else next.add(value); return next; }

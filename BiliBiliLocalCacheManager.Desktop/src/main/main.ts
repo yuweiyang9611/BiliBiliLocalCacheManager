@@ -41,9 +41,13 @@ if (smokeDataRoot) {
   try { rmSync(electronUserData, { recursive: true, force: true }); } catch { /* A concurrent smoke will fail the lock below. */ }
   mkdirSync(electronUserData, { recursive: true });
   app.setPath('userData', electronUserData);
-  process.env.BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH = path.join(smokeDataRoot, 'settings.json');
-  process.env.BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT = path.join(smokeDataRoot, 'transcode');
 }
+const trustedHostEnvironmentOverrides = smokeDataRoot
+  ? {
+      BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH: path.join(smokeDataRoot, 'settings.json'),
+      BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT: path.join(smokeDataRoot, 'transcode'),
+    }
+  : undefined;
 if (!supported) {
   app.whenReady().then(() => {
     const message = `当前版本仅支持 Windows/Linux x64；检测到 ${process.platform}/${process.arch}。`;
@@ -69,7 +73,9 @@ if (supported && !singleInstance) {
 
 let mainWindow: BrowserWindow | null = null;
 let unregisterIpc: (() => void) | null = null;
-const bridge = new DesktopHostBridge();
+const bridge = new DesktopHostBridge({
+  trustedEnvOverrides: trustedHostEnvironmentOverrides,
+});
 const dirname = __dirname;
 let smokeCompleted = false;
 

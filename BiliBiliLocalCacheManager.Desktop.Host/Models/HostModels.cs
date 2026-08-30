@@ -1,5 +1,6 @@
 using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Playback.Models;
+using System.Text.Json.Serialization;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host;
 
@@ -15,11 +16,15 @@ internal sealed record HostProgressEvent(
 
 internal sealed class DesktopSettings
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
     public string RootPath { get; set; } = string.Empty;
+
+    public bool RememberRootPath { get; set; } = true;
+
+    public bool ScanOnStartup { get; set; }
 
     public bool IncludeIncomplete { get; set; }
 
@@ -54,6 +59,8 @@ internal sealed class DesktopSettings
     {
         SchemaVersion = SchemaVersion,
         RootPath = RootPath,
+        RememberRootPath = RememberRootPath,
+        ScanOnStartup = ScanOnStartup,
         IncludeIncomplete = IncludeIncomplete,
         Keyword = Keyword,
         SplitKeywords = SplitKeywords,
@@ -79,6 +86,13 @@ internal sealed record SettingsState(
     DesktopSettings Settings,
     bool CanSave,
     int? SourceSchemaVersion,
+    string? Message);
+
+internal sealed record SettingsStateDto(
+    bool CanSave,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    int? SourceSchemaVersion,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     string? Message);
 
 internal sealed record CacheDto(
