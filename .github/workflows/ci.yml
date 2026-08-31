@@ -325,6 +325,7 @@ jobs:
             family: fedora
     container:
       image: ${{ matrix.image }}
+      options: --cap-add=SYS_ADMIN
 
     steps:
       - name: Bootstrap Debian 13
