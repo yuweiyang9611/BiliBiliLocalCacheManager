@@ -383,7 +383,20 @@ jobs:
           launcher="$(command -v bilibili-local-cache-manager)"
           sandbox_path="$(dirname "$(readlink -f "$launcher")")/chrome-sandbox"
           test -f "$sandbox_path"
-          test "$(stat --format='%U:%G %a' "$sandbox_path")" = "root:root 4755"
+          sandbox_state="$(stat --format='%U:%G %a' "$sandbox_path")"
+          case "$sandbox_state" in
+            "root:root 4755")
+              echo "Installed package uses the Chromium SUID sandbox."
+              ;;
+            "root:root 755")
+              runuser --user "$smoke_user" -- unshare --user true
+              echo "Installed package uses the Chromium user-namespace sandbox."
+              ;;
+            *)
+              echo "Unexpected chrome-sandbox ownership or mode: $sandbox_state" >&2
+              exit 1
+              ;;
+          esac
 
           runtime_dir="/tmp/$smoke_user-runtime"
           install -d -m 0700 -o "$smoke_user" -g "$smoke_user" "$runtime_dir"

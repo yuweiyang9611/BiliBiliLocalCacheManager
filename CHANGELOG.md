@@ -25,7 +25,7 @@ All notable changes to this project are documented in this file.
 - Bind CLI `trash purge` confirmation to the complete pre-confirmation trash snapshot, include legacy-entry capacity in `--include-untrusted` prompts, and fail with zero deletions when the snapshot changes.
 - Make desktop search strictly latest-write-wins, keep domain and cancellation errors distinct from Host transport failure, and propagate cancellation for timeouts, renderer destruction, and every long-running Host IPC operation.
 - Reject malformed or mismatched Host v2 initialization data, expose an explicit renderer bootstrap failure state, and make source/packaged smoke tests prove settings loading, startup scanning of a real fixture, and Host IPC end to end.
-- Make Electron smoke tests fail closed on premature window shutdown, and exercise installed Debian/Fedora packages as an unprivileged user with the packaged Chromium SUID sandbox enabled.
+- Make Electron smoke tests fail closed on premature window shutdown, and exercise installed Debian/Fedora packages as an unprivileged user with a verified Chromium SUID or user-namespace sandbox.
 
 ## [0.4.0-rc.1] - 2026-08-27
 
