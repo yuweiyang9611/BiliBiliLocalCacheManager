@@ -27,6 +27,7 @@ public sealed class DesktopHostContractTests
         var result = await DispatchAsync(application, "initialState", "{}");
 
         Assert.Equal(JsonValueKind.Object, result.ValueKind);
+        Assert.Equal(2, result.GetProperty("protocolVersion").GetInt32());
         var settings = result.GetProperty("settings");
         Assert.Equal(string.Empty, settings.GetProperty("rootPath").GetString());
         Assert.True(settings.GetProperty("rememberRootPath").GetBoolean());
@@ -291,9 +292,14 @@ public sealed class DesktopHostContractTests
         var scan = await DispatchAsync(application, "scan", scanParameters);
         Assert.Empty(scan.GetProperty("items").EnumerateArray());
         Assert.Equal(0, scan.GetProperty("includedEntries").GetInt32());
+        Assert.Equal(0, scan.GetProperty("totalItems").GetInt32());
+        Assert.False(scan.GetProperty("hasMore").GetBoolean());
+        var indexToken = scan.GetProperty("indexToken").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(indexToken));
 
         var searchParameters = JsonSerializer.Serialize(new
         {
+            indexToken,
             rootPath = workspace.CacheRoot,
             includeIncomplete = true,
             keyword = string.Empty,
@@ -307,8 +313,273 @@ public sealed class DesktopHostContractTests
             caseSensitive = false
         });
         var search = await DispatchAsync(application, "search", searchParameters);
-        Assert.Equal(JsonValueKind.Array, search.ValueKind);
-        Assert.Empty(search.EnumerateArray());
+        Assert.Equal(JsonValueKind.Object, search.ValueKind);
+        Assert.Equal(indexToken, search.GetProperty("indexToken").GetString());
+        Assert.Empty(search.GetProperty("items").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task ScanAndSearch_PageCacheSummariesWithoutSegments()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "First cache");
+        workspace.CreateCache(202, new string('T', 5000));
+        workspace.CreateCache(303, "Third cache");
+        var application = workspace.CreateApplication();
+
+        var scan = await DispatchAsync(
+            application,
+            "scan",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                includeIncomplete = false,
+                offset = 0,
+                pageSize = 2
+            }));
+
+        Assert.Equal(3, scan.GetProperty("includedEntries").GetInt32());
+        Assert.Equal(0, scan.GetProperty("offset").GetInt32());
+        Assert.Equal(2, scan.GetProperty("pageSize").GetInt32());
+        Assert.Equal(3, scan.GetProperty("totalItems").GetInt32());
+        Assert.True(scan.GetProperty("hasMore").GetBoolean());
+        var firstPage = scan.GetProperty("items").EnumerateArray().ToArray();
+        Assert.Equal(2, firstPage.Length);
+        Assert.All(firstPage, item => Assert.False(item.TryGetProperty("segments", out _)));
+        Assert.All(
+            firstPage,
+            item => Assert.InRange(item.GetProperty("title").GetString()!.Length, 0, 4096));
+
+        var indexToken = scan.GetProperty("indexToken").GetString()!;
+        var secondPage = await DispatchAsync(
+            application,
+            "search",
+            JsonSerializer.Serialize(new
+            {
+                indexToken,
+                keyword = string.Empty,
+                offset = 2,
+                pageSize = 2
+            }));
+
+        Assert.Equal(indexToken, secondPage.GetProperty("indexToken").GetString());
+        Assert.Equal(3, secondPage.GetProperty("totalItems").GetInt32());
+        Assert.False(secondPage.GetProperty("hasMore").GetBoolean());
+        Assert.Single(secondPage.GetProperty("items").EnumerateArray());
+        Assert.False(
+            secondPage.GetProperty("items")[0].TryGetProperty("segments", out _));
+    }
+
+    [Fact]
+    public async Task CacheDetails_PagesSegmentsAndBuildsPlansOnDemand()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(404, "Paged details", segmentCount: 3);
+        var application = workspace.CreateApplication();
+        var scan = await DispatchAsync(
+            application,
+            "scan",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                pageSize = 1
+            }));
+        var indexToken = scan.GetProperty("indexToken").GetString()!;
+
+        var firstPage = await DispatchAsync(
+            application,
+            "cache.details",
+            JsonSerializer.Serialize(new
+            {
+                indexToken,
+                avid = "404",
+                offset = 0,
+                pageSize = 2
+            }));
+
+        Assert.Equal("404", firstPage.GetProperty("avid").GetString());
+        Assert.Equal(3, firstPage.GetProperty("totalItems").GetInt32());
+        Assert.True(firstPage.GetProperty("hasMore").GetBoolean());
+        Assert.False(firstPage.GetProperty("item").TryGetProperty("segments", out _));
+        var segments = firstPage.GetProperty("segments").EnumerateArray().ToArray();
+        Assert.Equal(2, segments.Length);
+        Assert.All(segments, segment =>
+        {
+            Assert.NotEqual("Unknown", segment.GetProperty("structureKind").GetString());
+            Assert.True(segment.GetProperty("isPlayable").GetBoolean());
+        });
+
+        var secondPage = await DispatchAsync(
+            application,
+            "cache.details",
+            JsonSerializer.Serialize(new
+            {
+                indexToken,
+                avid = "404",
+                offset = 2,
+                pageSize = 2
+            }));
+        Assert.Single(secondPage.GetProperty("segments").EnumerateArray());
+        Assert.False(secondPage.GetProperty("hasMore").GetBoolean());
+    }
+
+    [Fact]
+    public async Task SearchAndDetails_RejectMissingOrStaleIndexTokens()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(505, "Token protected");
+        var application = workspace.CreateApplication();
+        var scan = await DispatchAsync(
+            application,
+            "scan",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+
+        var missing = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(application, "search", "{}"));
+        Assert.Equal("invalid_params", missing.Code);
+
+        var staleSearch = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "search",
+                JsonSerializer.Serialize(new { indexToken = "not-current" })));
+        Assert.Equal("stale_index", staleSearch.Code);
+
+        var staleDetails = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "cache.details",
+                JsonSerializer.Serialize(new
+                {
+                    indexToken = "not-current",
+                    avid = "505"
+                })));
+        Assert.Equal("stale_index", staleDetails.Code);
+        Assert.False(string.IsNullOrWhiteSpace(scan.GetProperty("indexToken").GetString()));
+    }
+
+    [Fact]
+    public async Task CacheMutation_InvalidatesTheCurrentIndexToken()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(606, "Mutation invalidates");
+        var application = workspace.CreateApplication();
+        var scan = await DispatchAsync(
+            application,
+            "scan",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        var indexToken = scan.GetProperty("indexToken").GetString()!;
+
+        await DispatchAsync(
+            application,
+            "trash.move",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                avids = new[] { "606" }
+            }));
+
+        var stale = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "search",
+                JsonSerializer.Serialize(new { indexToken })));
+        Assert.Equal("stale_index", stale.Code);
+    }
+
+    [Fact]
+    public async Task BatchExport_CancellationRemovesStagingAndDoesNotPublishFinalDirectory()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(707, "Cancelled batch", segmentCount: 2);
+        var exportParent = Path.Combine(workspace.Root, "cancelled-export");
+        Directory.CreateDirectory(exportParent);
+        var application = workspace.CreateApplication();
+        await DispatchAsync(
+            application,
+            "scan",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            DispatchAsync(
+                application,
+                "export",
+                JsonSerializer.Serialize(new
+                {
+                    rootPath = workspace.CacheRoot,
+                    targets = new[]
+                    {
+                        new { avid = "707", pageIndexes = new[] { 1, 2 } }
+                    },
+                    outputPath = exportParent
+                }),
+                cancellation.Token));
+
+        Assert.Empty(Directory.EnumerateFileSystemEntries(exportParent));
+    }
+
+    [Fact]
+    public async Task BatchExport_PublishesCompletedStagingDirectory()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(717, "Successful batch", segmentCount: 2);
+        var exportParent = Path.Combine(workspace.Root, "successful-export");
+        Directory.CreateDirectory(exportParent);
+        var application = workspace.CreateApplication();
+
+        var result = await DispatchAsync(
+            application,
+            "export",
+            JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot,
+                targets = new[]
+                {
+                    new { avid = "717", pageIndexes = new[] { 1, 2 } }
+                },
+                outputPath = exportParent
+            }));
+
+        var publishedDirectory = result.GetProperty("outputPath").GetString()!;
+        Assert.Equal(Path.Combine(exportParent, "cache-export"), publishedDirectory);
+        Assert.True(Directory.Exists(publishedDirectory));
+        Assert.Equal(2, Directory.EnumerateFiles(publishedDirectory, "*.mp4").Count());
+        Assert.DoesNotContain(
+            Directory.EnumerateDirectories(exportParent),
+            path => Path.GetFileName(path).EndsWith(".staging", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task BatchExport_FailureRemovesStagingAndDoesNotPublishPartialResults()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(808, "Failed batch", segmentCount: 2);
+        var exportParent = Path.Combine(workspace.Root, "failed-export");
+        Directory.CreateDirectory(exportParent);
+        var application = workspace.CreateApplication();
+        await DispatchAsync(
+            application,
+            "scan",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+
+        var failure = await Assert.ThrowsAsync<RpcException>(() =>
+            DispatchAsync(
+                application,
+                "export",
+                JsonSerializer.Serialize(new
+                {
+                    rootPath = workspace.CacheRoot,
+                    targets = new[]
+                    {
+                        new { avid = "808", pageIndexes = new[] { 1, 999 } }
+                    },
+                    outputPath = exportParent
+                })));
+
+        Assert.Equal("operation_failed", failure.Code);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(exportParent));
     }
 
     [Fact]
@@ -583,6 +854,12 @@ public sealed class DesktopHostContractTests
             item => item.FullName == "diagnostics.json");
         using var diagnosticsStream = diagnosticsEntry.Open();
         using var diagnosticsDocument = await JsonDocument.ParseAsync(diagnosticsStream);
+        Assert.Equal(
+            DesktopHostApplication.ProtocolVersion,
+            diagnosticsDocument.RootElement
+                .GetProperty("application")
+                .GetProperty("protocolVersion")
+                .GetInt32());
         var settingsMessage = diagnosticsDocument.RootElement
             .GetProperty("settings")
             .GetProperty("message")
@@ -594,14 +871,15 @@ public sealed class DesktopHostContractTests
     private static async Task<JsonElement> DispatchAsync(
         DesktopHostApplication application,
         string method,
-        string parameterJson)
+        string parameterJson,
+        CancellationToken cancellationToken = default)
     {
         using var parameters = JsonDocument.Parse(parameterJson);
         var result = await application.DispatchAsync(
             Guid.NewGuid().ToString("N"),
             method,
             parameters.RootElement,
-            CancellationToken.None);
+            cancellationToken);
         return JsonSerializer.SerializeToElement(result, WireOptions);
     }
 
@@ -651,6 +929,53 @@ public sealed class DesktopHostContractTests
         public string SettingsPath { get; }
 
         public DesktopHostApplication CreateApplication() => new();
+
+        public void CreateCache(long avid, string title, int segmentCount = 1)
+        {
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            for (var pageIndex = 1; pageIndex <= segmentCount; pageIndex++)
+            {
+                var segmentDirectory = Path.Combine(
+                    CacheRoot,
+                    avid.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    $"c_{pageIndex}");
+                var mediaDirectory = Path.Combine(segmentDirectory, "lua.flv.bb2api.80");
+                Directory.CreateDirectory(mediaDirectory);
+                File.WriteAllText(
+                    Path.Combine(segmentDirectory, "entry.json"),
+                    JsonSerializer.Serialize(new
+                    {
+                        is_completed = true,
+                        total_bytes = 1000,
+                        downloaded_bytes = 1000,
+                        title,
+                        type_tag = "type",
+                        cover = "cover",
+                        prefered_video_quality = 80,
+                        guessed_total_bytes = 1000,
+                        total_time_milli = 60_000,
+                        danmaku_count = 0,
+                        time_update_stamp = timestamp + pageIndex,
+                        time_create_stamp = timestamp,
+                        avid,
+                        bvid = $"BV{avid}",
+                        owner_name = "Test owner",
+                        spid = 0,
+                        seasion_id = 0,
+                        page_data = new
+                        {
+                            cid = avid * 100 + pageIndex,
+                            page = pageIndex,
+                            from = "local",
+                            part = $"Part {pageIndex}",
+                            vid = "vid",
+                            has_alias = false,
+                            tid = 0
+                        }
+                    }));
+                File.WriteAllText(Path.Combine(mediaDirectory, "0.mp4"), $"media-{avid}-{pageIndex}");
+            }
+        }
 
         public void Dispose()
         {

@@ -5,6 +5,10 @@ export type JsonObject = { [key: string]: JsonValue };
 export type MatchMode = 'contains' | 'prefix' | 'exact';
 export type PlayerPreference = 'system' | 'mpv' | 'vlc';
 
+export const DESKTOP_HOST_PROTOCOL_VERSION = 2 as const;
+export const DEFAULT_CACHE_PAGE_SIZE = 100;
+export const MAXIMUM_CACHE_PAGE_SIZE = 200;
+
 export interface AppSettings {
   rootPath: string;
   rememberRootPath: boolean;
@@ -54,6 +58,25 @@ export interface CacheEntry {
   sizeBytes: number;
   isAllCompleted: boolean;
   lastUpdated: string | null;
+}
+
+export interface CachePage {
+  indexToken: string;
+  offset: number;
+  pageSize: number;
+  totalItems: number;
+  hasMore: boolean;
+  items: CacheEntry[];
+}
+
+export interface CacheDetails {
+  indexToken: string;
+  avid: string;
+  item: CacheEntry;
+  offset: number;
+  pageSize: number;
+  totalItems: number;
+  hasMore: boolean;
   segments: CacheSegment[];
 }
 
@@ -88,6 +111,7 @@ export interface TrashEntry {
 }
 
 export interface HostHealth {
+  protocolVersion: typeof DESKTOP_HOST_PROTOCOL_VERSION;
   status: 'ok' | 'degraded';
   version?: string;
   runtime?: string;
@@ -99,11 +123,13 @@ export interface HostHealth {
 export interface DesktopCapabilities {
   playback: boolean;
   exportMedia: boolean;
+  cacheDetails: boolean;
   trashPurge: boolean;
   nativeWayland: false;
 }
 
 export interface InitialState {
+  protocolVersion: typeof DESKTOP_HOST_PROTOCOL_VERSION;
   settings: AppSettings;
   settingsState: SettingsStateInfo;
   items: CacheEntry[];
@@ -112,18 +138,23 @@ export interface InitialState {
   capabilities: DesktopCapabilities;
 }
 
-export interface ScanResult {
+export interface ScanResult extends CachePage {
   rootPath?: string;
-  items: CacheEntry[];
+  includeIncomplete?: boolean;
+  scannedAvidDirectories?: number;
+  scannedSegmentDirectories?: number;
   includedEntries?: number;
   skippedIncompleteEntries?: number;
   invalidEntries?: number;
   inaccessibleDirectories?: number;
+  hasWarnings?: boolean;
+  completedAtUtc?: string;
 }
 
 export interface SearchRequest {
-  rootPath: string;
-  includeIncomplete: boolean;
+  indexToken: string;
+  offset: number;
+  pageSize: number;
   keyword: string;
   matchMode: MatchMode;
   splitKeywords: boolean;
@@ -133,6 +164,13 @@ export interface SearchRequest {
   includeBvid: boolean;
   includeAvid: boolean;
   caseSensitive: boolean;
+}
+
+export interface CacheDetailsRequest {
+  indexToken: string;
+  avid: string;
+  offset: number;
+  pageSize: number;
 }
 
 export interface SelectionTarget {
@@ -166,9 +204,11 @@ export interface CacheManagerApi {
   getSettings(): Promise<AppSettings>;
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
   chooseRootDirectory(defaultPath?: string): Promise<string | null>;
-  scan(options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean }): Promise<ScanResult>;
+  scan(options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; offset?: number; pageSize?: number }): Promise<ScanResult>;
   cancel(): Promise<boolean>;
-  search(request: SearchRequest): Promise<CacheEntry[]>;
+  search(request: SearchRequest): Promise<CachePage>;
+  getCacheDetails(request: CacheDetailsRequest): Promise<CacheDetails>;
+  cancelCacheDetails(): Promise<boolean>;
   getStorage(rootPath?: string): Promise<StorageSnapshot>;
   cleanupTranscodeCache(): Promise<ArtifactCleanupResult>;
   clearTranscodeCache(): Promise<ArtifactCleanupResult | null>;

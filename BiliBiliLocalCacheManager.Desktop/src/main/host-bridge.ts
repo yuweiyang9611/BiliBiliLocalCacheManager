@@ -79,6 +79,7 @@ export interface DesktopHostBridgeOptions {
 export interface HostCall<T> {
   id: string;
   promise: Promise<T>;
+  cancel(): boolean;
 }
 
 export class DesktopHostError extends Error {
@@ -108,6 +109,8 @@ export class DesktopHostBridge extends EventEmitter {
 
   call<T>(method: string, params: JsonObject = {}, timeoutMs = 10 * 60_000): HostCall<T> {
     const id = randomUUID();
+    let settled = false;
+    let cancelRequested = false;
     let request: string;
     try {
       request = JSON.stringify({ id, method, params });
@@ -118,6 +121,7 @@ export class DesktopHostBridge extends EventEmitter {
           `无法序列化 Desktop Host 请求：${error instanceof Error ? error.message : String(error)}`,
           'INVALID_REQUEST',
         )),
+        cancel: () => false,
       };
     }
     if (Buffer.byteLength(request, 'utf8') > MAX_HOST_REQUEST_BYTES) {
@@ -127,30 +131,66 @@ export class DesktopHostBridge extends EventEmitter {
           'Desktop Host 请求超过 1 MiB 安全上限。请减少一次操作中的项目或分段数量。',
           'REQUEST_TOO_LARGE',
         )),
+        cancel: () => false,
       };
     }
     const promise = this.#start().then(
-      () => new Promise<T>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.#pending.delete(id);
-          reject(new DesktopHostError(`Desktop Host 调用超时：${method}`, 'HOST_TIMEOUT'));
-        }, timeoutMs);
-        this.#pending.set(id, {
-          resolve: (value) => resolve(value as T),
-          reject,
-          timer,
+      () => {
+        if (cancelRequested) {
+          settled = true;
+          throw new DesktopHostError('操作已取消。', 'CANCELLED');
+        }
+        return new Promise<T>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            this.#pending.delete(id);
+            settled = true;
+            this.#sendCancellation(id);
+            reject(new DesktopHostError(`Desktop Host 调用超时：${method}`, 'HOST_TIMEOUT'));
+          }, timeoutMs);
+          this.#pending.set(id, {
+            resolve: (value) => {
+              settled = true;
+              resolve(value as T);
+            },
+            reject: (error) => {
+              settled = true;
+              reject(error);
+            },
+            timer,
+          });
+          this.#process!.stdin.write(`${request}\n`, 'utf8', (error) => {
+            if (!error) return;
+            const pending = this.#pending.get(id);
+            if (!pending) return;
+            clearTimeout(pending.timer);
+            this.#pending.delete(id);
+            const transportError = new DesktopHostError(`无法向 Desktop Host 写入请求：${error.message}`, 'HOST_WRITE_FAILED');
+            pending.reject(transportError);
+            this.#process?.kill();
+            this.#handleExit(transportError);
+          });
         });
-        this.#process!.stdin.write(`${request}\n`, 'utf8', (error) => {
-          if (!error) return;
-          const pending = this.#pending.get(id);
-          if (!pending) return;
-          clearTimeout(pending.timer);
-          this.#pending.delete(id);
-          pending.reject(new DesktopHostError(`无法向 Desktop Host 写入请求：${error.message}`, 'HOST_WRITE_FAILED'));
-        });
-      }),
+      },
     );
-    return { id, promise };
+    promise.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    return {
+      id,
+      promise,
+      cancel: () => {
+        if (settled || cancelRequested) return false;
+        cancelRequested = true;
+        const pending = this.#pending.get(id);
+        if (!pending) return true;
+        clearTimeout(pending.timer);
+        this.#pending.delete(id);
+        this.#sendCancellation(id);
+        pending.reject(new DesktopHostError('操作已取消。', 'CANCELLED'));
+        return true;
+      },
+    };
   }
 
   async dispose(): Promise<void> {
@@ -170,9 +210,20 @@ export class DesktopHostBridge extends EventEmitter {
   async #start(): Promise<void> {
     if (this.#process && !this.#process.killed) return;
     if (this.#starting) return this.#starting;
-    this.#starting = this.#spawnHost().finally(() => {
-      this.#starting = null;
-    });
+    this.#starting = this.#spawnHost()
+      .catch((error: unknown) => {
+        const normalized = error instanceof DesktopHostError
+          ? error
+          : new DesktopHostError(
+              error instanceof Error ? error.message : String(error),
+              'HOST_START_FAILED',
+            );
+        this.#handleExit(normalized);
+        throw normalized;
+      })
+      .finally(() => {
+        this.#starting = null;
+      });
     return this.#starting;
   }
 
@@ -241,6 +292,25 @@ export class DesktopHostBridge extends EventEmitter {
     } else {
       pending.resolve(message.result);
     }
+  }
+
+  #sendCancellation(requestId: string): void {
+    const process = this.#process;
+    if (!process || process.killed) return;
+    const request = JSON.stringify({
+      id: randomUUID(),
+      method: 'cancel',
+      params: { requestId },
+    });
+    process.stdin.write(`${request}\n`, 'utf8', (error) => {
+      if (!error) return;
+      const transportError = new DesktopHostError(
+        `无法向 Desktop Host 发送取消请求：${error.message}`,
+        'HOST_WRITE_FAILED',
+      );
+      process.kill();
+      this.#handleExit(transportError);
+    });
   }
 
   #terminateForProtocolError(error: unknown): void {

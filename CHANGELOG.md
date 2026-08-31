@@ -7,11 +7,14 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - Add independent desktop settings for remembering the cache root and scanning it on startup; startup scanning is opt-in, and schema-v1 users with a saved root must explicitly choose whether to forget it, remember it without scanning, or enable startup scans.
+- Add Desktop Host protocol v2 with opaque index tokens, bounded cache-summary pages, and lazily paged segment details; the renderer virtualizes cache rows and never materializes every segment during a scan.
+- Add a stable `ci-required` summary job that fails unless privacy checks, the full build/test/package matrix, and Debian/Fedora installed-package smoke tests all succeed.
 
 ### Changed
 
 - Keep startup lightweight by loading storage statistics and application-trash entries only when their pages are opened, instead of traversing those directories while the window connects.
 - Validate a newly selected cache root with a non-persisting scan before committing the settings change, and retain that validated index instead of traversing the directory again; disabling root persistence now forgets it on the next launch while retaining the validated root for the current session.
+- Publish multi-item media exports only after every item succeeds by staging the directory beside its destination and atomically moving it into place.
 
 ### Fixed
 
@@ -19,6 +22,10 @@ All notable changes to this project are documented in this file.
 - Prevent a persisted search keyword or an unbound process-local index from bypassing the startup-scan choice or exposing another root's cache rows after a renderer reload.
 - Strip development, test, Host-path, FFmpeg, and .NET runtime injection variables before launching a packaged Desktop Host, while preserving only explicitly trusted smoke-test data paths.
 - Require a locally overridden Windows FFmpeg archive to match the SHA-256 pinned in the bundled manifest before it can be extracted or executed.
+- Bind CLI `trash purge` confirmation to the complete pre-confirmation trash snapshot, include legacy-entry capacity in `--include-untrusted` prompts, and fail with zero deletions when the snapshot changes.
+- Make desktop search strictly latest-write-wins, keep domain and cancellation errors distinct from Host transport failure, and propagate cancellation for timeouts, renderer destruction, and every long-running Host IPC operation.
+- Reject malformed or mismatched Host v2 initialization data, expose an explicit renderer bootstrap failure state, and make source/packaged smoke tests prove settings loading, startup scanning of a real fixture, and Host IPC end to end.
+- Make Electron smoke tests fail closed on premature window shutdown, and exercise installed Debian/Fedora packages as an unprivileged user with the packaged Chromium SUID sandbox enabled.
 
 ## [0.4.0-rc.1] - 2026-08-27
 

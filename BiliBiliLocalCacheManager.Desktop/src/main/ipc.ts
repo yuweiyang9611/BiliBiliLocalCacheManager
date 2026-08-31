@@ -4,22 +4,29 @@ import path from 'node:path';
 import type {
   AppSettings,
   ArtifactCleanupResult,
-  CacheEntry,
+  CacheDetails,
+  CacheDetailsRequest,
+  CachePage,
   DesktopInfo,
-  HostHealth,
   HostProgress,
-  InitialState,
   JsonObject,
   PlayerPreference,
-  ScanResult,
   SearchRequest,
   SelectionTarget,
   StorageSnapshot,
   TrashEntry,
 } from '../shared/contracts';
+import { DEFAULT_CACHE_PAGE_SIZE, MAXIMUM_CACHE_PAGE_SIZE } from '../shared/contracts';
 import { channels } from '../shared/channels';
 import { DesktopHostBridge, type HostCall } from './host-bridge';
 import { isRecord } from './protocol';
+import {
+  validateCacheDetails,
+  validateCachePage,
+  validateHostHealth,
+  validateInitialState,
+  validateScanResult,
+} from './host-contract-validation';
 import { packagedRendererUrl } from './renderer-protocol';
 
 const allowedSettingKeys = new Set<keyof AppSettings>([
@@ -30,42 +37,68 @@ const allowedSettingKeys = new Set<keyof AppSettings>([
 ]);
 
 export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserWindow | null): () => void {
-  const activeRequests = new Map<number, Set<string>>();
+  type SenderState = {
+    sender: IpcMainInvokeEvent['sender'];
+    calls: Map<string, HostCall<unknown>>;
+    detailCallIds: Set<string>;
+    onDestroyed(): void;
+  };
+  const activeRequests = new Map<number, SenderState>();
   const handlers: Array<[string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown]> = [];
   const handle = (channel: string, listener: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) => {
     handlers.push([channel, listener]);
     ipcMain.handle(channel, listener);
   };
   const host = <T>(method: string, params: JsonObject = {}, timeoutMs?: number) => bridge.call<T>(method, params, timeoutMs);
-  const track = async <T>(event: IpcMainInvokeEvent, call: HostCall<T>): Promise<T> => {
-    const senderId = event.sender.id;
-    const requests = activeRequests.get(senderId) ?? new Set<string>();
-    requests.add(call.id);
-    activeRequests.set(senderId, requests);
+  const track = async <T>(event: IpcMainInvokeEvent, call: HostCall<T>, kind?: 'cache-details'): Promise<T> => {
+    const sender = event.sender;
+    const senderId = sender.id;
+    if (sender.isDestroyed()) {
+      call.cancel();
+      return call.promise;
+    }
+    let state = activeRequests.get(senderId);
+    if (!state) {
+      const onDestroyed = () => {
+        const current = activeRequests.get(senderId);
+        if (!current) return;
+        activeRequests.delete(senderId);
+        for (const activeCall of current.calls.values()) activeCall.cancel();
+      };
+      state = { sender, calls: new Map<string, HostCall<unknown>>(), detailCallIds: new Set<string>(), onDestroyed };
+      activeRequests.set(senderId, state);
+      sender.once('destroyed', onDestroyed);
+    }
+    state.calls.set(call.id, call as HostCall<unknown>);
+    if (kind === 'cache-details') state.detailCallIds.add(call.id);
     try {
       return await call.promise;
     } finally {
       const current = activeRequests.get(senderId);
-      current?.delete(call.id);
-      if (current?.size === 0) activeRequests.delete(senderId);
+      current?.calls.delete(call.id);
+      current?.detailCallIds.delete(call.id);
+      if (current?.calls.size === 0) {
+        current.sender.removeListener('destroyed', current.onDestroyed);
+        activeRequests.delete(senderId);
+      }
     }
   };
 
-  handle(channels.health, (event) => {
+  handle(channels.health, async (event) => {
     assertTrusted(event);
-    return host<HostHealth>('health', {}, 15_000).promise;
+    return validateHostHealth(await track(event, host<unknown>('health', {}, 15_000)));
   });
-  handle(channels.initialState, (event) => {
+  handle(channels.initialState, async (event) => {
     assertTrusted(event);
-    return host<InitialState>('initialState').promise;
+    return validateInitialState(await track(event, host<unknown>('initialState')));
   });
   handle(channels.settingsGet, (event) => {
     assertTrusted(event);
-    return host<AppSettings>('settings.get').promise;
+    return track(event, host<AppSettings>('settings.get'));
   });
   handle(channels.settingsUpdate, (event, patch) => {
     assertTrusted(event);
-    return host<AppSettings>('settings.update', validateSettingsPatch(patch) as unknown as JsonObject).promise;
+    return track(event, host<AppSettings>('settings.update', validateSettingsPatch(patch) as unknown as JsonObject));
   });
   handle(channels.chooseRoot, async (event, defaultPath) => {
     assertTrusted(event);
@@ -81,38 +114,65 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   handle(channels.scan, async (event, options) => {
     assertTrusted(event);
     if (!isRecord(options)) throw new TypeError('扫描参数必须是对象。');
-    const call = host<ScanResult>('scan', {
+    const request = {
       rootPath: assertPath(options.rootPath, 'rootPath'),
       includeIncomplete: assertBoolean(options.includeIncomplete, 'includeIncomplete'),
       ...(options.persistSettings === undefined
         ? {}
         : { persistSettings: assertBoolean(options.persistSettings, 'persistSettings') }),
-    });
-    return track(event, call);
+      offset: options.offset === undefined ? 0 : assertInteger(options.offset, 'offset', 0, 2_147_483_647),
+      pageSize: options.pageSize === undefined ? DEFAULT_CACHE_PAGE_SIZE : assertInteger(options.pageSize, 'pageSize', 1, MAXIMUM_CACHE_PAGE_SIZE),
+    };
+    const result = validateScanResult(await track(event, host<unknown>('scan', request)));
+    assertPageMatchesRequest(result, request, 'scan');
+    return result;
   });
   handle(channels.cancel, async (event) => {
     assertTrusted(event);
-    const requestIds = [...(activeRequests.get(event.sender.id) ?? [])];
-    if (requestIds.length === 0) return false;
-    const results = await Promise.allSettled(requestIds.map((requestId) =>
-      host<{ requestId: string; cancelled: boolean }>('cancel', { requestId }, 15_000).promise));
-    return results.some((result) => result.status === 'fulfilled' && result.value.cancelled);
+    const calls = [...(activeRequests.get(event.sender.id)?.calls.values() ?? [])];
+    let cancelled = false;
+    for (const call of calls) cancelled = call.cancel() || cancelled;
+    return cancelled;
   });
   handle(channels.search, async (event, request) => {
     assertTrusted(event);
-    const call = host<CacheEntry[]>('search', validateSearchRequest(request) as unknown as JsonObject);
-    return track(event, call);
+    const validatedRequest = validateSearchRequest(request);
+    const result = validateCachePage(await track(event, host<unknown>('search', validatedRequest as unknown as JsonObject)));
+    assertPageMatchesRequest(result, validatedRequest, 'search', true);
+    return result;
+  });
+  handle(channels.cacheDetails, async (event, request) => {
+    assertTrusted(event);
+    const validatedRequest = validateCacheDetailsRequest(request);
+    const result = validateCacheDetails(await track(
+      event,
+      host<unknown>('cache.details', validatedRequest as unknown as JsonObject),
+      'cache-details',
+    ));
+    assertPageMatchesRequest(result, validatedRequest, 'cache.details', true);
+    if (result.avid !== validatedRequest.avid) throw new TypeError('Desktop Host 返回的 cache.details.avid 与请求不一致。');
+    return result;
+  });
+  handle(channels.cacheDetailsCancel, async (event) => {
+    assertTrusted(event);
+    const state = activeRequests.get(event.sender.id);
+    if (!state) return false;
+    let cancelled = false;
+    for (const requestId of [...state.detailCallIds]) {
+      cancelled = state.calls.get(requestId)?.cancel() === true || cancelled;
+    }
+    return cancelled;
   });
   handle(channels.storageGet, (event, rootPath) => {
     assertTrusted(event);
-    return host<StorageSnapshot>(
+    return track(event, host<StorageSnapshot>(
       'storage.get',
       rootPath === undefined || rootPath === '' ? {} : { rootPath: assertPath(rootPath, 'rootPath') },
-    ).promise;
+    ));
   });
   handle(channels.artifactsCleanup, (event) => {
     assertTrusted(event);
-    return host<ArtifactCleanupResult>('artifacts.cleanup').promise;
+    return track(event, host<ArtifactCleanupResult>('artifacts.cleanup'));
   });
   handle(channels.artifactsClear, async (event) => {
     assertTrusted(event);
@@ -131,11 +191,11 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       ? await dialog.showMessageBox(parent, options)
       : await dialog.showMessageBox(options);
     if (confirmation.response !== 0) return null;
-    return host<ArtifactCleanupResult>('artifacts.clear', { confirmed: true }).promise;
+    return track(event, host<ArtifactCleanupResult>('artifacts.clear', { confirmed: true }));
   });
   handle(channels.artifactsOpen, async (event) => {
     assertTrusted(event);
-    const storage = await host<StorageSnapshot>('storage.get').promise;
+    const storage = await track(event, host<StorageSnapshot>('storage.get'));
     const managedPath = storage.transcodeCache.path;
     if (!managedPath || !path.isAbsolute(managedPath)) {
       throw new Error('Desktop Host 未返回有效的受管转码缓存目录。');
@@ -148,21 +208,21 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   });
   handle(channels.trashMove, (event, rootPath, avids) => {
     assertTrusted(event);
-    return host<{ moved: string[]; failed: string[] }>('trash.move', {
+    return track(event, host<{ moved: string[]; failed: string[] }>('trash.move', {
       rootPath: assertPath(rootPath, 'rootPath'),
       avids: validateNonEmptyStringArray(avids, 'avids'),
-    }).promise;
+    }));
   });
   handle(channels.trashList, (event, rootPath) => {
     assertTrusted(event);
-    return host<TrashEntry[]>('trash.list', { rootPath: assertPath(rootPath, 'rootPath') }).promise;
+    return track(event, host<TrashEntry[]>('trash.list', { rootPath: assertPath(rootPath, 'rootPath') }));
   });
   handle(channels.trashRestore, (event, rootPath, entryIds) => {
     assertTrusted(event);
-    return host<{ restored: string[]; failed: string[] }>('trash.restore', {
+    return track(event, host<{ restored: string[]; failed: string[] }>('trash.restore', {
       rootPath: assertPath(rootPath, 'rootPath'),
       entryIds: validateNonEmptyStringArray(entryIds, 'entryIds'),
-    }).promise;
+    }));
   });
   handle(channels.trashPurge, async (event, rootPath, entryIds) => {
     assertTrusted(event);
@@ -183,11 +243,11 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       ? await dialog.showMessageBox(parent, options)
       : await dialog.showMessageBox(options);
     if (confirmation.response !== 0) return { purged: [], failed: [] };
-    return host<{ purged: string[]; failed: string[] }>('trash.purge', {
+    return track(event, host<{ purged: string[]; failed: string[] }>('trash.purge', {
       rootPath: validatedRoot,
       entryIds: validatedIds,
       confirmed: true,
-    }).promise;
+    }));
   });
   handle(channels.play, async (event, rootPath, targets, playerPreference, includeIncomplete) => {
     assertTrusted(event);
@@ -251,6 +311,10 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
 
   return () => {
     for (const [channel] of handlers) ipcMain.removeHandler(channel);
+    for (const state of activeRequests.values()) {
+      state.sender.removeListener('destroyed', state.onDestroyed);
+      for (const call of state.calls.values()) call.cancel();
+    }
     activeRequests.clear();
     bridge.off('event', onEvent);
     bridge.off('unavailable', onUnavailable);
@@ -323,20 +387,48 @@ function validateSettingsPatch(value: unknown): Partial<AppSettings> {
 
 function validateSearchRequest(value: unknown): SearchRequest {
   if (!isRecord(value)) throw new TypeError('搜索参数必须是对象。');
-  const patch = validateSettingsPatch(value);
+  const matchMode = value.matchMode;
+  if (matchMode !== 'contains' && matchMode !== 'prefix' && matchMode !== 'exact') throw new TypeError('无效匹配模式。');
   return {
-    rootPath: assertPath(patch.rootPath, 'rootPath'),
-    includeIncomplete: patch.includeIncomplete ?? false,
-    keyword: patch.keyword ?? '',
-    matchMode: patch.matchMode ?? 'contains',
-    splitKeywords: patch.splitKeywords ?? true,
-    anyKeywords: patch.anyKeywords ?? false,
-    includePartName: patch.includePartName ?? true,
-    includeOwnerName: patch.includeOwnerName ?? true,
-    includeBvid: patch.includeBvid ?? true,
-    includeAvid: patch.includeAvid ?? true,
-    caseSensitive: patch.caseSensitive ?? false,
+    indexToken: assertNonEmptyString(value.indexToken, 'indexToken', 128),
+    offset: assertInteger(value.offset, 'offset', 0, 2_147_483_647),
+    pageSize: assertInteger(value.pageSize, 'pageSize', 1, MAXIMUM_CACHE_PAGE_SIZE),
+    keyword: assertString(value.keyword, 'keyword', 500),
+    matchMode,
+    splitKeywords: assertBoolean(value.splitKeywords, 'splitKeywords'),
+    anyKeywords: assertBoolean(value.anyKeywords, 'anyKeywords'),
+    includePartName: assertBoolean(value.includePartName, 'includePartName'),
+    includeOwnerName: assertBoolean(value.includeOwnerName, 'includeOwnerName'),
+    includeBvid: assertBoolean(value.includeBvid, 'includeBvid'),
+    includeAvid: assertBoolean(value.includeAvid, 'includeAvid'),
+    caseSensitive: assertBoolean(value.caseSensitive, 'caseSensitive'),
   };
+}
+
+function validateCacheDetailsRequest(value: unknown): CacheDetailsRequest {
+  if (!isRecord(value)) throw new TypeError('缓存详情参数必须是对象。');
+  return {
+    indexToken: assertNonEmptyString(value.indexToken, 'indexToken', 128),
+    avid: assertNonEmptyString(value.avid, 'avid', 64),
+    offset: value.offset === undefined ? 0 : assertInteger(value.offset, 'offset', 0, 2_147_483_647),
+    pageSize: value.pageSize === undefined
+      ? DEFAULT_CACHE_PAGE_SIZE
+      : assertInteger(value.pageSize, 'pageSize', 1, MAXIMUM_CACHE_PAGE_SIZE),
+  };
+}
+
+function assertPageMatchesRequest(
+  page: Pick<CachePage, 'indexToken' | 'offset' | 'pageSize'> | Pick<CacheDetails, 'indexToken' | 'offset' | 'pageSize'>,
+  request: { indexToken?: string; offset: number; pageSize: number },
+  label: string,
+  compareToken = false,
+): void {
+  if (page.offset !== request.offset || page.pageSize !== request.pageSize) {
+    throw new TypeError(`Desktop Host 返回的 ${label} 分页位置与请求不一致。`);
+  }
+  if (compareToken && page.indexToken !== request.indexToken) {
+    throw new TypeError(`Desktop Host 返回的 ${label} 索引令牌与请求不一致。`);
+  }
 }
 
 function validateTargets(value: unknown): SelectionTarget[] {
@@ -387,6 +479,12 @@ function assertPath(value: unknown, name: string): string {
 function assertString(value: unknown, name: string, max: number): string {
   if (typeof value !== 'string' || value.length > max) throw new TypeError(`${name} 必须是长度不超过 ${max} 的字符串。`);
   return value;
+}
+
+function assertNonEmptyString(value: unknown, name: string, max: number): string {
+  const result = assertString(value, name, max).trim();
+  if (!result) throw new TypeError(`${name} 不能为空。`);
+  return result;
 }
 
 function assertBoolean(value: unknown, name: string): boolean {

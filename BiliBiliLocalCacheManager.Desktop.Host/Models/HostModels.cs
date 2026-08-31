@@ -95,7 +95,7 @@ internal sealed record SettingsStateDto(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     string? Message);
 
-internal sealed record CacheDto(
+internal sealed record CacheSummaryDto(
     string Id,
     string Avid,
     string Title,
@@ -105,7 +105,24 @@ internal sealed record CacheDto(
     int SegmentCount,
     long SizeBytes,
     bool IsAllCompleted,
-    DateTimeOffset? LastUpdated,
+    DateTimeOffset? LastUpdated);
+
+internal sealed record CachePageDto(
+    string IndexToken,
+    int Offset,
+    int PageSize,
+    int TotalItems,
+    bool HasMore,
+    IReadOnlyList<CacheSummaryDto> Items);
+
+internal sealed record CacheDetailsDto(
+    string IndexToken,
+    string Avid,
+    CacheSummaryDto Item,
+    int Offset,
+    int PageSize,
+    int TotalItems,
+    bool HasMore,
     IReadOnlyList<SegmentDto> Segments);
 
 internal sealed record SegmentDto(

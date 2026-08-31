@@ -1,5 +1,5 @@
 import { BrowserWindow, Menu, app, dialog, net, protocol, session } from 'electron';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -21,7 +21,14 @@ protocol.registerSchemesAsPrivileged([{
 }]);
 
 const smokeTest = process.argv.includes('--smoke-test');
-if (smokeTest) app.disableHardwareAcceleration();
+const smokeReadyToken = 'READY renderer-bootstrap-v1';
+const smokeFixtureTitle = 'Electron smoke fixture';
+if (smokeTest) {
+  // Any implicit or premature shutdown must fail closed. The complete smoke
+  // path exits explicitly with zero only after every renderer/Host assertion.
+  process.exitCode = 1;
+  app.disableHardwareAcceleration();
+}
 
 if (process.platform === 'linux') {
   // Electron 38+ may prefer native Wayland. The declared Linux support target is X11/XWayland.
@@ -41,6 +48,46 @@ if (smokeDataRoot) {
   try { rmSync(electronUserData, { recursive: true, force: true }); } catch { /* A concurrent smoke will fail the lock below. */ }
   mkdirSync(electronUserData, { recursive: true });
   app.setPath('userData', electronUserData);
+
+  const cacheRoot = path.join(smokeDataRoot, 'cache');
+  mkdirSync(cacheRoot, { recursive: true });
+  const avid = 990001;
+  const segmentRoot = path.join(cacheRoot, String(avid), 'c_1');
+  const mediaRoot = path.join(segmentRoot, 'lua.flv.bb2api.80');
+  mkdirSync(mediaRoot, { recursive: true });
+  const timestamp = Date.now();
+  writeFileSync(path.join(segmentRoot, 'entry.json'), JSON.stringify({
+    is_completed: true,
+    total_bytes: 16,
+    downloaded_bytes: 16,
+    title: smokeFixtureTitle,
+    type_tag: 'type',
+    cover: 'cover',
+    prefered_video_quality: 80,
+    guessed_total_bytes: 16,
+    total_time_milli: 1_000,
+    danmaku_count: 0,
+    time_update_stamp: timestamp,
+    time_create_stamp: timestamp,
+    avid,
+    bvid: 'BV1SmokeFixture',
+    owner_name: 'Smoke Test',
+    spid: 0,
+    seasion_id: 0,
+    page_data: { cid: 99000101, page: 1, from: 'local', part: 'Smoke page', vid: 'vid', has_alias: false, tid: 0 },
+  }), 'utf8');
+  writeFileSync(path.join(mediaRoot, '0.mp4'), 'smoke-media', 'utf8');
+  writeFileSync(
+    path.join(smokeDataRoot, 'settings.json'),
+    JSON.stringify({
+      SchemaVersion: 2,
+      RootPath: cacheRoot,
+      RememberRootPath: true,
+      ScanOnStartup: true,
+      IncludeIncomplete: false,
+    }),
+    'utf8',
+  );
 }
 const trustedHostEnvironmentOverrides = smokeDataRoot
   ? {
@@ -145,14 +192,9 @@ function attachSmokeTest(window: BrowserWindow): void {
   window.webContents.once('did-finish-load', () => {
     void (async () => {
       try {
-        const rendererReady = await waitForRendererReady(window);
-        if (!rendererReady) throw new Error('React renderer did not mount.');
-        const health = await bridge.call<{ status?: string }>('health', {}, 15_000).promise;
-        if (health?.status !== 'ok' && health?.status !== 'degraded') {
-          throw new Error('Desktop Host returned an invalid health status.');
-        }
+        await waitForRendererBootstrap(window);
         clearTimeout(timeout);
-        await completeSmokeTest(0, 'Electron renderer and Desktop Host are healthy.');
+        await completeSmokeTest(0, `${smokeReadyToken} Renderer bootstrap, settings load, startup scan, lazy details, and Desktop Host IPC are healthy.`);
       } catch (error) {
         clearTimeout(timeout);
         await completeSmokeTest(1, error instanceof Error ? error.message : String(error));
@@ -161,16 +203,38 @@ function attachSmokeTest(window: BrowserWindow): void {
   });
 }
 
-async function waitForRendererReady(window: BrowserWindow): Promise<boolean> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const ready = await window.webContents.executeJavaScript(
-      'document.querySelector("[data-renderer-ready=true]") !== null',
+async function waitForRendererBootstrap(window: BrowserWindow): Promise<void> {
+  const expectedRoot = smokeDataRoot ? path.join(smokeDataRoot, 'cache') : '';
+  const deadline = Date.now() + 27_000;
+  let detailsRequested = false;
+  while (Date.now() < deadline) {
+    const state = await window.webContents.executeJavaScript(
+      '(() => { const shell = document.querySelector("[data-renderer-bootstrap]"); const root = document.querySelector("#root-path"); return { status: shell?.getAttribute("data-renderer-bootstrap") ?? "loading", settingsLoaded: shell?.getAttribute("data-settings-loaded") === "true", startupScan: shell?.getAttribute("data-startup-scan") ?? "", startupScanCount: Number(shell?.getAttribute("data-startup-scan-count") ?? "-1"), hostStatus: shell?.getAttribute("data-host-status") ?? "", rootValue: root instanceof HTMLInputElement ? root.value : "", fixtureVisible: document.body.textContent?.includes("Electron smoke fixture") === true, detailsVisible: document.body.textContent?.includes("Smoke page") === true, error: shell?.getAttribute("data-bootstrap-error") ?? "" }; })()',
       true,
-    );
-    if (ready) return true;
+    ) as { status: string; settingsLoaded: boolean; startupScan: string; startupScanCount: number; hostStatus: string; rootValue: string; fixtureVisible: boolean; detailsVisible: boolean; error: string };
+    if (state.status === 'failed') {
+      throw new Error(state.error || 'Renderer bootstrap failed.');
+    }
+    const bootstrapReady = state.status === 'ready' &&
+        state.settingsLoaded &&
+        state.startupScan === 'completed' &&
+        state.startupScanCount === 1 &&
+        (state.hostStatus === 'ok' || state.hostStatus === 'degraded') &&
+        state.rootValue === expectedRoot &&
+        state.fixtureVisible;
+    if (bootstrapReady && !detailsRequested) {
+      const focused = await window.webContents.executeJavaScript(
+        '(() => { const row = [...document.querySelectorAll("[data-cache-row=true]")].find((item) => item.textContent?.includes("Electron smoke fixture")); if (!(row instanceof HTMLElement)) return false; row.click(); return true; })()',
+        true,
+      ) as boolean;
+      if (!focused) throw new Error('Renderer did not expose the scanned smoke cache row.');
+      detailsRequested = true;
+    } else if (bootstrapReady && detailsRequested && state.detailsVisible) {
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return false;
+  throw new Error('Renderer did not finish Host-backed bootstrap.');
 }
 
 async function completeSmokeTest(exitCode: number, message: string): Promise<void> {
@@ -206,7 +270,13 @@ if (supported && singleInstance) {
     if (!mainWindow) mainWindow = createWindow();
   });
 
-  app.on('window-all-closed', () => app.quit());
+  app.on('window-all-closed', () => {
+    if (smokeTest && !smokeCompleted) {
+      void completeSmokeTest(1, 'Electron smoke window closed before validation completed.');
+      return;
+    }
+    app.quit();
+  });
   app.on('before-quit', () => {
     unregisterIpc?.();
     unregisterIpc = null;

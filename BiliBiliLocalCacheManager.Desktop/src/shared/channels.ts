@@ -7,6 +7,8 @@ export const channels = Object.freeze({
   scan: 'cache-manager:scan',
   cancel: 'cache-manager:cancel',
   search: 'cache-manager:search',
+  cacheDetails: 'cache-manager:cache:details',
+  cacheDetailsCancel: 'cache-manager:cache:details:cancel',
   storageGet: 'cache-manager:storage:get',
   artifactsCleanup: 'cache-manager:artifacts:cleanup',
   artifactsClear: 'cache-manager:artifacts:clear',

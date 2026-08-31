@@ -74,11 +74,10 @@ describe('IPC cancellable request tracking', () => {
       .map((call) => call.id);
 
     expect(await invoke(channels.cancel, event)).toBe(true);
-    expect(fake.calls.filter((call) => call.method === 'cancel').map((call) => call.params.requestId))
-      .toEqual(requestIds);
+    expect(fake.cancelledIds).toEqual(requestIds);
 
-    for (const requestId of requestIds) fake.pending.get(requestId)?.resolve([]);
-    await Promise.all([scan, search]);
+    const results = await Promise.allSettled([scan, search]);
+    expect(results.every((result) => result.status === 'rejected')).toBe(true);
   });
 
   it('does not let an earlier completion remove a later active request', async () => {
@@ -91,15 +90,147 @@ describe('IPC cancellable request tracking', () => {
     const search = invoke(channels.search, event, validSearchRequest());
     const searchId = fake.calls.find((call) => call.method === 'search')!.id;
 
-    fake.pending.get(scanId)!.resolve({ items: [] });
+    fake.pending.get(scanId)!.resolve(validScanResult());
     await scan;
     expect(await invoke(channels.cancel, event)).toBe(true);
-    expect(fake.calls.filter((call) => call.method === 'cancel').map((call) => call.params.requestId))
-      .toEqual([searchId]);
+    expect(fake.cancelledIds).toEqual([searchId]);
 
-    fake.pending.get(searchId)!.resolve([]);
-    await search;
+    await expect(search).rejects.toThrow('操作已取消');
     expect(await invoke(channels.cancel, event)).toBe(false);
+  });
+
+  it('cancels every tracked long-running Host call when webContents is destroyed', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(13);
+    const cacheRoot = path.resolve('cache');
+    electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
+    electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: path.resolve('exports', 'result.bin') });
+
+    const operations = [
+      invoke(channels.storageGet, event, cacheRoot),
+      invoke(channels.artifactsCleanup, event),
+      invoke(channels.artifactsClear, event),
+      invoke(channels.artifactsOpen, event),
+      invoke(channels.trashMove, event, cacheRoot, ['100']),
+      invoke(channels.trashList, event, cacheRoot),
+      invoke(channels.trashRestore, event, cacheRoot, ['trash-100']),
+      invoke(channels.trashPurge, event, cacheRoot, ['trash-100']),
+      invoke(channels.play, event, cacheRoot, [{ avid: '100' }], 'system', false),
+      invoke(channels.exportMedia, event, cacheRoot, [{ avid: '100', pageIndexes: [1] }], 'result.mp4', false),
+      invoke(channels.exportDiagnostics, event, 'diagnostics.zip', cacheRoot),
+    ];
+    const settled = Promise.allSettled(operations);
+    await vi.waitFor(() => expect(fake.calls.map((call) => call.method)).toEqual(expect.arrayContaining([
+      'storage.get',
+      'artifacts.cleanup',
+      'artifacts.clear',
+      'trash.move',
+      'trash.list',
+      'trash.restore',
+      'trash.purge',
+      'play',
+      'export',
+      'diagnostics.export',
+    ])));
+    const activeIds = fake.calls.map((call) => call.id);
+
+    event.sender.emit('destroyed');
+
+    expect(fake.cancelledIds).toEqual(activeIds);
+    expect((await settled).every((result) => result.status === 'rejected')).toBe(true);
+  });
+
+  it('cancels only active cache.details work through the scoped channel', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(14);
+    const details = invoke(channels.cacheDetails, event, {
+      indexToken: 'index-token-1',
+      avid: '100',
+      offset: 0,
+      pageSize: 100,
+    });
+    const storage = invoke(channels.storageGet, event, path.resolve('cache'));
+    const detailsId = fake.calls.find((call) => call.method === 'cache.details')!.id;
+
+    expect(await invoke(channels.cacheDetailsCancel, event)).toBe(true);
+    expect(fake.cancelledIds).toEqual([detailsId]);
+    await expect(details).rejects.toThrow('操作已取消');
+    expect(await invoke(channels.cancel, event)).toBe(true);
+    await expect(storage).rejects.toThrow('操作已取消');
+  });
+});
+
+describe('IPC Host contract wiring', () => {
+  it('rejects a malformed initialState response from the Host', async () => {
+    const fake = createImmediateBridge({
+      initialState: { protocolVersion: 2 },
+    });
+    unregister = registerIpc(fake.bridge, () => null);
+
+    await expect(invoke(channels.initialState, trustedEvent(15))).rejects.toThrow(
+      /initialState\.settings 必须是对象/,
+    );
+    expect(fake.calls).toEqual([expect.objectContaining({ method: 'initialState' })]);
+  });
+
+  it('forwards scan pagination and maps a validated page response', async () => {
+    const response = validScanResult({ offset: 40, pageSize: 20, totalItems: 41 });
+    const fake = createImmediateBridge({ scan: response });
+    unregister = registerIpc(fake.bridge, () => null);
+    const rootPath = path.resolve('paged-cache');
+
+    const result = await invoke(channels.scan, trustedEvent(16), {
+      rootPath,
+      includeIncomplete: true,
+      persistSettings: false,
+      offset: 40,
+      pageSize: 20,
+    });
+
+    expect(fake.calls.find((call) => call.method === 'scan')?.params).toEqual({
+      rootPath,
+      includeIncomplete: true,
+      persistSettings: false,
+      offset: 40,
+      pageSize: 20,
+    });
+    expect(result).toEqual(response);
+  });
+
+  it('rejects Host pages that do not match the request token or offset', async () => {
+    const fake = createImmediateBridge({
+      search: validScanResult({ indexToken: 'different-token' }),
+      scan: validScanResult({ offset: 1, items: [] }),
+    });
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(17);
+
+    await expect(invoke(channels.search, event, validSearchRequest())).rejects.toThrow(/索引令牌与请求不一致/);
+    await expect(invoke(channels.scan, event, {
+      rootPath: path.resolve('cache'),
+      includeIncomplete: false,
+    })).rejects.toThrow(/分页位置与请求不一致/);
+  });
+
+  it('applies cache.details request defaults and maps the validated segment page', async () => {
+    const response = validCacheDetails();
+    const fake = createImmediateBridge({ 'cache.details': response });
+    unregister = registerIpc(fake.bridge, () => null);
+
+    const result = await invoke(channels.cacheDetails, trustedEvent(18), {
+      indexToken: 'index-token-1',
+      avid: '100',
+    });
+
+    expect(fake.calls.find((call) => call.method === 'cache.details')?.params).toEqual({
+      indexToken: 'index-token-1',
+      avid: '100',
+      offset: 0,
+      pageSize: 100,
+    });
+    expect(result).toEqual(response);
   });
 });
 
@@ -208,47 +339,58 @@ function createDeferredBridge(): {
   bridge: DesktopHostBridge;
   calls: Array<{ id: string; method: string; params: JsonObject }>;
   pending: Map<string, Deferred>;
+  cancelledIds: string[];
 } {
   const calls: Array<{ id: string; method: string; params: JsonObject }> = [];
   const pending = new Map<string, Deferred>();
+  const cancelledIds: string[] = [];
   let sequence = 0;
   const emitter = new EventEmitter() as EventEmitter & {
-    call<T>(method: string, params?: JsonObject): { id: string; promise: Promise<T> };
+    call<T>(method: string, params?: JsonObject): { id: string; promise: Promise<T>; cancel(): boolean };
   };
   emitter.call = <T>(method: string, params: JsonObject = {}) => {
     const id = `${method}-${++sequence}`;
     calls.push({ id, method, params });
-    if (method === 'cancel') {
-      return {
-        id,
-        promise: Promise.resolve({
-          requestId: params.requestId,
-          cancelled: true,
-        } as T),
-      };
-    }
     const operation = deferred();
     pending.set(id, operation);
-    return { id, promise: operation.promise as Promise<T> };
+    let active = true;
+    operation.promise.then(
+      () => { active = false; },
+      () => { active = false; },
+    );
+    return {
+      id,
+      promise: operation.promise as Promise<T>,
+      cancel: () => {
+        if (!active) return false;
+        active = false;
+        cancelledIds.push(id);
+        operation.reject(new Error('操作已取消。'));
+        return true;
+      },
+    };
   };
-  return { bridge: emitter as unknown as DesktopHostBridge, calls, pending };
+  return { bridge: emitter as unknown as DesktopHostBridge, calls, pending, cancelledIds };
 }
 
-function createImmediateBridge(): {
+function createImmediateBridge(results: Record<string, unknown> = {}): {
   bridge: DesktopHostBridge;
   calls: Array<{ id: string; method: string; params: JsonObject }>;
 } {
   const calls: Array<{ id: string; method: string; params: JsonObject }> = [];
   let sequence = 0;
   const emitter = new EventEmitter() as EventEmitter & {
-    call<T>(method: string, params?: JsonObject): { id: string; promise: Promise<T> };
+    call<T>(method: string, params?: JsonObject): { id: string; promise: Promise<T>; cancel(): boolean };
   };
   emitter.call = <T>(method: string, params: JsonObject = {}) => {
     const id = `${method}-${++sequence}`;
     calls.push({ id, method, params });
     return {
       id,
-      promise: Promise.resolve({ outputPath: params.outputPath } as T),
+      promise: Promise.resolve((Object.hasOwn(results, method)
+        ? results[method]
+        : { outputPath: params.outputPath }) as T),
+      cancel: () => false,
     };
   };
   return { bridge: emitter as unknown as DesktopHostBridge, calls };
@@ -267,8 +409,12 @@ function deferred(): Deferred {
 function trustedEvent(senderId: number): IpcMainInvokeEvent {
   const frame = { url: 'blcm://app/index.html', top: null as unknown };
   frame.top = frame;
+  const sender = Object.assign(new EventEmitter(), {
+    id: senderId,
+    isDestroyed: () => false,
+  });
   return {
-    sender: { id: senderId },
+    sender,
     senderFrame: frame,
   } as unknown as IpcMainInvokeEvent;
 }
@@ -281,8 +427,9 @@ function invoke(channel: string, event: IpcMainInvokeEvent, ...args: unknown[]):
 
 function validSearchRequest(): JsonObject {
   return {
-    rootPath: path.resolve('cache'),
-    includeIncomplete: false,
+    indexToken: 'index-token-1',
+    offset: 0,
+    pageSize: 100,
     keyword: 'demo',
     matchMode: 'contains',
     splitKeywords: true,
@@ -292,5 +439,61 @@ function validSearchRequest(): JsonObject {
     includeBvid: true,
     includeAvid: true,
     caseSensitive: false,
+  };
+}
+
+function validCacheEntry(): JsonObject {
+  return {
+    id: '100',
+    avid: '100',
+    bvid: 'BV1demo',
+    title: '测试缓存',
+    ownerName: '测试 UP',
+    durationSeconds: 125,
+    segmentCount: 1,
+    sizeBytes: 32 * 1024 * 1024,
+    isAllCompleted: true,
+    lastUpdated: '2026-08-26T00:00:00Z',
+  };
+}
+
+function validScanResult(overrides: JsonObject = {}): JsonObject {
+  const result: JsonObject = {
+    rootPath: path.resolve('paged-cache'),
+    indexToken: 'index-token-1',
+    offset: 0,
+    pageSize: 100,
+    totalItems: 1,
+    hasMore: false,
+    items: [validCacheEntry()],
+    includedEntries: 1,
+    skippedIncompleteEntries: 2,
+    invalidEntries: 1,
+    inaccessibleDirectories: 0,
+  };
+  return { ...result, ...overrides };
+}
+
+function validCacheDetails(): JsonObject {
+  return {
+    indexToken: 'index-token-1',
+    avid: '100',
+    item: validCacheEntry(),
+    offset: 0,
+    pageSize: 100,
+    totalItems: 1,
+    hasMore: false,
+    segments: [{
+      id: '100:1',
+      segmentKey: '1',
+      pageIndex: 1,
+      partName: '第一集',
+      structureKind: 'Dash',
+      materialKind: 'AudioVideo',
+      sizeBytes: 32 * 1024 * 1024,
+      durationSeconds: 125,
+      isPlayable: true,
+      directoryPath: path.resolve('cache', '100', '1'),
+    }],
   };
 }

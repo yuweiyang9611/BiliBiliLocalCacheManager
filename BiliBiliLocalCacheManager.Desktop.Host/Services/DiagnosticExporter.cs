@@ -71,7 +71,7 @@ internal sealed class DiagnosticExporter(
                         {
                             name = "BiliBili Local Cache Manager Desktop Host",
                             version = typeof(DiagnosticExporter).Assembly.GetName().Version?.ToString() ?? "unknown",
-                            protocolVersion = 1
+                            protocolVersion = DesktopHostApplication.ProtocolVersion
                         },
                         runtime = new
                         {
