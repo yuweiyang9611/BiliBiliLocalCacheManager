@@ -1,19 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   AppSettings,
   ArtifactCleanupResult,
+  CacheDetails,
   CacheEntry,
+  CachePage,
   CacheSegment,
   DesktopCapabilities,
   DesktopInfo,
   HostHealth,
   HostProgress,
   PlayerPreference,
+  SearchRequest,
   SelectionTarget,
   StorageSnapshot,
   TrashEntry,
 } from '../shared/contracts';
-import { defaultSettings, emptyStorage } from '../shared/contracts';
+import { DEFAULT_CACHE_PAGE_SIZE, defaultSettings, emptyStorage } from '../shared/contracts';
 import { Icon, type IconName } from './components/Icon';
 
 type Page = 'library' | 'storage' | 'trash' | 'settings' | 'diagnostics';
@@ -22,7 +25,18 @@ type Activity = { time: Date; kind: 'success' | 'error' | 'info'; message: strin
 type UndoDeleteBatch = { rootPath: string; avids: string[] };
 type RootBoundState<T> = { rootPath: string | null; value: T };
 type LegacySettingsMigration = { rootPath: string };
-type IndexBinding = { rootPath: string; includeIncomplete: boolean };
+type IndexBinding = { rootPath: string; includeIncomplete: boolean; indexToken: string };
+type QueuedSearch = { revision: number; request: SearchRequest };
+type BootstrapStatus = 'loading' | 'ready' | 'failed';
+type StartupScanStatus = 'not-required' | 'running' | 'completed' | 'failed';
+type CachePageState = Pick<CachePage, 'offset' | 'pageSize' | 'totalItems' | 'hasMore'>;
+
+const initialCachePage: CachePageState = {
+  offset: 0,
+  pageSize: DEFAULT_CACHE_PAGE_SIZE,
+  totalItems: 0,
+  hasMore: false,
+};
 
 const navigation: Array<{ id: Page; label: string; icon: IconName }> = [
   { id: 'library', label: '缓存库', icon: 'library' },
@@ -37,11 +51,15 @@ export function App() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [draftSettings, setDraftSettings] = useState<AppSettings>(defaultSettings);
   const [items, setItems] = useState<CacheEntry[]>([]);
+  const [cachePage, setCachePage] = useState<CachePageState>(initialCachePage);
   const [indexBinding, setIndexBinding] = useState<IndexBinding | null>(null);
+  const [focusedDetails, setFocusedDetails] = useState<CacheDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsOffset, setDetailsOffset] = useState(0);
   const [storageState, setStorageState] = useState<RootBoundState<StorageSnapshot>>({ rootPath: null, value: emptyStorage });
   const [trashState, setTrashState] = useState<RootBoundState<TrashEntry[]>>({ rootPath: null, value: [] });
   const [health, setHealth] = useState<HostHealth | null>(null);
-  const [capabilities, setCapabilities] = useState<DesktopCapabilities>({ playback: true, exportMedia: true, trashPurge: false, nativeWayland: false });
+  const [capabilities, setCapabilities] = useState<DesktopCapabilities>({ playback: true, exportMedia: true, cacheDetails: true, trashPurge: false, nativeWayland: false });
   const [desktop, setDesktop] = useState<DesktopInfo | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -49,6 +67,11 @@ export function App() {
   const [selectedTrashIds, setSelectedTrashIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>('正在连接 Desktop Host…');
   const [initialized, setInitialized] = useState(false);
+  const [bootstrapStatus, setBootstrapStatus] = useState<BootstrapStatus>('loading');
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [startupScanStatus, setStartupScanStatus] = useState<StartupScanStatus>('not-required');
+  const [startupScanCount, setStartupScanCount] = useState(0);
+  const [bootstrapError, setBootstrapError] = useState('');
   const [progress, setProgress] = useState<HostProgress | null>(null);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -58,14 +81,36 @@ export function App() {
   const noticeId = useRef(0);
   const searchInput = useRef<HTMLInputElement>(null);
   const searchWasActive = useRef(false);
+  const pendingSearch = useRef<QueuedSearch | null>(null);
+  const latestSearchRevision = useRef(0);
+  const searchDrainActive = useRef(false);
+  const resumePendingSearch = useRef<() => void>(() => undefined);
   const operationInFlight = useRef(true);
+  const detailsRevision = useRef(0);
   const activeRootPath = settings.rootPath.trim();
   const activeRootPathRef = useRef(activeRootPath);
   activeRootPathRef.current = activeRootPath;
   const storage = storageState.rootPath === activeRootPath ? storageState.value : emptyStorage;
   const trash = trashState.rootPath === activeRootPath ? trashState.value : [];
   const hasActiveIndex = indexBinding?.rootPath === activeRootPath &&
-    indexBinding.includeIncomplete === settings.includeIncomplete;
+    indexBinding.includeIncomplete === settings.includeIncomplete &&
+    Boolean(indexBinding.indexToken);
+  const currentSearchRequest: SearchRequest = {
+    indexToken: indexBinding?.indexToken ?? '',
+    offset: 0,
+    pageSize: cachePage.pageSize,
+    keyword: settings.keyword.trim(),
+    matchMode: settings.matchMode,
+    splitKeywords: settings.splitKeywords,
+    anyKeywords: settings.anyKeywords,
+    includePartName: settings.includePartName,
+    includeOwnerName: settings.includeOwnerName,
+    includeBvid: settings.includeBvid,
+    includeAvid: settings.includeAvid,
+    caseSensitive: settings.caseSensitive,
+  };
+  const searchContextRef = useRef({ hasActiveIndex, request: currentSearchRequest });
+  searchContextRef.current = { hasActiveIndex, request: currentSearchRequest };
 
   const notify = useCallback((kind: Notice['kind'], message: string) => {
     const id = ++noticeId.current;
@@ -74,12 +119,26 @@ export function App() {
     window.setTimeout(() => setNotices((current) => current.filter((item) => item.id !== id)), 4_500);
   }, []);
 
-  const replaceLibraryItems = useCallback((nextItems: CacheEntry[] = []) => {
+  const replaceLibraryItems = useCallback((nextItems: CacheEntry[] = [], page?: CachePageState) => {
+    void window.cacheManager.cancelCacheDetails().catch(() => undefined);
     setItems(nextItems);
+    setCachePage(page ?? { ...initialCachePage, totalItems: nextItems.length });
     setSelectedIds(new Set());
     setFocusedId(null);
+    setFocusedDetails(null);
+    setDetailsOffset(0);
+    detailsRevision.current += 1;
+    setDetailsLoading(false);
     setSelectedSegmentIds(new Set());
   }, []);
+
+  const invalidateIndex = useCallback(() => {
+    latestSearchRevision.current += 1;
+    pendingSearch.current = null;
+    searchWasActive.current = false;
+    setIndexBinding(null);
+    replaceLibraryItems();
+  }, [replaceLibraryItems]);
 
   const invalidateRootViews = useCallback(() => {
     setStorageState({ rootPath: null, value: emptyStorage });
@@ -106,20 +165,27 @@ export function App() {
     try {
       return await operation();
     } catch (error) {
-      setHealth(null);
-      notify('error', describeError(error));
+      if (isStaleIndexError(error)) {
+        invalidateIndex();
+        notify('info', '缓存索引已失效，请重新扫描。');
+      } else {
+        notify(isCancellationError(error) ? 'info' : 'error', isCancellationError(error) ? '操作已取消。' : describeError(error));
+      }
       return undefined;
     } finally {
       operationInFlight.current = false;
       setBusy(null);
       setProgress(null);
+      resumePendingSearch.current();
     }
-  }, [notify]);
+  }, [invalidateIndex, notify]);
 
   useEffect(() => {
+    let disposed = false;
     const unsubscribeProgress = window.cacheManager.onProgress((value) => setProgress(value));
     const unsubscribeUnavailable = window.cacheManager.onHostUnavailable((message) => {
       setHealth(null);
+      invalidateIndex();
       notify('error', message);
     });
     void (async () => {
@@ -129,67 +195,117 @@ export function App() {
           window.cacheManager.health(),
           window.cacheManager.getDesktopInfo(),
         ]);
-        const loadedSettings = { ...defaultSettings, ...(initial.settings ?? {}) };
+        if (disposed) return;
+        const loadedSettings = initial.settings;
         setSettings(loadedSettings);
         setDraftSettings(loadedSettings);
-        setItems(initial.items ?? []);
+        setSettingsLoaded(true);
+        replaceLibraryItems(initial.items);
         setIndexBinding(null);
         setStorageState({ rootPath: null, value: emptyStorage });
         setTrashState({ rootPath: null, value: [] });
-        setCapabilities(initial.capabilities ?? { playback: true, exportMedia: true, trashPurge: false, nativeWayland: false });
+        setCapabilities(initial.capabilities);
         setHealth(hostHealth);
         setDesktop(info);
         notify('success', 'Desktop Host 已连接。');
-        setInitialized(true);
 
         const legacyRootPath = loadedSettings.rootPath.trim();
         const requiresLegacyChoice = legacyRootPath.length > 0
-          && typeof initial.settingsState?.sourceSchemaVersion === 'number'
+          && typeof initial.settingsState.sourceSchemaVersion === 'number'
           && initial.settingsState.sourceSchemaVersion < 2;
         if (requiresLegacyChoice) {
           replaceLibraryItems();
           setLegacySettingsMigration({ rootPath: legacyRootPath });
         } else if (loadedSettings.scanOnStartup && legacyRootPath) {
+          setStartupScanStatus('running');
           setBusy('正在自动扫描缓存…');
-          try {
-            const result = await window.cacheManager.scan({
-              rootPath: legacyRootPath,
-              includeIncomplete: loadedSettings.includeIncomplete,
-              persistSettings: false,
-            });
-            setIndexBinding({ rootPath: legacyRootPath, includeIncomplete: loadedSettings.includeIncomplete });
-            replaceLibraryItems(result.items ?? []);
-            notify('success', `已自动扫描记住的目录，共发现 ${result.items?.length ?? 0} 条缓存。`);
-          } catch (error) {
-            setHealth(null);
-            notify('error', `自动扫描失败：${describeError(error)}`);
-          }
+          const result = await window.cacheManager.scan({
+            rootPath: legacyRootPath,
+            includeIncomplete: loadedSettings.includeIncomplete,
+            persistSettings: false,
+            offset: 0,
+            pageSize: DEFAULT_CACHE_PAGE_SIZE,
+          });
+          if (disposed) return;
+          setIndexBinding({ rootPath: legacyRootPath, includeIncomplete: loadedSettings.includeIncomplete, indexToken: result.indexToken });
+          replaceLibraryItems(result.items, result);
+          setStartupScanCount(result.totalItems);
+          setStartupScanStatus('completed');
+          notify('success', `已自动扫描记住的目录，共发现 ${result.totalItems} 条缓存。`);
         }
+        if (disposed) return;
+        setBootstrapStatus('ready');
       } catch (error) {
-        setHealth(null);
-        notify('error', describeError(error));
+        if (disposed) return;
+        const message = isCancellationError(error) ? '初始化已取消。' : describeError(error);
+        setStartupScanStatus((current) => current === 'running' ? 'failed' : current);
+        setBootstrapError(safeBootstrapError(message));
+        setBootstrapStatus('failed');
+        notify(isCancellationError(error) ? 'info' : 'error', message);
       } finally {
+        if (disposed) return;
         operationInFlight.current = false;
         setBusy(null);
         setInitialized(true);
+        resumePendingSearch.current();
       }
     })();
-    return () => { unsubscribeProgress(); unsubscribeUnavailable(); };
-  }, [notify, replaceLibraryItems]);
+    return () => { disposed = true; unsubscribeProgress(); unsubscribeUnavailable(); };
+  }, [invalidateIndex, notify, replaceLibraryItems]);
 
   const focusedItem = useMemo(
     () => items.find((item) => item.id === focusedId || item.avid === focusedId) ?? null,
     [focusedId, items],
   );
+  useEffect(() => {
+    if (!focusedItem || !indexBinding?.indexToken) {
+      setFocusedDetails(null);
+      setDetailsLoading(false);
+      return;
+    }
+    const revision = ++detailsRevision.current;
+    setFocusedDetails(null);
+    setSelectedSegmentIds(new Set());
+    setDetailsLoading(true);
+    void (async () => {
+      try {
+        await window.cacheManager.cancelCacheDetails();
+        if (detailsRevision.current !== revision) return;
+        const result = await window.cacheManager.getCacheDetails({
+          indexToken: indexBinding.indexToken,
+          avid: focusedItem.avid,
+          offset: detailsOffset,
+          pageSize: DEFAULT_CACHE_PAGE_SIZE,
+        });
+        if (detailsRevision.current !== revision) return;
+        setFocusedDetails(result);
+      } catch (error) {
+        if (detailsRevision.current !== revision) return;
+        if (isStaleIndexError(error)) {
+          invalidateIndex();
+          notify('info', '缓存索引已失效，请重新扫描。');
+        } else {
+          notify(isCancellationError(error) ? 'info' : 'error', isCancellationError(error) ? '分段加载已取消。' : describeError(error));
+        }
+      } finally {
+        if (detailsRevision.current === revision) setDetailsLoading(false);
+      }
+    })();
+    return () => {
+      detailsRevision.current += 1;
+      void window.cacheManager.cancelCacheDetails().catch(() => undefined);
+    };
+  }, [detailsOffset, focusedItem, indexBinding?.indexToken, invalidateIndex, notify]);
+
   const targets = useMemo<SelectionTarget[]>(() => {
-    if (focusedItem && selectedSegmentIds.size > 0) {
+    if (focusedDetails && selectedSegmentIds.size > 0) {
       return [{
-        avid: focusedItem.avid,
-        pageIndexes: focusedItem.segments.filter((segment) => selectedSegmentIds.has(segment.id)).map((segment) => segment.pageIndex),
+        avid: focusedDetails.avid,
+        pageIndexes: focusedDetails.segments.filter((segment) => selectedSegmentIds.has(segment.id)).map((segment) => segment.pageIndex),
       }];
     }
     return items.filter((item) => selectedIds.has(item.id)).map((item) => ({ avid: item.avid }));
-  }, [focusedItem, items, selectedIds, selectedSegmentIds]);
+  }, [focusedDetails, items, selectedIds, selectedSegmentIds]);
 
   const browse = useCallback(async () => {
     const completed = await run('正在验证缓存目录…', async () => {
@@ -200,7 +316,10 @@ export function App() {
         rootPath: normalizedRootPath,
         includeIncomplete: settings.includeIncomplete,
         persistSettings: false,
+        offset: 0,
+        pageSize: DEFAULT_CACHE_PAGE_SIZE,
       });
+      invalidateIndex();
       const saved = await window.cacheManager.updateSettings({
         rootPath: normalizedRootPath,
         includeIncomplete: settings.includeIncomplete,
@@ -213,57 +332,129 @@ export function App() {
     setDraftSettings(completed.saved);
     setUndoDeleteBatch(null);
     invalidateRootViews();
-    setIndexBinding({ rootPath: completed.rootPath, includeIncomplete: settings.includeIncomplete });
-    replaceLibraryItems(completed.result.items ?? []);
-    notify('success', `目录已验证并切换，共发现 ${completed.result.items?.length ?? 0} 条缓存。`);
-  }, [invalidateRootViews, notify, replaceLibraryItems, run, settings.includeIncomplete, settings.rootPath]);
+    setIndexBinding({ rootPath: completed.rootPath, includeIncomplete: settings.includeIncomplete, indexToken: completed.result.indexToken });
+    replaceLibraryItems(completed.result.items, completed.result);
+    notify('success', `目录已验证并切换，共发现 ${completed.result.totalItems} 条缓存。`);
+  }, [invalidateIndex, invalidateRootViews, notify, replaceLibraryItems, run, settings.includeIncomplete, settings.rootPath]);
 
   const scan = useCallback(async () => {
     if (!settings.rootPath.trim()) { notify('error', '请先选择 B 站缓存根目录。'); return; }
-    const result = await run('正在扫描缓存…', () => window.cacheManager.scan({
-      rootPath: activeRootPath,
-      includeIncomplete: settings.includeIncomplete,
-      persistSettings: true,
-    }));
+    const result = await run('正在扫描缓存…', async () => {
+      const next = await window.cacheManager.scan({
+        rootPath: activeRootPath,
+        includeIncomplete: settings.includeIncomplete,
+        persistSettings: true,
+        offset: 0,
+        pageSize: DEFAULT_CACHE_PAGE_SIZE,
+      });
+      invalidateIndex();
+      return next;
+    });
     if (!result) return;
-    setIndexBinding({ rootPath: activeRootPath, includeIncomplete: settings.includeIncomplete });
-    replaceLibraryItems(result.items ?? []);
+    setIndexBinding({ rootPath: activeRootPath, includeIncomplete: settings.includeIncomplete, indexToken: result.indexToken });
+    replaceLibraryItems(result.items, result);
     invalidateStorage();
-    notify('success', `扫描完成，共发现 ${result.items?.length ?? 0} 条缓存。`);
-  }, [activeRootPath, invalidateStorage, notify, replaceLibraryItems, run, settings.includeIncomplete]);
+    notify('success', `扫描完成，共发现 ${result.totalItems} 条缓存。`);
+  }, [activeRootPath, invalidateIndex, invalidateStorage, notify, replaceLibraryItems, run, settings.includeIncomplete]);
 
-  const search = useCallback(async () => {
+  const drainSearchQueue = useCallback(async () => {
+    if (searchDrainActive.current || operationInFlight.current || !pendingSearch.current) return;
+    searchDrainActive.current = true;
+    operationInFlight.current = true;
+    setBusy('正在筛选…');
+    try {
+      while (pendingSearch.current) {
+        const queued = pendingSearch.current;
+        pendingSearch.current = null;
+        try {
+          const result = await window.cacheManager.search(queued.request);
+          const context = searchContextRef.current;
+          if (queued.revision !== latestSearchRevision.current ||
+              !context.hasActiveIndex ||
+              !sameSearchRequest(context.request, queued.request)) continue;
+          replaceLibraryItems(result.items, result);
+        } catch (error) {
+          if (queued.revision !== latestSearchRevision.current) continue;
+          if (isStaleIndexError(error)) {
+            invalidateIndex();
+            notify('info', '缓存索引已失效，请重新扫描。');
+          } else {
+            notify(isCancellationError(error) ? 'info' : 'error', isCancellationError(error) ? '操作已取消。' : describeError(error));
+          }
+        }
+      }
+    } finally {
+      searchDrainActive.current = false;
+      operationInFlight.current = false;
+      setBusy(null);
+      setProgress(null);
+      if (pendingSearch.current) resumePendingSearch.current();
+    }
+  }, [invalidateIndex, notify, replaceLibraryItems]);
+  resumePendingSearch.current = () => { void drainSearchQueue(); };
+
+  const search = useCallback(async (offset = 0) => {
     if (!hasActiveIndex) {
       notify('info', '请先扫描当前缓存目录，再进行搜索。');
       return;
     }
-    const result = await run('正在筛选…', () => window.cacheManager.search({
-      rootPath: activeRootPath,
-      includeIncomplete: settings.includeIncomplete,
-      keyword: settings.keyword.trim(),
-      matchMode: settings.matchMode,
-      splitKeywords: settings.splitKeywords,
-      anyKeywords: settings.anyKeywords,
-      includePartName: settings.includePartName,
-      includeOwnerName: settings.includeOwnerName,
-      includeBvid: settings.includeBvid,
-      includeAvid: settings.includeAvid,
-      caseSensitive: settings.caseSensitive,
-    }));
-    if (result) replaceLibraryItems(result);
-  }, [activeRootPath, hasActiveIndex, notify, replaceLibraryItems, run, settings]);
+    const request = { ...searchContextRef.current.request, offset };
+    const revision = ++latestSearchRevision.current;
+    pendingSearch.current = { revision, request };
+    resumePendingSearch.current();
+  }, [hasActiveIndex, notify]);
 
   useEffect(() => {
     if (!initialized || legacySettingsMigration || !hasActiveIndex) return;
     const hasKeyword = Boolean(settings.keyword.trim());
     if (!hasKeyword && !searchWasActive.current) return;
     const timer = window.setTimeout(() => {
-      if (operationInFlight.current) return;
       searchWasActive.current = hasKeyword;
       void search();
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [hasActiveIndex, initialized, legacySettingsMigration, search, settings.keyword]);
+  }, [
+    hasActiveIndex,
+    initialized,
+    legacySettingsMigration,
+    search,
+    settings.anyKeywords,
+    settings.caseSensitive,
+    settings.includeAvid,
+    settings.includeBvid,
+    settings.includeOwnerName,
+    settings.includePartName,
+    settings.keyword,
+    settings.matchMode,
+    settings.splitKeywords,
+  ]);
+
+  useEffect(() => {
+    if (hasActiveIndex) return;
+    if (indexBinding) {
+      invalidateIndex();
+      return;
+    }
+    latestSearchRevision.current += 1;
+    pendingSearch.current = null;
+    searchWasActive.current = false;
+  }, [activeRootPath, hasActiveIndex, indexBinding, invalidateIndex, settings.includeIncomplete]);
+
+  const cancelCurrentOperation = useCallback(async () => {
+    if (searchDrainActive.current) {
+      latestSearchRevision.current += 1;
+      pendingSearch.current = null;
+    }
+    if (detailsLoading) {
+      detailsRevision.current += 1;
+      setDetailsLoading(false);
+    }
+    try {
+      await window.cacheManager.cancel();
+    } catch (error) {
+      notify('error', describeError(error));
+    }
+  }, [detailsLoading, notify]);
 
   const updateSetting = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setSettings((current) => ({ ...current, [key]: value }));
@@ -301,14 +492,18 @@ export function App() {
         }
         const completed = await run('正在移动到回收站…', async () => {
           const result = await window.cacheManager.moveToTrash(rootPath, avids);
+          if (result.moved.length > 0) invalidateIndex();
           return { result };
         });
         if (!completed) return;
-        setItems((current) => current.filter((item) => !completed.result.moved.includes(item.avid)));
-        if (completed.result.moved.length > 0) setIndexBinding(null);
-        setSelectedIds(new Set());
-        setFocusedId(null);
-        setSelectedSegmentIds(new Set());
+        if (completed.result.moved.length > 0) {
+          setIndexBinding(null);
+          replaceLibraryItems();
+        } else {
+          setSelectedIds(new Set());
+          setFocusedId(null);
+          setSelectedSegmentIds(new Set());
+        }
         invalidateRootViews();
         setUndoDeleteBatch(completed.result.moved.length > 0
           ? { rootPath, avids: completed.result.moved }
@@ -316,7 +511,7 @@ export function App() {
         notify(completed.result.failed.length ? 'error' : 'success', `已移动 ${completed.result.moved.length} 项，失败 ${completed.result.failed.length} 项。${completed.result.moved.length ? '可按 Ctrl+Z 撤销。' : ''}`);
       })(); },
     });
-  }, [activeRootPath, invalidateRootViews, items, notify, run, selectedIds]);
+  }, [activeRootPath, invalidateIndex, invalidateRootViews, items, notify, replaceLibraryItems, run, selectedIds]);
 
   useEffect(() => {
     invalidateRootViews();
@@ -347,11 +542,14 @@ export function App() {
       const restoreResult = entryIds.length
         ? await window.cacheManager.restoreTrash(rootPath, entryIds)
         : { restored: [], failed: [] };
+      if (restoreResult.restored.length > 0) invalidateIndex();
       const scanResult = restoreResult.restored.length
         ? await window.cacheManager.scan({
           rootPath,
           includeIncomplete: settings.includeIncomplete,
           persistSettings: false,
+          offset: 0,
+          pageSize: DEFAULT_CACHE_PAGE_SIZE,
         })
         : null;
       return {
@@ -364,12 +562,12 @@ export function App() {
     setUndoDeleteBatch(null);
     invalidateRootViews();
     if (completed.scanResult) {
-      setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete });
-      replaceLibraryItems(completed.scanResult.items ?? []);
+      setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete, indexToken: completed.scanResult.indexToken });
+      replaceLibraryItems(completed.scanResult.items, completed.scanResult);
     }
     const failedCount = completed.restoreResult.failed.length + completed.missingCount;
     notify(failedCount ? 'error' : 'success', `已撤销 ${completed.restoreResult.restored.length} 项删除，失败 ${failedCount} 项。`);
-  }, [activeRootPath, invalidateRootViews, notify, replaceLibraryItems, run, settings.includeIncomplete, undoDeleteBatch]);
+  }, [activeRootPath, invalidateIndex, invalidateRootViews, notify, replaceLibraryItems, run, settings.includeIncomplete, undoDeleteBatch]);
 
   const refreshStorage = useCallback(async (announce = true) => {
     const rootPath = activeRootPath;
@@ -441,7 +639,11 @@ export function App() {
     const patch: Partial<AppSettings> = choice === 'forget'
       ? { rootPath: '', rememberRootPath: false, scanOnStartup: false }
       : { rootPath: migration.rootPath, rememberRootPath: true, scanOnStartup: choice === 'scan' };
-    const saved = await run('正在保存启动扫描选择…', () => window.cacheManager.updateSettings(patch));
+    const saved = await run('正在保存启动扫描选择…', async () => {
+      const next = await window.cacheManager.updateSettings(patch);
+      invalidateIndex();
+      return next;
+    });
     if (!saved) return;
 
     const sessionSettings = choice === 'forget' ? saved : { ...saved, rootPath: migration.rootPath };
@@ -465,29 +667,63 @@ export function App() {
       rootPath: migration.rootPath,
       includeIncomplete: sessionSettings.includeIncomplete,
       persistSettings: false,
+      offset: 0,
+      pageSize: DEFAULT_CACHE_PAGE_SIZE,
     }));
     if (!result) return;
-    setIndexBinding({ rootPath: migration.rootPath, includeIncomplete: sessionSettings.includeIncomplete });
-    replaceLibraryItems(result.items ?? []);
+    setIndexBinding({ rootPath: migration.rootPath, includeIncomplete: sessionSettings.includeIncomplete, indexToken: result.indexToken });
+    replaceLibraryItems(result.items, result);
     invalidateStorage();
-    notify('success', `已启用启动扫描，共发现 ${result.items?.length ?? 0} 条缓存。`);
-  }, [invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, run]);
+    notify('success', `已启用启动扫描，共发现 ${result.totalItems} 条缓存。`);
+  }, [invalidateIndex, invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, run]);
 
   useEffect(() => {
+    const uiBusy = Boolean(busy) || detailsLoading;
     const handler = (event: KeyboardEvent) => {
-      if (event.key === 'F5') { event.preventDefault(); if (!busy) void scan(); }
-      if (event.key === 'Escape' && busy) { event.preventDefault(); void window.cacheManager.cancel(); }
+      if (event.key === 'F5') { event.preventDefault(); if (!uiBusy) void scan(); }
+      if (event.key === 'Escape' && uiBusy) { event.preventDefault(); void cancelCurrentOperation(); }
       if (event.ctrlKey && event.key.toLowerCase() === 'f') { event.preventDefault(); setPage('library'); window.setTimeout(() => searchInput.current?.focus(), 0); }
-      if (event.ctrlKey && event.key.toLowerCase() === 'e') { event.preventDefault(); if (!busy) void exportMedia(); }
-      if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === 'z' && !isEditable(event.target)) { event.preventDefault(); if (!busy) void undoLastDelete(); }
-      if (event.key === 'Delete' && page === 'library' && !isEditable(event.target) && !busy) moveToTrash();
+      if (event.ctrlKey && event.key.toLowerCase() === 'e') { event.preventDefault(); if (!uiBusy) void exportMedia(); }
+      if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === 'z' && !isEditable(event.target)) { event.preventDefault(); if (!uiBusy) void undoLastDelete(); }
+      if (event.key === 'Delete' && page === 'library' && !isEditable(event.target) && !uiBusy) moveToTrash();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [busy, exportMedia, moveToTrash, page, scan, undoLastDelete]);
+  }, [busy, cancelCurrentOperation, detailsLoading, exportMedia, moveToTrash, page, scan, undoLastDelete]);
+
+  const uiBusy = Boolean(busy) || detailsLoading;
+
+  if (bootstrapStatus === 'failed') {
+    return <div
+      className="bootstrap-failure"
+      data-renderer-ready="false"
+      data-renderer-bootstrap="failed"
+      data-settings-loaded={settingsLoaded ? 'true' : 'false'}
+      data-startup-scan={startupScanStatus}
+      data-startup-scan-count={startupScanCount}
+      data-host-status={health?.status ?? 'unavailable'}
+      data-bootstrap-error={bootstrapError}
+    >
+      <div className="bootstrap-failure-card" role="alert">
+        <Icon name="warning" />
+        <h1>桌面端初始化失败</h1>
+        <p>{bootstrapError || 'Desktop Host 返回了无法使用的初始化数据。'}</p>
+        <button className="button primary" onClick={() => window.location.reload()}>重试初始化</button>
+      </div>
+    </div>;
+  }
 
   return (
-    <div className="app-shell" data-renderer-ready={initialized ? 'true' : 'false'}>
+    <div
+      className="app-shell"
+      data-renderer-ready={bootstrapStatus === 'ready' ? 'true' : 'false'}
+      data-renderer-bootstrap={bootstrapStatus}
+      data-settings-loaded={settingsLoaded ? 'true' : 'false'}
+      data-startup-scan={startupScanStatus}
+      data-startup-scan-count={startupScanCount}
+      data-host-status={health?.status ?? 'unavailable'}
+      data-bootstrap-error={bootstrapError}
+    >
       <aside className="sidebar">
         <div className="brand"><div className="brand-mark"><Icon name="film" /></div><div><strong>缓存管理器</strong><span>Desktop</span></div></div>
         <nav aria-label="主导航">
@@ -508,9 +744,9 @@ export function App() {
         <header className="topbar">
           <div><h1>{navigation.find((item) => item.id === page)?.label}</h1><p>{pageSubtitle(page)}</p></div>
           <div className="top-actions">
-            {undoDeleteBatch && <button className="button secondary" onClick={() => void undoLastDelete()} disabled={Boolean(busy)}><Icon name="restore" />撤销删除 <kbd>Ctrl+Z</kbd></button>}
-            {busy && <button className="button ghost" onClick={() => void window.cacheManager.cancel()}><Icon name="stop" />取消</button>}
-            <button className="button primary" onClick={() => void scan()} disabled={Boolean(busy)}><Icon name="scan" />扫描缓存 <kbd>F5</kbd></button>
+            {undoDeleteBatch && <button className="button secondary" onClick={() => void undoLastDelete()} disabled={uiBusy}><Icon name="restore" />撤销删除 <kbd>Ctrl+Z</kbd></button>}
+            {uiBusy && <button className="button ghost" onClick={() => void cancelCurrentOperation()}><Icon name="stop" />取消</button>}
+            <button className="button primary" onClick={() => void scan()} disabled={uiBusy}><Icon name="scan" />扫描缓存 <kbd>F5</kbd></button>
           </div>
         </header>
 
@@ -520,9 +756,10 @@ export function App() {
           {page === 'library' && <LibraryPage
             settings={settings} updateSetting={updateSetting} browse={browse} search={search} searchInput={searchInput}
             items={items} selectedIds={selectedIds} setSelectedIds={setSelectedIds} focusedId={focusedId}
-            focus={(item) => { setFocusedId(item.id); setSelectedSegmentIds(new Set()); }} focusedItem={focusedItem}
+            focus={(item) => { setDetailsOffset(0); setFocusedId(item.id); setSelectedSegmentIds(new Set()); }} focusedItem={focusedItem}
+            focusedDetails={focusedDetails} detailsLoading={detailsLoading} detailsOffset={detailsOffset} setDetailsOffset={setDetailsOffset}
             selectedSegmentIds={selectedSegmentIds} setSelectedSegmentIds={setSelectedSegmentIds}
-            busy={Boolean(busy)} play={play} exportMedia={exportMedia} moveToTrash={moveToTrash}
+            cachePage={cachePage} pageTo={search} busy={uiBusy} play={play} exportMedia={exportMedia} moveToTrash={moveToTrash}
             clear={() => replaceLibraryItems()}
           />}
           {page === 'storage' && <StoragePage
@@ -543,11 +780,14 @@ export function App() {
             void (async () => {
               const completed = await run('正在恢复缓存…', async () => {
                 const result = await window.cacheManager.restoreTrash(rootPath, entryIds);
+                if (result.restored.length > 0) invalidateIndex();
                 const scanResult = result.restored.length
                   ? await window.cacheManager.scan({
                     rootPath,
                     includeIncomplete: settings.includeIncomplete,
                     persistSettings: false,
+                    offset: 0,
+                    pageSize: DEFAULT_CACHE_PAGE_SIZE,
                   })
                   : null;
                 return { result, scanResult };
@@ -561,8 +801,8 @@ export function App() {
               }
               invalidateStorage(); setSelectedTrashIds(new Set()); setUndoDeleteBatch(null);
               if (completed.scanResult) {
-                setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete });
-                replaceLibraryItems(completed.scanResult.items ?? []);
+                setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete, indexToken: completed.scanResult.indexToken });
+                replaceLibraryItems(completed.scanResult.items, completed.scanResult);
               }
               notify(completed.result.failed.length ? 'error' : 'success', `已恢复 ${completed.result.restored.length} 项。`);
             })();
@@ -609,9 +849,13 @@ export function App() {
                   rootPath: candidate.rootPath,
                   includeIncomplete: candidate.includeIncomplete,
                   persistSettings: false,
+                  offset: 0,
+                  pageSize: DEFAULT_CACHE_PAGE_SIZE,
                 })
                 : null;
+              if (scanResult) invalidateIndex();
               const saved = await window.cacheManager.updateSettings(candidate);
+              if ((rootChanged || scanBehaviorChanged) && !scanResult) invalidateIndex();
               const sessionSettings = candidate.rootPath ? { ...saved, rootPath: candidate.rootPath } : saved;
               return { saved: sessionSettings, scanResult };
             });
@@ -624,8 +868,9 @@ export function App() {
               setIndexBinding({
                 rootPath: candidate.rootPath,
                 includeIncomplete: candidate.includeIncomplete,
+                indexToken: completed.scanResult.indexToken,
               });
-              replaceLibraryItems(completed.scanResult.items ?? []);
+              replaceLibraryItems(completed.scanResult.items, completed.scanResult);
             }
             if (!completed.saved.rootPath.trim()) {
               setIndexBinding(null);
@@ -635,7 +880,7 @@ export function App() {
             }
             if (completed.scanResult) {
               invalidateStorage();
-              notify('success', `设置已保存并重新扫描，共发现 ${completed.scanResult.items?.length ?? 0} 条缓存。`);
+              notify('success', `设置已保存并重新扫描，共发现 ${completed.scanResult.totalItems} 条缓存。`);
             } else {
               notify('success', '设置已保存。');
             }
@@ -649,7 +894,7 @@ export function App() {
           }} busy={Boolean(busy)} />}
         </section>
 
-        <footer className="statusbar"><span>{busy ?? (items.length ? `当前显示 ${items.length} 条缓存，已选 ${selectedIds.size} 条 · ${formatBytes(selectedBytes(items, selectedIds))}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
+        <footer className="statusbar"><span>{busy ?? (detailsLoading ? '正在加载分段详情…' : items.length ? `当前显示 ${cachePage.offset + 1}–${cachePage.offset + items.length} / ${cachePage.totalItems} 条缓存，已选 ${selectedIds.size} 条 · ${formatBytes(selectedBytes(items, selectedIds))}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
       </main>
 
       <div className="toast-stack" aria-live="polite">{notices.map((notice) => <div key={notice.id} className={`toast ${notice.kind}`}><Icon name={notice.kind === 'error' ? 'warning' : 'check'} /><span>{notice.message}</span></div>)}</div>
@@ -663,7 +908,7 @@ interface LibraryProps {
   settings: AppSettings;
   updateSetting<K extends keyof AppSettings>(key: K, value: AppSettings[K]): void;
   browse(): Promise<void>;
-  search(): Promise<void>;
+  search(offset?: number): Promise<void>;
   searchInput: React.RefObject<HTMLInputElement | null>;
   items: CacheEntry[];
   selectedIds: Set<string>;
@@ -671,8 +916,14 @@ interface LibraryProps {
   focusedId: string | null;
   focus(item: CacheEntry): void;
   focusedItem: CacheEntry | null;
+  focusedDetails: CacheDetails | null;
+  detailsLoading: boolean;
+  detailsOffset: number;
+  setDetailsOffset(value: number): void;
   selectedSegmentIds: Set<string>;
   setSelectedSegmentIds(value: Set<string>): void;
+  cachePage: CachePageState;
+  pageTo(offset: number): Promise<void>;
   busy: boolean;
   play(targets?: SelectionTarget[]): Promise<void>;
   exportMedia(): Promise<void>;
@@ -702,14 +953,75 @@ function LibraryPage(props: LibraryProps) {
       </div></details>
     </section>
     <section className="card cache-panel">
-      <div className="panel-heading"><div><h2>缓存列表</h2><span>{props.items.length} 项</span></div><div className="toolbar"><button className="button ghost" onClick={() => void props.play()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="play" />播放</button><button className="button ghost" onClick={() => void props.exportMedia()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="export" />导出</button><button className="button ghost danger-text" onClick={props.moveToTrash} disabled={props.busy || !props.selectedIds.size}><Icon name="delete" />删除</button><button className="button ghost" onClick={props.clear} disabled={props.busy}>清空结果</button></div></div>
-      <div className="table-scroll cache-table"><table><thead><tr><th className="check-cell"><input aria-label="选择全部缓存" type="checkbox" checked={props.items.length > 0 && props.selectedIds.size === props.items.length} onChange={(event) => props.setSelectedIds(event.target.checked ? new Set(props.items.map((item) => item.id)) : new Set())} /></th><th>视频</th><th>UP 主</th><th>标识</th><th>时长</th><th>分段</th><th>大小</th><th>状态</th><th>更新时间</th></tr></thead>
-      <tbody>{props.items.map((item) => <tr key={item.id} className={props.focusedId === item.id ? 'focused' : ''} onClick={() => props.focus(item)} onDoubleClick={() => { if (props.busy) return; props.setSelectedIds(new Set([item.id])); void props.play([{ avid: item.avid }]); }}><td className="check-cell" onClick={(event) => event.stopPropagation()}><input aria-label={`选择 ${item.title}`} type="checkbox" checked={props.selectedIds.has(item.id)} onChange={() => props.setSelectedIds(toggleSet(props.selectedIds, item.id))} /></td><td><strong className="title-cell">{item.title || '未命名缓存'}</strong><small>av{item.avid}</small></td><td>{item.ownerName || '—'}</td><td><code>{item.bvid || '—'}</code></td><td>{formatDuration(item.durationSeconds)}</td><td>{item.segmentCount}</td><td>{formatBytes(item.sizeBytes)}</td><td><span className={item.isAllCompleted ? 'badge success' : 'badge warning'}>{item.isAllCompleted ? '完整' : '未完成'}</span></td><td>{formatDate(item.lastUpdated)}</td></tr>)}</tbody></table>
-      {!props.items.length && <Empty icon="library" title="尚未加载缓存" body="选择缓存根目录后点击“扫描缓存”，这里会显示可播放与可导出的缓存。" />}</div>
+      <div className="panel-heading"><div><h2>缓存列表</h2><span>{props.cachePage.totalItems} 项</span></div><div className="toolbar"><button className="button ghost" onClick={() => void props.play()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="play" />播放</button><button className="button ghost" onClick={() => void props.exportMedia()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="export" />导出</button><button className="button ghost danger-text" onClick={props.moveToTrash} disabled={props.busy || !props.selectedIds.size}><Icon name="delete" />删除</button><button className="button ghost" onClick={props.clear} disabled={props.busy}>清空结果</button></div></div>
+      <VirtualizedCacheTable {...props} />
+      <PageControls
+        label="缓存"
+        {...props.cachePage}
+        busy={props.busy}
+        onPage={(offset) => void props.pageTo(offset)}
+      />
     </section>
-    <section className="card segment-panel"><div className="panel-heading"><div><h2>分段详情</h2><span>{props.focusedItem ? `${props.focusedItem.title} · ${props.focusedItem.segments.length} 个分段` : '选择一条缓存查看'}</span></div></div>
-      {props.focusedItem ? <div className="table-scroll"><table><thead><tr><th className="check-cell"><input aria-label="选择全部分段" type="checkbox" checked={props.focusedItem.segments.length > 0 && props.selectedSegmentIds.size === props.focusedItem.segments.length} onChange={(event) => props.setSelectedSegmentIds(event.target.checked ? new Set(props.focusedItem!.segments.map((item) => item.id)) : new Set())} /></th><th>Page</th><th>分段名</th><th>结构</th><th>类型</th><th>大小</th><th>时长</th><th>可播放</th></tr></thead><tbody>{props.focusedItem.segments.map((segment) => <SegmentRow key={segment.id} item={segment} checked={props.selectedSegmentIds.has(segment.id)} toggle={() => props.setSelectedSegmentIds(toggleSet(props.selectedSegmentIds, segment.id))} play={() => { if (props.busy) return; props.setSelectedSegmentIds(new Set([segment.id])); void props.play([{ avid: props.focusedItem!.avid, pageIndexes: [segment.pageIndex] }]); }} />)}</tbody></table></div> : <Empty compact icon="film" title="没有选择缓存" body="单击上方缓存后可查看所有页面和媒体结构；双击分段可直接播放。" />}
+    <section className="card segment-panel"><div className="panel-heading"><div><h2>分段详情</h2><span>{props.focusedDetails ? `${props.focusedDetails.item.title} · ${props.focusedDetails.totalItems} 个分段` : props.focusedItem ? props.focusedItem.title : '选择一条缓存查看'}</span></div></div>
+      {props.detailsLoading
+        ? <Empty compact icon="film" title="正在加载分段" body="仅为当前页解析媒体结构与可播放状态。" />
+        : props.focusedDetails
+          ? <><div className="table-scroll"><table><thead><tr><th className="check-cell"><input aria-label="选择全部分段" type="checkbox" checked={props.focusedDetails.segments.length > 0 && props.selectedSegmentIds.size === props.focusedDetails.segments.length} onChange={(event) => props.setSelectedSegmentIds(event.target.checked ? new Set(props.focusedDetails!.segments.map((item) => item.id)) : new Set())} /></th><th>Page</th><th>分段名</th><th>结构</th><th>类型</th><th>大小</th><th>时长</th><th>可播放</th></tr></thead><tbody>{props.focusedDetails.segments.map((segment) => <SegmentRow key={segment.id} item={segment} checked={props.selectedSegmentIds.has(segment.id)} toggle={() => props.setSelectedSegmentIds(toggleSet(props.selectedSegmentIds, segment.id))} play={() => { if (props.busy) return; props.setSelectedSegmentIds(new Set([segment.id])); void props.play([{ avid: props.focusedDetails!.avid, pageIndexes: [segment.pageIndex] }]); }} />)}</tbody></table></div><PageControls label="分段" offset={props.focusedDetails.offset} pageSize={props.focusedDetails.pageSize} totalItems={props.focusedDetails.totalItems} hasMore={props.focusedDetails.hasMore} busy={props.busy} onPage={props.setDetailsOffset} /></>
+          : props.focusedItem
+            ? <Empty compact icon="film" title="分段详情不可用" body="请重新选择缓存，或重新扫描以刷新索引。" />
+            : <Empty compact icon="film" title="没有选择缓存" body="单击上方缓存后按页查看媒体结构；双击分段可直接播放。" />}
     </section>
+  </div>;
+}
+
+function VirtualizedCacheTable(props: LibraryProps) {
+  const rowHeight = 54;
+  const overscan = 5;
+  const viewport = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(420);
+  useLayoutEffect(() => {
+    const element = viewport.current;
+    if (!element) return;
+    const measure = () => setViewportHeight(element.clientHeight || 420);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (viewport.current) viewport.current.scrollTop = 0;
+    setScrollTop(0);
+  }, [props.items]);
+  const first = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
+  const last = Math.min(props.items.length, first + visibleCount);
+  const visibleItems = props.items.slice(first, last);
+  return <div
+    ref={viewport}
+    className="table-scroll cache-table"
+    data-virtualized="true"
+    onScroll={(event) => {
+      setScrollTop(event.currentTarget.scrollTop);
+      setViewportHeight(event.currentTarget.clientHeight || 420);
+    }}
+  ><table><thead><tr><th className="check-cell"><input aria-label="选择全部缓存" type="checkbox" checked={props.items.length > 0 && props.selectedIds.size === props.items.length} onChange={(event) => props.setSelectedIds(event.target.checked ? new Set(props.items.map((item) => item.id)) : new Set())} /></th><th>视频</th><th>UP 主</th><th>标识</th><th>时长</th><th>分段</th><th>大小</th><th>状态</th><th>更新时间</th></tr></thead><tbody>
+    {first > 0 && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={9} style={{ height: first * rowHeight }} /></tr>}
+    {visibleItems.map((item) => <tr key={item.id} data-cache-row="true" className={props.focusedId === item.id ? 'focused cache-row' : 'cache-row'} onClick={() => props.focus(item)} onDoubleClick={() => { if (props.busy) return; props.setSelectedIds(new Set([item.id])); void props.play([{ avid: item.avid }]); }}><td className="check-cell" onClick={(event) => event.stopPropagation()}><input aria-label={`选择 ${item.title}`} type="checkbox" checked={props.selectedIds.has(item.id)} onChange={() => props.setSelectedIds(toggleSet(props.selectedIds, item.id))} /></td><td><strong className="title-cell">{item.title || '未命名缓存'}</strong><small>av{item.avid}</small></td><td>{item.ownerName || '—'}</td><td><code>{item.bvid || '—'}</code></td><td>{formatDuration(item.durationSeconds)}</td><td>{item.segmentCount}</td><td>{formatBytes(item.sizeBytes)}</td><td><span className={item.isAllCompleted ? 'badge success' : 'badge warning'}>{item.isAllCompleted ? '完整' : '未完成'}</span></td><td>{formatDate(item.lastUpdated)}</td></tr>)}
+    {last < props.items.length && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={9} style={{ height: (props.items.length - last) * rowHeight }} /></tr>}
+  </tbody></table>
+    {!props.items.length && <Empty icon="library" title="尚未加载缓存" body="选择缓存根目录后点击“扫描缓存”，这里会显示可播放与可导出的缓存。" />}
+  </div>;
+}
+
+function PageControls({ label, offset, pageSize, totalItems, hasMore, busy, onPage }: CachePageState & { label: string; busy: boolean; onPage(offset: number): void }) {
+  if (totalItems <= pageSize && offset === 0) return null;
+  const start = totalItems === 0 ? 0 : offset + 1;
+  const end = Math.min(totalItems, offset + pageSize);
+  return <div className="page-controls" aria-label={`${label}分页`}>
+    <span>{start}–{end} / {totalItems}</span>
+    <div><button className="button ghost" disabled={busy || offset === 0} onClick={() => onPage(Math.max(0, offset - pageSize))}>上一页</button><button className="button ghost" disabled={busy || !hasMore} onClick={() => onPage(offset + pageSize)}>下一页</button></div>
   </div>;
 }
 
@@ -762,6 +1074,37 @@ function formatDuration(seconds: number): string { if (!Number.isFinite(seconds)
 function formatDate(value: string | null): string { if (!value) return '未知'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }); }
 function trashTime(entry: TrashEntry): number { if (!entry.deletedAt) return 0; const value = new Date(entry.deletedAt).getTime(); return Number.isNaN(value) ? 0 : value; }
 function artifactCleanupMessage(prefix: string, result: ArtifactCleanupResult): string { return `${prefix}：删除 ${result.deletedFileCount} 个文件，释放 ${formatBytes(result.freedBytes)}，失败 ${result.failedFileCount} 个，剩余 ${formatBytes(result.remainingBytes)}。`; }
+function isCancellationError(error: unknown): boolean {
+  if (typeof error === 'string') return /cancel|取消/i.test(error);
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: unknown }).code;
+  return (typeof code === 'string' && /cancel/i.test(code)) || /cancel|取消/i.test(error.message);
+}
+function isStaleIndexError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: unknown }).code;
+  return code === 'stale_index' || /stale[_ -]?index|index token.*no longer current|索引.*失效/i.test(error.message);
+}
+function sameSearchRequest(left: SearchRequest, right: SearchRequest): boolean {
+  return left.indexToken === right.indexToken &&
+    left.pageSize === right.pageSize &&
+    left.keyword === right.keyword &&
+    left.matchMode === right.matchMode &&
+    left.splitKeywords === right.splitKeywords &&
+    left.anyKeywords === right.anyKeywords &&
+    left.includePartName === right.includePartName &&
+    left.includeOwnerName === right.includeOwnerName &&
+    left.includeBvid === right.includeBvid &&
+    left.includeAvid === right.includeAvid &&
+    left.caseSensitive === right.caseSensitive;
+}
+function safeBootstrapError(error: string): string {
+  return error
+    .replace(/[A-Za-z]:\\[^\r\n]*/g, '[路径]')
+    .replace(/\/(?:home|Users)\/[^\r\n]*/g, '[路径]')
+    .replace(/[\r\n]+/g, ' ')
+    .slice(0, 300);
+}
 function describeError(error: unknown): string { if (error instanceof Error) return error.message; if (typeof error === 'string') return error; return '操作失败，请导出诊断报告查看详情。'; }
 function pageSubtitle(page: Page): string { return ({ library: '扫描、查找和管理本地 B 站缓存', storage: '了解原始缓存、转码产物与回收站占用', trash: '恢复误删条目或安全地永久清理', settings: '调整扫描、播放和缓存维护偏好', diagnostics: '检查桌面运行时、媒体工具链和最近操作' })[page]; }
 function isEditable(target: EventTarget | null): boolean { return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable); }

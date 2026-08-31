@@ -1,5 +1,6 @@
 using System.Globalization;
 using BiliBiliLocalCacheManager.Core.Application.Contracts;
+using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Core.Infrastructure.Management;
 
 namespace BiliBiliLocalCacheManager.Cli.Commands;
@@ -10,15 +11,24 @@ namespace BiliBiliLocalCacheManager.Cli.Commands;
 public sealed class TrashCommand : ICommand
 {
     private readonly ICacheTrashService _trashService;
+    private readonly Func<string, bool, bool> _confirm;
 
     public TrashCommand()
-        : this(new FileSystemCacheTrashService())
+        : this(new FileSystemCacheTrashService(), CliPrinter.Confirm)
     {
     }
 
     internal TrashCommand(ICacheTrashService trashService)
+        : this(trashService, CliPrinter.Confirm)
     {
-        _trashService = trashService;
+    }
+
+    internal TrashCommand(
+        ICacheTrashService trashService,
+        Func<string, bool, bool> confirm)
+    {
+        _trashService = trashService ?? throw new ArgumentNullException(nameof(trashService));
+        _confirm = confirm ?? throw new ArgumentNullException(nameof(confirm));
     }
 
     public int Execute(string[] args)
@@ -218,6 +228,12 @@ public sealed class TrashCommand : ICommand
             return 1;
         }
 
+        // Capture the complete set before reading statistics or asking for confirmation.
+        // Core compares these stable entry identities again inside its purge transaction,
+        // so entries moved to trash after this point cannot be deleted under stale consent.
+        var expectedEntryIds = _trashService.ListEntries(root)
+            .Select(entry => entry.TrashPath)
+            .ToArray();
         var stats = _trashService.GetStatistics(root);
         if (stats.ManagedEntryCount == 0 && stats.UntrustedLegacyEntryCount == 0)
         {
@@ -225,17 +241,33 @@ public sealed class TrashCommand : ICommand
             return 0;
         }
 
+        var includeUntrusted = parsed.Has("include-untrusted");
         if (!parsed.Has("yes") &&
-            !CliPrinter.Confirm(
-                $"确定永久清空应用回收站吗？将删除 {stats.ManagedEntryCount.ToString(CultureInfo.InvariantCulture)} 条、" +
-                $"释放 {(stats.TotalBytes / (1024d * 1024)).ToString("F2", CultureInfo.InvariantCulture)} MB，此操作不可撤销。",
-                defaultValue: false))
+            !_confirm(
+                BuildPurgeConfirmationMessage(stats, includeUntrusted),
+                false))
         {
             CliPrinter.WriteLine("已取消。");
             return 0;
         }
 
-        var result = _trashService.Purge(root, parsed.Has("include-untrusted"));
+        CacheTrashPurgeResult result;
+        try
+        {
+            result = _trashService.Purge(
+                root,
+                includeUntrusted,
+                expectedEntryIds);
+        }
+        catch (CacheTrashSnapshotMismatchException ex)
+        {
+            CliPrinter.WriteError(
+                $"回收站在确认后发生变化（确认时 {ex.ExpectedEntryCount.ToString(CultureInfo.InvariantCulture)} 条，" +
+                $"当前 {ex.ActualEntryCount.ToString(CultureInfo.InvariantCulture)} 条），未删除任何条目。");
+            CliPrinter.WriteWarning("请重新运行 trash purge，检查最新内容后再次确认。");
+            return 1;
+        }
+
         CliPrinter.WriteSuccess(
             $"清理完成：删除 {result.DeletedEntryCount.ToString(CultureInfo.InvariantCulture)} 条，" +
             $"释放 {(result.FreedBytes / (1024d * 1024)).ToString("F2", CultureInfo.InvariantCulture)} MB，" +
@@ -248,6 +280,35 @@ public sealed class TrashCommand : ICommand
         }
 
         return result.FailedEntryCount > 0 ? 1 : 0;
+    }
+
+    private static string BuildPurgeConfirmationMessage(
+        CacheTrashStatistics stats,
+        bool includeUntrusted)
+    {
+        var bytesToDelete = stats.TotalBytes;
+        var entryDescription =
+            $"{stats.ManagedEntryCount.ToString(CultureInfo.InvariantCulture)} 条受管条目";
+        if (includeUntrusted && stats.UntrustedLegacyEntryCount > 0)
+        {
+            entryDescription +=
+                $"和 {stats.UntrustedLegacyEntryCount.ToString(CultureInfo.InvariantCulture)} 条旧版未验证条目";
+            bytesToDelete = SaturatingAdd(bytesToDelete, stats.UntrustedLegacyBytes);
+        }
+
+        return
+            $"确定永久清空应用回收站吗？将删除 {entryDescription}、" +
+            $"释放 {(bytesToDelete / (1024d * 1024)).ToString("F2", CultureInfo.InvariantCulture)} MB，此操作不可撤销。";
+    }
+
+    private static long SaturatingAdd(long left, long right)
+    {
+        if (left >= 0 && right > long.MaxValue - left)
+        {
+            return long.MaxValue;
+        }
+
+        return left + right;
     }
 
     private static bool TryParseSimple(

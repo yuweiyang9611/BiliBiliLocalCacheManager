@@ -130,7 +130,7 @@ function Invoke-PackagedElectronSmokeTest {
         if ($LASTEXITCODE -ne 0) {
             throw "Packaged Electron smoke test failed with exit code $LASTEXITCODE.`n$($output -join [Environment]::NewLine)"
         }
-        if (($output -join "`n") -notmatch 'Electron renderer and Desktop Host are healthy') {
+        if (($output -join "`n") -notmatch '\[smoke\] READY renderer-bootstrap-v1') {
             throw "Packaged Electron smoke test did not report a healthy renderer and Host.`n$($output -join [Environment]::NewLine)"
         }
     }

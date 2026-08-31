@@ -325,6 +325,7 @@ jobs:
             family: fedora
     container:
       image: ${{ matrix.image }}
+      options: --cap-add=SYS_ADMIN
 
     steps:
       - name: Bootstrap Debian 13
@@ -335,7 +336,7 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install --yes \
             ca-certificates curl ffmpeg \
             libasound2t64 libgbm1 libgtk-3-0t64 libicu76 libnss3 libssl3t64 \
-            xauth xdg-utils xvfb zlib1g
+            passwd util-linux xauth xdg-utils xvfb zlib1g
 
       - name: Bootstrap Fedora 43
         if: matrix.family == 'fedora'
@@ -344,7 +345,7 @@ jobs:
           dnf install --assumeyes \
             alsa-lib ca-certificates curl ffmpeg-free findutils gtk3 libicu \
             mesa-libgbm nss openssl-libs procps-ng xdg-utils \
-            xorg-x11-server-Xvfb xorg-x11-xauth zlib
+            shadow-utils util-linux xorg-x11-server-Xvfb xorg-x11-xauth zlib
 
       - name: Download native Linux package
         uses: actions/download-artifact@v8
@@ -372,4 +373,65 @@ jobs:
 
       - name: Smoke installed Electron package under Xvfb
         shell: bash
-        run: xvfb-run --auto-servernum bilibili-local-cache-manager --no-sandbox --smoke-test
+        run: |
+          set -euo pipefail
+          smoke_user=blcm-smoke
+          if ! id --user "$smoke_user" >/dev/null 2>&1; then
+            useradd --create-home --shell /bin/bash "$smoke_user"
+          fi
+
+          launcher="$(command -v bilibili-local-cache-manager)"
+          sandbox_path="$(dirname "$(readlink -f "$launcher")")/chrome-sandbox"
+          test -f "$sandbox_path"
+          sandbox_state="$(stat --format='%U:%G %a' "$sandbox_path")"
+          case "$sandbox_state" in
+            "root:root 4755")
+              echo "Installed package uses the Chromium SUID sandbox."
+              ;;
+            "root:root 755")
+              runuser --user "$smoke_user" -- unshare --user true
+              echo "Installed package uses the Chromium user-namespace sandbox."
+              ;;
+            *)
+              echo "Unexpected chrome-sandbox ownership or mode: $sandbox_state" >&2
+              exit 1
+              ;;
+          esac
+
+          runtime_dir="/tmp/$smoke_user-runtime"
+          install -d -m 0700 -o "$smoke_user" -g "$smoke_user" "$runtime_dir"
+          runuser --user "$smoke_user" -- \
+            env HOME="/home/$smoke_user" XDG_RUNTIME_DIR="$runtime_dir" \
+            xvfb-run --auto-servernum bilibili-local-cache-manager --smoke-test
+
+  ci-required:
+    name: ci-required
+    if: ${{ always() }}
+    needs:
+      - commit-email-privacy
+      - build-test-package
+      - linux-distro-xvfb-smoke
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Require every CI dependency to succeed
+        shell: bash
+        env:
+          COMMIT_EMAIL_PRIVACY_RESULT: ${{ needs.commit-email-privacy.result }}
+          BUILD_TEST_PACKAGE_RESULT: ${{ needs.build-test-package.result }}
+          LINUX_DISTRO_XVFB_SMOKE_RESULT: ${{ needs.linux-distro-xvfb-smoke.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for required_result in \
+            "commit-email-privacy=$COMMIT_EMAIL_PRIVACY_RESULT" \
+            "build-test-package=$BUILD_TEST_PACKAGE_RESULT" \
+            "linux-distro-xvfb-smoke=$LINUX_DISTRO_XVFB_SMOKE_RESULT"; do
+            job_name="${required_result%%=*}"
+            job_result="${required_result#*=}"
+            if [ "$job_result" != "success" ]; then
+              echo "::error::Required CI job $job_name finished with result $job_result."
+              failed=1
+            fi
+          done
+          exit "$failed"

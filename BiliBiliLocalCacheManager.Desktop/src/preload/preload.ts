@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AppSettings, CacheManagerApi, HostProgress, PlayerPreference, SearchRequest, SelectionTarget } from '../shared/contracts';
+import type { AppSettings, CacheDetailsRequest, CacheManagerApi, HostProgress, PlayerPreference, SearchRequest, SelectionTarget } from '../shared/contracts';
 import { channels } from '../shared/channels';
 
 const api: CacheManagerApi = {
@@ -8,9 +8,11 @@ const api: CacheManagerApi = {
   getSettings: () => ipcRenderer.invoke(channels.settingsGet),
   updateSettings: (patch: Partial<AppSettings>) => ipcRenderer.invoke(channels.settingsUpdate, patch),
   chooseRootDirectory: (defaultPath?: string) => ipcRenderer.invoke(channels.chooseRoot, defaultPath),
-  scan: (options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean }) => ipcRenderer.invoke(channels.scan, options),
+  scan: (options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; offset?: number; pageSize?: number }) => ipcRenderer.invoke(channels.scan, options),
   cancel: () => ipcRenderer.invoke(channels.cancel),
   search: (request: SearchRequest) => ipcRenderer.invoke(channels.search, request),
+  getCacheDetails: (request: CacheDetailsRequest) => ipcRenderer.invoke(channels.cacheDetails, request),
+  cancelCacheDetails: () => ipcRenderer.invoke(channels.cacheDetailsCancel),
   getStorage: (rootPath?: string) => ipcRenderer.invoke(channels.storageGet, rootPath),
   cleanupTranscodeCache: () => ipcRenderer.invoke(channels.artifactsCleanup),
   clearTranscodeCache: () => ipcRenderer.invoke(channels.artifactsClear),

@@ -6,6 +6,7 @@
 
 - 从 `根目录/avid/分段目录/entry.json` 建立缓存索引，识别新版 DASH、中期 DASH、旧版 Lua 和混合结构
 - 按标题、分段名、UP 主、Bvid 或 Avid 搜索，并报告损坏条目、未完成分段和不可访问目录
+- 对大缓存库使用带会话索引令牌的分页摘要；只有聚焦某条缓存时才分页解析分段和播放结构，列表采用有界虚拟渲染
 - 使用系统默认播放器、mpv 或 VLC 播放，按队列逐项启动，避免批量弹窗
 - 将单条或多选缓存导出为普通 MP4，并复用已有转码产物
 - 统计原始缓存、转码缓存、应用回收站、总占用和预计可释放空间
@@ -25,6 +26,7 @@ Electron 44 自带运行所需的 Chromium，不依赖系统浏览器。桌面�
 - 渲染器资源通过只映射打包目录的 `blcm://` 自定义安全协议加载，不授予 `file://` 额外权限。
 - 打包时关闭 `ELECTRON_RUN_AS_NODE`、`NODE_OPTIONS` 和主进程调试参数，并限制应用只能从 ASAR 加载；Windows 包同时启用 ASAR 完整性校验。
 - 缓存和媒体操作在独立 Host 进程中执行，主进程通过逐行 JSON RPC 调用。
+- Host v2 响应在主进程边界做运行时结构校验；过期索引令牌不会触发隐式重扫，必须由用户显式重新扫描。
 - 桌面应用仅支持单实例；第二次启动会聚焦已有窗口。
 - Linux 构建固定使用 Chromium 的 X11/Ozone 后端；在 Wayland 桌面中依赖 XWayland 兼容层，不启用原生 Wayland 后端。
 
@@ -128,7 +130,7 @@ $env:BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_ARCHIVE_PATH = $archive
 dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj --configuration Release --filter "Category=FFmpegIntegration"
 ```
 
-`.github/workflows/ci.yml` 使用 .NET `10.0.400` 与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查是项目发布清单中的人工验收要求，但当前 GitHub workflow 不自动核验测试记录，发布维护者必须在触发发布前完成。
+`.github/workflows/ci.yml` 使用 .NET `10.0.400` 与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。自检会加载真实渲染器、读取隔离设置、通过 Preload/IPC 调用内置 Host，并扫描一条临时缓存夹具。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。稳定的 `ci-required` 汇总检查只有在隐私检查、完整构建/测试/打包矩阵和发行版安装包自检全部成功时才通过。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查是项目发布清单中的人工验收要求，但当前 GitHub workflow 不自动核验测试记录，发布维护者必须在触发发布前完成。
 
 ## CLI 示例
 
