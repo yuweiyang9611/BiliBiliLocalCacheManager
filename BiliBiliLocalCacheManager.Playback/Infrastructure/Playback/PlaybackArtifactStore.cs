@@ -14,9 +14,12 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
 
     public static PlaybackArtifactStore Shared { get; } = new();
 
-    public PlaybackArtifactStore(string? rootDirectory = null)
+    private readonly Action? _activity;
+
+    public PlaybackArtifactStore(string? rootDirectory = null, Action? activity = null)
     {
         RootDirectory = Path.GetFullPath(rootDirectory ?? GetDefaultRootDirectory());
+        _activity = activity;
     }
 
     public string RootDirectory { get; }
@@ -215,9 +218,10 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
                     RootDirectory,
                     "*",
                     CreateSafeRecursiveEnumerationOptions())
-                .Select(path => new FileInfo(path))
+                .Select(path => { _activity?.Invoke(); return new FileInfo(path); })
                 .ToList();
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             return Array.Empty<FileInfo>();
@@ -230,6 +234,7 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
         ref int failedCount,
         ref long freedBytes)
     {
+        _activity?.Invoke();
         try
         {
             EnsurePathIsInsideRoot(file.FullName);
@@ -238,7 +243,9 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
                 return true;
             }
 
+            if (IsManagedArtifactFile(file) && HasActiveProtection(file.FullName)) return false;
             file.Delete();
+            TryDeleteFile(file.FullName + ProtectionSuffix);
             deletedCount++;
             freedBytes = length > long.MaxValue - freedBytes
                 ? long.MaxValue

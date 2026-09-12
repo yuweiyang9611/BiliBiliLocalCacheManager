@@ -4,10 +4,10 @@ import {
   DESKTOP_HOST_PROTOCOL_VERSION,
   emptyStorage,
 } from '../shared/contracts';
-import { validateCacheDetails, validateCachePage, validateInitialState } from './host-contract-validation';
+import { validateCacheDetails, validateCachePage, validateInitialState, validatePlaybackBatchResult, validateExportBatchResult, validateScanResult } from './host-contract-validation';
 
 describe('validateInitialState', () => {
-  it('accepts and maps a complete protocol v2 initial state', () => {
+  it('accepts and maps a complete protocol v3 initial state', () => {
     const value = validInitialState();
 
     expect(validateInitialState(value)).toEqual(value);
@@ -46,7 +46,7 @@ describe('validateInitialState', () => {
     {
       label: 'wrong protocol version',
       value: () => ({ ...validInitialState(), protocolVersion: DESKTOP_HOST_PROTOCOL_VERSION + 1 }),
-      expected: /initialState\.protocolVersion 必须为 2/,
+      expected: /initialState\.protocolVersion 必须为 3/,
     },
   ])('rejects $label', ({ value, expected }) => {
     expect(() => validateInitialState(value())).toThrow(expected);
@@ -54,6 +54,12 @@ describe('validateInitialState', () => {
 });
 
 describe('paged Host responses', () => {
+  it('requires bounded scan issues and structured media outcomes', () => {
+    expect(() => validateScanResult(validCachePage())).toThrow(/issues/);
+    expect(() => validateScanResult({ ...validCachePage(), issues: Array(101).fill({}), issuesTruncated: true })).toThrow(/100/);
+    expect(validatePlaybackBatchResult({ queued: 0, failures: [{ avid: '100', pageIndex: 1, title: '', message: 'Unavailable' }] }).failures).toHaveLength(1);
+    expect(() => validateExportBatchResult({ published: false, outputPath: '/partial.mp4', exportedCount: 0, failures: [] })).toThrow(/inconsistent/);
+  });
   it('rejects inconsistent item counts and hasMore flags', () => {
     const page = validCachePage();
     expect(() => validateCachePage({ ...page, totalItems: 3, hasMore: false })).toThrow(/hasMore/);

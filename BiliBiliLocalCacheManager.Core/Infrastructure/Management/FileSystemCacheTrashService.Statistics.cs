@@ -7,6 +7,9 @@ public sealed partial class FileSystemCacheTrashService
     public CacheTrashStatistics GetStatistics(
         string rootDirectory,
         CancellationToken cancellationToken = default)
+        => GetStatistics(rootDirectory, cancellationToken, null);
+
+    public CacheTrashStatistics GetStatistics(string rootDirectory, CancellationToken cancellationToken, Action? activity)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
         cancellationToken.ThrowIfCancellationRequested();
@@ -123,7 +126,7 @@ public sealed partial class FileSystemCacheTrashService
                 managedEntryCount = FileSystemCacheStorageStatisticsService.SaturatingAdd(
                     managedEntryCount,
                     1);
-                var inspection = InspectDirectoryTree(path, cancellationToken);
+                var inspection = InspectDirectoryTree(path, cancellationToken, activity);
                 fileCount = FileSystemCacheStorageStatisticsService.SaturatingAdd(
                     fileCount,
                     inspection.FileCount);
@@ -144,7 +147,7 @@ public sealed partial class FileSystemCacheTrashService
                     1);
                 try
                 {
-                    var inspection = InspectDirectoryTree(path, cancellationToken);
+                    var inspection = InspectDirectoryTree(path, cancellationToken, activity);
                     untrustedLegacyEntryCount = FileSystemCacheStorageStatisticsService.SaturatingAdd(
                         untrustedLegacyEntryCount,
                         1);

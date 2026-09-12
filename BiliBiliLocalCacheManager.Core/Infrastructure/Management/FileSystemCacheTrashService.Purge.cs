@@ -401,7 +401,8 @@ public sealed partial class FileSystemCacheTrashService
 
     private static DirectoryTreeStatistics InspectDirectoryTree(
         string directoryPath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? activity = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var attributes = File.GetAttributes(directoryPath);
@@ -420,6 +421,7 @@ public sealed partial class FileSystemCacheTrashService
                      SearchOption.TopDirectoryOnly))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            activity?.Invoke();
             attributes = File.GetAttributes(path);
             if (attributes.HasFlag(FileAttributes.ReparsePoint))
             {
@@ -429,7 +431,7 @@ public sealed partial class FileSystemCacheTrashService
 
             if (attributes.HasFlag(FileAttributes.Directory))
             {
-                var childStatistics = InspectDirectoryTree(path, cancellationToken);
+                var childStatistics = InspectDirectoryTree(path, cancellationToken, activity);
                 fileCount = FileSystemCacheStorageStatisticsService.SaturatingAdd(
                     fileCount,
                     childStatistics.FileCount);

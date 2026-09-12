@@ -164,6 +164,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
             else
             {
                 tracker.Report(concatStage, percentage: null);
+                processor.NotifyOnProgress(time => tracker.ReportTime(concatStage, time));
             }
 
             var succeeded = await processor
@@ -256,6 +257,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         else
         {
             tracker.Report(muxStage, percentage: null);
+            processor.NotifyOnProgress(time => tracker.ReportTime(muxStage, time));
         }
 
         try
@@ -317,6 +319,11 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         private readonly object _sync = new();
         private string? _stage;
         private double _lastPercentage;
+
+        public void ReportTime(string stage, TimeSpan processed)
+        {
+            progress?.Report(new PlaybackPreparationProgress(stage, null, _stopwatch.Elapsed, null, processed.TotalSeconds));
+        }
 
         public void Report(string stage, double? percentage)
         {

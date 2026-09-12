@@ -355,6 +355,8 @@ try {
     Assert-NativeCommandSucceeded "npm ci"
 
     if (-not $SkipTests) {
+        node --test ../scripts/validate-desktop-acceptance.test.mjs
+        Assert-NativeCommandSucceeded "Release acceptance tests"
         npm run typecheck
         Assert-NativeCommandSucceeded "Electron typecheck"
         npm test

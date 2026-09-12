@@ -173,10 +173,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -d '' assets < <(find artifacts/release -maxdepth 1 -type f -print0 | sort -z)
-          release_flags=()
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            release_flags+=(--prerelease)
-          fi
+          release_flags=(--prerelease --latest=false)
           gh release create "$RELEASE_TAG" "${assets[@]}" \
             --repo "$RELEASE_REPOSITORY" \
             --verify-tag \

@@ -189,8 +189,8 @@ internal sealed class JsonLineRpcServer
             if (!string.Equals(targetId, request.Id, StringComparison.Ordinal) &&
                 _running.TryGetValue(targetId, out var running))
             {
-                running.Cancellation.Cancel();
-                cancelled = true;
+                try { running.Cancellation.Cancel(); cancelled = true; }
+                catch (ObjectDisposedException) { /* The request completed while cancellation was being read. */ }
             }
 
             await _writer.WriteResultAsync(

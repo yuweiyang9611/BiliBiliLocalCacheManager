@@ -12,6 +12,9 @@ import type {
   StorageArea,
   StorageSnapshot,
   TrashEntry,
+  MediaFailure,
+  PlaybackBatchResult,
+  ExportBatchResult,
 } from '../shared/contracts';
 import {
   DESKTOP_HOST_PROTOCOL_VERSION,
@@ -55,6 +58,13 @@ export function validateScanResult(value: unknown): ScanResult {
   const page = cachePage(source, 'scan');
   return {
     ...page,
+    issues: array(source.issues, 'scan.issues', 100).map((value, index) => {
+      const issue = record(value, 'scan.issues');
+      const id = integer(issue.id, 'scan.issue.id', 0, 99);
+      if (id !== index) invalid('scan.issue.id must match its position');
+      return { id, kind: string(issue.kind, 'scan.issue.kind'), path: string(issue.path, 'scan.issue.path'), message: string(issue.message, 'scan.issue.message') };
+    }),
+    issuesTruncated: boolean(source.issuesTruncated, 'scan.issuesTruncated'),
     ...(source.rootPath === undefined ? {} : { rootPath: string(source.rootPath, 'scan.rootPath', 32_768) }),
     ...(source.includeIncomplete === undefined ? {} : { includeIncomplete: boolean(source.includeIncomplete, 'scan.includeIncomplete') }),
     ...(source.scannedAvidDirectories === undefined ? {} : { scannedAvidDirectories: integer(source.scannedAvidDirectories, 'scan.scannedAvidDirectories') }),
@@ -66,6 +76,31 @@ export function validateScanResult(value: unknown): ScanResult {
     ...(source.hasWarnings === undefined ? {} : { hasWarnings: boolean(source.hasWarnings, 'scan.hasWarnings') }),
     ...(source.completedAtUtc === undefined ? {} : { completedAtUtc: string(source.completedAtUtc, 'scan.completedAtUtc') }),
   };
+}
+
+function mediaFailures(value: unknown): MediaFailure[] {
+  return array(value, 'failures', 100_000).map((value) => {
+    const failure = record(value, 'failure');
+    return { avid: string(failure.avid, 'failure.avid', 64),
+      pageIndex: failure.pageIndex === null || failure.pageIndex === undefined ? null : integer(failure.pageIndex, 'failure.pageIndex'),
+      title: string(failure.title, 'failure.title'), message: string(failure.message, 'failure.message') };
+  });
+}
+
+export function validatePlaybackBatchResult(value: unknown): PlaybackBatchResult {
+  const source = record(value, 'play');
+  return { queued: integer(source.queued, 'play.queued'), failures: mediaFailures(source.failures) };
+}
+
+export function validateExportBatchResult(value: unknown): ExportBatchResult {
+  const source = record(value, 'export');
+  const published = boolean(source.published, 'export.published');
+  const outputPath = source.outputPath == null ? null : string(source.outputPath, 'export.outputPath', 32_768);
+  const exportedCount = integer(source.exportedCount, 'export.exportedCount');
+  const failures = mediaFailures(source.failures);
+  if (published ? !outputPath || exportedCount === 0 || failures.length > 0 : exportedCount !== 0 || outputPath !== null)
+    invalid('export result is inconsistent');
+  return { published, outputPath, exportedCount, failures };
 }
 
 export function validateCachePage(value: unknown): CachePage {

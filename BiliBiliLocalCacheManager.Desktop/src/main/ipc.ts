@@ -26,6 +26,8 @@ import {
   validateHostHealth,
   validateInitialState,
   validateScanResult,
+  validatePlaybackBatchResult,
+  validateExportBatchResult,
 } from './host-contract-validation';
 import { packagedRendererUrl } from './renderer-protocol';
 
@@ -133,6 +135,16 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     let cancelled = false;
     for (const call of calls) cancelled = call.cancel() || cancelled;
     return cancelled;
+  });
+  handle(channels.scanIssueLocation, async (event, indexToken, issueId) => {
+    assertTrusted(event);
+    const result = await track(event, host<{ path: string }>('scan.issueLocation', {
+      indexToken: assertString(indexToken, 'indexToken', 128), issueId: assertInteger(issueId, 'issueId', 0, 99),
+    }));
+    const location = assertPath(result.path, 'issue location');
+    const error = await shell.openPath(location);
+    if (error) throw new Error(error);
+    return true;
   });
   handle(channels.search, async (event, request) => {
     assertTrusted(event);
@@ -251,13 +263,13 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   });
   handle(channels.play, async (event, rootPath, targets, playerPreference, includeIncomplete) => {
     assertTrusted(event);
-    const call = host<{ queued: number }>('play', {
+    const call = host<unknown>('play', {
       rootPath: assertPath(rootPath, 'rootPath'),
       targets: validateTargets(targets) as never,
       playerPreference: validatePlayer(playerPreference),
       includeIncomplete: assertBoolean(includeIncomplete, 'includeIncomplete'),
     });
-    return track(event, call);
+    return validatePlaybackBatchResult(await track(event, call));
   });
   handle(channels.exportMedia, async (event, rootPath, targets, suggestedName, includeIncomplete) => {
     assertTrusted(event);
@@ -270,13 +282,13 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       requiresExportDirectory(validatedTargets) ? 'media-directory' : 'media-file',
     );
     if (!outputPath) return null;
-    const call = host<{ outputPath: string }>('export', {
+    const call = host<unknown>('export', {
       rootPath: validatedRoot,
       targets: validatedTargets as never,
       outputPath,
       includeIncomplete: assertBoolean(includeIncomplete, 'includeIncomplete'),
     });
-    return track(event, call);
+    return validateExportBatchResult(await track(event, call));
   });
   handle(channels.exportDiagnostics, async (event, suggestedName, rootPath) => {
     assertTrusted(event);

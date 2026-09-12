@@ -11,6 +11,31 @@ interface PendingRequest {
   resolve(value: JsonValue): void;
   reject(error: Error): void;
   timer: NodeJS.Timeout;
+  method: string;
+  renew?: () => void;
+  progress?: string;
+}
+
+export function hostTimeoutPolicy(method: string): { milliseconds: number; idle: boolean } {
+  if (method === 'health') return { milliseconds: 15_000, idle: false };
+  if (['initialState', 'settings.get', 'settings.update', 'search', 'cache.details', 'scan.issueLocation'].includes(method)) {
+    return { milliseconds: 60_000, idle: false };
+  }
+  return { milliseconds: 10 * 60_000, idle: true };
+}
+
+function progressFingerprint(value: JsonValue, method: string): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.operation !== method) return;
+  if (typeof value.stage !== 'string' || !value.stage || value.stage.length > 4096) return;
+  const stage = value.stage;
+  if (/wait|等待/i.test(stage)) return;
+  const details = value.details && typeof value.details === 'object' && !Array.isArray(value.details) ? value.details : {};
+  const numbers = [value.current, value.percentage, details.processedSegmentDirectories,
+    details.processedAvidDirectories, details.bytesCopied, details.processedSeconds];
+  if (numbers.some(number => number != null && (typeof number !== 'number' || !Number.isFinite(number) || number < 0))) return;
+  // Elapsed time is not evidence of work advancing.
+  return JSON.stringify([stage, value.current, value.percentage, details.processedSegmentDirectories,
+    details.processedAvidDirectories, details.bytesCopied, details.processedSeconds]);
 }
 
 const MAX_HOST_REQUEST_BYTES = 1024 * 1024;
@@ -107,7 +132,9 @@ export class DesktopHostBridge extends EventEmitter {
     this.#trustedEnvOverrides = { ...(options.trustedEnvOverrides ?? {}) };
   }
 
-  call<T>(method: string, params: JsonObject = {}, timeoutMs = 10 * 60_000): HostCall<T> {
+  call<T>(method: string, params: JsonObject = {}, timeoutMs?: number): HostCall<T> {
+    const policy = hostTimeoutPolicy(method);
+    const duration = timeoutMs ?? policy.milliseconds;
     const id = randomUUID();
     let settled = false;
     let cancelRequested = false;
@@ -141,13 +168,21 @@ export class DesktopHostBridge extends EventEmitter {
           throw new DesktopHostError('操作已取消。', 'CANCELLED');
         }
         return new Promise<T>((resolve, reject) => {
-          const timer = setTimeout(() => {
+          const expire = () => {
             this.#pending.delete(id);
             settled = true;
             this.#sendCancellation(id);
             reject(new DesktopHostError(`Desktop Host 调用超时：${method}`, 'HOST_TIMEOUT'));
-          }, timeoutMs);
+          };
+          const timer = setTimeout(expire, duration);
           this.#pending.set(id, {
+            method,
+            renew: policy.idle && timeoutMs === undefined ? () => {
+              const pending = this.#pending.get(id);
+              if (!pending) return;
+              clearTimeout(pending.timer);
+              pending.timer = setTimeout(expire, duration);
+            } : undefined,
             resolve: (value) => {
               settled = true;
               resolve(value as T);
@@ -280,6 +315,17 @@ export class DesktopHostBridge extends EventEmitter {
 
   #handleMessage(message: HostMessage): void {
     if ('event' in message) {
+      if (message.event === 'progress' && message.payload && typeof message.payload === 'object' && !Array.isArray(message.payload)) {
+        const id = message.payload.requestId;
+        const pending = typeof id === 'string' ? this.#pending.get(id) : undefined;
+        if (pending?.renew) {
+          const fingerprint = progressFingerprint(message.payload, pending.method);
+          if (fingerprint !== undefined && fingerprint !== pending.progress) {
+            pending.progress = fingerprint;
+            pending.renew();
+          }
+        }
+      }
       this.emit('event', message.event, message.payload);
       return;
     }
