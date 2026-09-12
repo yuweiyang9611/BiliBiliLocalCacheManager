@@ -213,6 +213,7 @@ public sealed class FileSystemCacheTrashConcurrencyTests
         using var allowFirstPurge = new ManualResetEventSlim();
         var service = new FileSystemCacheTrashService();
         Task? firstTask = null;
+        Task<CacheTrashPurgeResult>? secondTask = null;
         try
         {
             service.AfterMutationLockAcquiredForTesting = (operation, root) =>
@@ -221,15 +222,18 @@ public sealed class FileSystemCacheTrashConcurrencyTests
                     string.Equals(root, firstRoot, StringComparison.OrdinalIgnoreCase))
                 {
                     firstPurgeEntered.Set();
-                    Assert.True(allowFirstPurge.Wait(TimeSpan.FromSeconds(5)));
+                    Assert.True(allowFirstPurge.Wait(TimeSpan.FromSeconds(30)));
                 }
             };
 
-            firstTask = Task.Run(() => service.Purge(firstRoot));
-            Assert.True(firstPurgeEntered.Wait(TimeSpan.FromSeconds(5)));
+            // Blocking lock probes need dedicated threads, not thread-pool availability.
+            firstTask = Task.Factory.StartNew(() => service.Purge(firstRoot),
+                CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            Assert.True(firstPurgeEntered.Wait(TimeSpan.FromSeconds(10)));
 
-            var secondResult = await Task.Run(() => service.Purge(secondRoot))
-                .WaitAsync(TimeSpan.FromSeconds(2));
+            secondTask = Task.Factory.StartNew(() => service.Purge(secondRoot),
+                CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            var secondResult = await secondTask.WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.Equal(0, secondResult.DeletedEntryCount);
             Assert.False(firstTask.IsCompleted);
@@ -241,6 +245,11 @@ public sealed class FileSystemCacheTrashConcurrencyTests
             if (firstTask is not null)
             {
                 await IgnoreFailureAsync(firstTask);
+            }
+
+            if (secondTask is not null)
+            {
+                await IgnoreFailureAsync(secondTask);
             }
 
             SafeDeleteDirectory(firstRoot);
