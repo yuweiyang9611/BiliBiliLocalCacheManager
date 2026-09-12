@@ -1,6 +1,6 @@
 # 桌面兼容性验收清单
 
-本清单是 0.4.x 正式发布的人工验收要求。CI 的 Xvfb 检查验证包安装和 Chromium X11/Ozone 启动路径，但不能替代真实 GNOME、KDE 与 XWayland 会话。当前 GitHub workflow 不自动核验本清单的测试记录，发布维护者必须在触发发布前完成并保存记录。
+本清单是 0.4.x 正式发布的人工验收要求。CI 的 Xvfb 检查验证包安装和 Chromium X11/Ozone 启动路径，但不能替代真实 GNOME、KDE 与 XWayland 会话。所有标签先生成公开预览 Release；真实桌面验收记录提交后，由 promote-release 自动核验必测矩阵和包 SHA-256，再将同一批安装包转正。记录格式及流程见 [验收记录说明](acceptance/README.md)。
 
 ## 必测矩阵
 

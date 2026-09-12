@@ -15,6 +15,8 @@ import type {
   SelectionTarget,
   StorageSnapshot,
   TrashEntry,
+  ScanResult,
+  MediaFailure,
 } from '../shared/contracts';
 import { DEFAULT_CACHE_PAGE_SIZE, defaultSettings, emptyStorage } from '../shared/contracts';
 import { Icon, type IconName } from './components/Icon';
@@ -30,6 +32,11 @@ type QueuedSearch = { revision: number; request: SearchRequest };
 type BootstrapStatus = 'loading' | 'ready' | 'failed';
 type StartupScanStatus = 'not-required' | 'running' | 'completed' | 'failed';
 type CachePageState = Pick<CachePage, 'offset' | 'pageSize' | 'totalItems' | 'hasMore'>;
+type BatchReport = {
+  kind: 'play' | 'export'; rootPath: string; targets: SelectionTarget[];
+  includeIncomplete: boolean; playerPreference: PlayerPreference;
+  status: 'success' | 'partial' | 'failed' | 'cancelled'; succeeded: number; failures: MediaFailure[];
+};
 
 const initialCachePage: CachePageState = {
   offset: 0,
@@ -53,6 +60,8 @@ export function App() {
   const [items, setItems] = useState<CacheEntry[]>([]);
   const [cachePage, setCachePage] = useState<CachePageState>(initialCachePage);
   const [indexBinding, setIndexBinding] = useState<IndexBinding | null>(null);
+  const [scanReport, setScanReport] = useState<ScanResult | null>(null);
+  const [batchReport, setBatchReport] = useState<BatchReport | null>(null);
   const [focusedDetails, setFocusedDetails] = useState<CacheDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsOffset, setDetailsOffset] = useState(0);
@@ -133,6 +142,7 @@ export function App() {
   }, []);
 
   const invalidateIndex = useCallback(() => {
+    setScanReport(null);
     latestSearchRevision.current += 1;
     pendingSearch.current = null;
     searchWasActive.current = false;
@@ -179,6 +189,13 @@ export function App() {
       resumePendingSearch.current();
     }
   }, [invalidateIndex, notify]);
+
+  const reportScan = useCallback((result: ScanResult) => {
+    setScanReport(result);
+    const errors = (result.invalidEntries ?? 0) + (result.inaccessibleDirectories ?? 0);
+    notify(errors > 0 ? 'error' : result.hasWarnings ? 'info' : 'success',
+      `扫描完成，共发现 ${result.totalItems} 条缓存；损坏 ${result.invalidEntries ?? 0} 条，无法访问 ${result.inaccessibleDirectories ?? 0} 处，跳过未完成 ${result.skippedIncompleteEntries ?? 0} 条。`);
+  }, [notify]);
 
   useEffect(() => {
     let disposed = false;
@@ -231,7 +248,7 @@ export function App() {
           replaceLibraryItems(result.items, result);
           setStartupScanCount(result.totalItems);
           setStartupScanStatus('completed');
-          notify('success', `已自动扫描记住的目录，共发现 ${result.totalItems} 条缓存。`);
+          reportScan(result);
         }
         if (disposed) return;
         setBootstrapStatus('ready');
@@ -251,7 +268,7 @@ export function App() {
       }
     })();
     return () => { disposed = true; unsubscribeProgress(); unsubscribeUnavailable(); };
-  }, [invalidateIndex, notify, replaceLibraryItems]);
+  }, [invalidateIndex, notify, replaceLibraryItems, reportScan]);
 
   const focusedItem = useMemo(
     () => items.find((item) => item.id === focusedId || item.avid === focusedId) ?? null,
@@ -334,8 +351,8 @@ export function App() {
     invalidateRootViews();
     setIndexBinding({ rootPath: completed.rootPath, includeIncomplete: settings.includeIncomplete, indexToken: completed.result.indexToken });
     replaceLibraryItems(completed.result.items, completed.result);
-    notify('success', `目录已验证并切换，共发现 ${completed.result.totalItems} 条缓存。`);
-  }, [invalidateIndex, invalidateRootViews, notify, replaceLibraryItems, run, settings.includeIncomplete, settings.rootPath]);
+    reportScan(completed.result);
+  }, [invalidateIndex, invalidateRootViews, notify, replaceLibraryItems, reportScan, run, settings.includeIncomplete, settings.rootPath]);
 
   const scan = useCallback(async () => {
     if (!settings.rootPath.trim()) { notify('error', '请先选择 B 站缓存根目录。'); return; }
@@ -354,8 +371,8 @@ export function App() {
     setIndexBinding({ rootPath: activeRootPath, includeIncomplete: settings.includeIncomplete, indexToken: result.indexToken });
     replaceLibraryItems(result.items, result);
     invalidateStorage();
-    notify('success', `扫描完成，共发现 ${result.totalItems} 条缓存。`);
-  }, [activeRootPath, invalidateIndex, invalidateStorage, notify, replaceLibraryItems, run, settings.includeIncomplete]);
+    reportScan(result);
+  }, [activeRootPath, invalidateIndex, invalidateStorage, notify, replaceLibraryItems, reportScan, run, settings.includeIncomplete]);
 
   const drainSearchQueue = useCallback(async () => {
     if (searchDrainActive.current || operationInFlight.current || !pendingSearch.current) return;
@@ -460,20 +477,51 @@ export function App() {
     setSettings((current) => ({ ...current, [key]: value }));
   };
 
-  const play = useCallback(async (explicitTargets?: SelectionTarget[]) => {
+  const play = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport) => {
     const requestedTargets = explicitTargets ?? targets;
     if (requestedTargets.length === 0) { notify('info', '请先选择缓存或分段。'); return; }
     if (!activeRootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
-    const result = await run('正在准备播放…', () => window.cacheManager.play(activeRootPath, requestedTargets, settings.playerPreference, settings.includeIncomplete));
-    if (result) notify('success', `已将 ${result.queued} 个页面交给播放器。`);
+    const context = { kind: 'play' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets,
+      playerPreference: retry?.playerPreference ?? settings.playerPreference, includeIncomplete: retry?.includeIncomplete ?? settings.includeIncomplete };
+    setBatchReport(null);
+    const result = await run('正在准备播放…', async () => {
+      try { return await window.cacheManager.play(context.rootPath, requestedTargets, context.playerPreference, context.includeIncomplete); }
+      catch (error) {
+        setBatchReport({ ...context, status: isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
+          failures: [{ avid: '', pageIndex: null, title: '', message: describeError(error) }] });
+        throw error;
+      }
+    });
+    if (result) {
+      const failures = result.failures;
+      setBatchReport({ ...context, targets: failures.map((failure) => ({ avid: failure.avid, ...(failure.pageIndex === null ? {} : { pageIndexes: [failure.pageIndex] }) })),
+        status: result.queued === 0 ? 'failed' : failures.length ? 'partial' : 'success', succeeded: result.queued, failures });
+      notify(result.queued === 0 ? 'error' : failures.length ? 'info' : 'success', `已将 ${result.queued} 个页面交给播放器，失败 ${failures.length} 项。`);
+    }
   }, [activeRootPath, notify, run, settings.includeIncomplete, settings.playerPreference, targets]);
 
-  const exportMedia = useCallback(async () => {
-    if (targets.length === 0) { notify('info', '请先选择要导出的缓存或分段。'); return; }
+  const exportMedia = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport) => {
+    const requestedTargets = explicitTargets ?? targets;
+    if (requestedTargets.length === 0) { notify('info', '请先选择要导出的缓存或分段。'); return; }
     if (!activeRootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
     const title = targets.length === 1 && focusedItem ? safeName(focusedItem.title) : `缓存导出-${dateStamp()}`;
-    const result = await run('正在导出 MP4…', () => window.cacheManager.exportMedia(activeRootPath, targets, `${title}.mp4`, settings.includeIncomplete));
-    if (result) notify('success', `已导出：${result.outputPath}`);
+    const context = { kind: 'export' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets,
+      includeIncomplete: retry?.includeIncomplete ?? settings.includeIncomplete, playerPreference: settings.playerPreference };
+    setBatchReport(null);
+    const result = await run('正在导出 MP4…', async () => {
+      try { return await window.cacheManager.exportMedia(context.rootPath, requestedTargets, `${title}.mp4`, context.includeIncomplete); }
+      catch (error) {
+        setBatchReport({ ...context, status: isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
+          failures: [{ avid: '', pageIndex: null, title: '', message: describeError(error) }] });
+        throw error;
+      }
+    });
+    if (result) {
+      setBatchReport({ ...context, status: result.published ? 'success' : 'failed', succeeded: result.exportedCount, failures: result.failures });
+      notify(result.published ? 'success' : 'error', result.published ? `已导出：${result.outputPath}` : '本批导出未发布，请查看失败明细。');
+    } else if (result === null) {
+      setBatchReport({ ...context, status: 'cancelled', succeeded: 0, failures: [] });
+    }
   }, [activeRootPath, focusedItem, notify, run, settings.includeIncomplete, targets]);
 
   const moveToTrash = useCallback(() => {
@@ -753,6 +801,25 @@ export function App() {
         {progress && <div className="operation-progress"><div style={{ width: `${clamp(progress.percentage ?? 12, 2, 100)}%` }} /><span>{progress.message ?? progress.stage}</span></div>}
 
         <section className="page-content">
+          {page === 'library' && scanReport && <section className="result-panel" aria-label="扫描结果">
+            <div className="panel-heading"><h2>扫描结果</h2><span>损坏 {scanReport.invalidEntries ?? 0} · 无法访问 {scanReport.inaccessibleDirectories ?? 0} · 跳过未完成 {scanReport.skippedIncompleteEntries ?? 0}</span></div>
+            {scanReport.issues.length > 0 && <details><summary>问题明细（{scanReport.issues.length}）</summary><ul className="result-list">
+              {scanReport.issues.map((issue) => <li key={issue.id}><div><strong>{issue.kind}</strong><p>{issue.message}</p><code>{issue.path}</code></div>
+                <button className="icon-button" title="打开所在目录" aria-label={`定位问题 ${issue.id + 1}`} disabled={uiBusy || indexBinding?.indexToken !== scanReport.indexToken}
+                  onClick={() => void run('正在定位…', () => window.cacheManager.locateScanIssue(scanReport.indexToken, issue.id))}><Icon name="folder" /></button></li>)}
+            </ul></details>}
+            {scanReport.issuesTruncated && <p>仅展示前 100 条问题，汇总计数包含全部条目。</p>}
+          </section>}
+          {batchReport && batchReport.rootPath === activeRootPath && <section className="result-panel" aria-label="操作结果">
+            <div className="panel-heading"><h2>{batchReport.kind === 'play' ? '播放' : '导出'}结果：{{ success: '全部成功', partial: '部分失败', failed: '失败', cancelled: '已取消' }[batchReport.status]}</h2>
+              <button className="icon-button" title="关闭结果" aria-label="关闭操作结果" onClick={() => setBatchReport(null)}><Icon name="close" /></button></div>
+            <p>{batchReport.kind === 'play' ? `已交给播放器 ${batchReport.succeeded} 项` : `已发布 ${batchReport.succeeded} 项`}，失败 {batchReport.failures.length} 项。</p>
+            {batchReport.kind === 'export' && batchReport.status !== 'success' && <p>本批导出未发布。重试将重新执行完整批次，并复用已生成的转码缓存。</p>}
+            {batchReport.failures.length > 0 && <details open><summary>失败明细</summary><ul className="result-list">{batchReport.failures.map((failure, index) =>
+              <li key={index}><div><strong>{failure.title || (failure.avid ? `av${failure.avid}` : '操作失败')} {failure.pageIndex !== null ? `P${failure.pageIndex}` : ''}</strong><p>{failure.message}</p></div></li>)}</ul></details>}
+            {batchReport.status !== 'success' && batchReport.targets.length > 0 && <button className="button secondary" disabled={uiBusy}
+              onClick={() => void (batchReport.kind === 'play' ? play(batchReport.targets, batchReport) : exportMedia(batchReport.targets, batchReport))}><Icon name="refresh" />{batchReport.kind === 'play' ? '重试未成功项目' : '重试完整批次'}</button>}
+          </section>}
           {page === 'library' && <LibraryPage
             settings={settings} updateSetting={updateSetting} browse={browse} search={search} searchInput={searchInput}
             items={items} selectedIds={selectedIds} setSelectedIds={setSelectedIds} focusedId={focusedId}

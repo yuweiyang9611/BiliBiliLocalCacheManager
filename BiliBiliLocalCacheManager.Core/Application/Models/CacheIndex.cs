@@ -61,6 +61,9 @@ public sealed class CacheIndex
     /// - can be case-sensitive or case-insensitive
     /// </summary>
     public IReadOnlyCollection<BiliVideoCache> Search(CacheSearchOptions options)
+        => Search(options, CancellationToken.None);
+
+    public IReadOnlyCollection<BiliVideoCache> Search(CacheSearchOptions options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -101,6 +104,7 @@ public sealed class CacheIndex
         // Local helper that checks a single token against a single cache.
         bool MatchesToken(BiliVideoCache cache, string token)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // Title matching: the primary video title.
             if (options.Scope.HasFlag(CacheSearchScope.Title) &&
                 Matches(cache.Title, token, options.MatchMode, comparison))
@@ -110,7 +114,10 @@ public sealed class CacheIndex
 
             // Part name matching: any segment part name in the cache.
             if (options.Scope.HasFlag(CacheSearchScope.PartName) &&
-                cache.Segments.Any(seg => Matches(seg.PartName, token, options.MatchMode, comparison)))
+                cache.Segments.Any(seg => {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return Matches(seg.PartName, token, options.MatchMode, comparison);
+                }))
             {
                 return true;
             }
@@ -147,6 +154,7 @@ public sealed class CacheIndex
         // Evaluate tokens with AND/OR semantics.
         var matched = _videoCaches.Where(cache =>
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (options.RequireAllKeywords)
             {
                 // Every token must match at least one field in the cache.

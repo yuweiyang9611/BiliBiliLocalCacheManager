@@ -119,6 +119,7 @@ public sealed partial class PlaybackArtifactStore
                 AfterStrictFileEnumerationForTesting?.Invoke();
                 foreach (var path in pageFiles)
                 {
+                    _activity?.Invoke();
                     var file = new FileInfo(path);
                     if (!IsManagedArtifactFile(file) && !IsManagedBuildFile(file))
                     {
@@ -343,7 +344,8 @@ public sealed partial class PlaybackArtifactStore
 
     private static bool IsArtifactFileName(string fileName)
     {
-        return string.Equals(Path.GetExtension(fileName), ".mp4", StringComparison.OrdinalIgnoreCase) &&
+        return (string.Equals(Path.GetExtension(fileName), ".mp4", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(Path.GetExtension(fileName), ".m3u8", StringComparison.OrdinalIgnoreCase)) &&
             IsHexFingerprint(Path.GetFileNameWithoutExtension(fileName));
     }
 

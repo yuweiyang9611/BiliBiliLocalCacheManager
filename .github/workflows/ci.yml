@@ -155,6 +155,9 @@ jobs:
         working-directory: BiliBiliLocalCacheManager.Desktop
         run: npm run check
 
+      - name: Test release acceptance validation
+        run: node --test scripts/validate-desktop-acceptance.test.mjs
+
       - name: Publish self-contained CLI and Desktop Host
         shell: pwsh
         run: |

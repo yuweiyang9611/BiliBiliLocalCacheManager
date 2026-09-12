@@ -128,7 +128,7 @@ public sealed partial class PlaybackArtifactStore
         }
 
         var managedFiles = allManagedFiles
-            .Where(file => IsManagedArtifactFile(file.File))
+            .Where(file => IsManagedArtifactFile(file.File) && !HasActiveProtection(file.File.FullName))
             .ToList();
         var projectedRemainingBytes = SumLengths(allManagedFiles);
         foreach (var staleBuild in candidates)

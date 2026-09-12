@@ -6,11 +6,19 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Add Host protocol v3 scan issue details, root-bound location actions, structured playback/export outcomes and targeted retries.
+- Add UTF-8 local playback playlists with persistent protection for every queue artifact, including queues larger than 64 items.
+- Add release acceptance validation and a default-branch promotion workflow that checks the existing preview assets against recorded desktop results before promoting without a rebuild.
+
 - Add independent desktop settings for remembering the cache root and scanning it on startup; startup scanning is opt-in, and schema-v1 users with a saved root must explicitly choose whether to forget it, remember it without scanning, or enable startup scans.
 - Add Desktop Host protocol v2 with opaque index tokens, bounded cache-summary pages, and lazily paged segment details; the renderer virtualizes cache rows and never materializes every segment during a scan.
 - Add a stable `ci-required` summary job that fails unless privacy checks, the full build/test/package matrix, and Debian/Fedora installed-package smoke tests all succeed.
 
 ### Changed
+
+- Cache sorted index summaries and the eight most recently used search results; run cancellable searches outside the RPC reader.
+- Use progress-based idle deadlines for media and disk work, with copy-byte and unknown-duration FFmpeg progress; keep short absolute deadlines for queries.
+- Initially publish all release tags as previews, including stable-version tags.
 
 - Keep startup lightweight by loading storage statistics and application-trash entries only when their pages are opened, instead of traversing those directories while the window connects.
 - Validate a newly selected cache root with a non-persisting scan before committing the settings change, and retain that validated index instead of traversing the directory again; disabling root persistence now forgets it on the next launch while retaining the validated root for the current session.

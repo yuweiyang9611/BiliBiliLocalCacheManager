@@ -15,9 +15,9 @@ using PlaybackContracts = BiliBiliLocalCacheManager.Playback.Contracts;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host;
 
-internal sealed class DesktopHostApplication
+internal sealed partial class DesktopHostApplication
 {
-    internal const int ProtocolVersion = 2;
+    internal const int ProtocolVersion = 3;
     private const int DefaultPageSize = 100;
     private const int MaximumPageSize = 200;
     private const int MaximumIndexTokenLength = 128;
@@ -32,6 +32,7 @@ internal sealed class DesktopHostApplication
         "settings.get",
         "settings.update",
         "scan",
+        "scan.issueLocation",
         "cancel",
         "search",
         "cache.details",
@@ -49,10 +50,9 @@ internal sealed class DesktopHostApplication
 
     private readonly CoreContracts.ICacheManager _cacheManager = new CacheManager();
     private readonly CoreContracts.ICacheTrashService _trashService = new FileSystemCacheTrashService();
-    private readonly CoreContracts.ICacheStorageStatisticsService _storageStatisticsService =
-        new FileSystemCacheStorageStatisticsService();
     private readonly PlaybackContracts.IPlaybackArtifactStore _artifactStore;
     private readonly CachePlaybackService _playbackService;
+    private readonly PlaybackContracts.IPlaybackLauncher _desktopPlaybackLauncher;
     private readonly PlaybackContracts.IFfmpegDiagnosticsProvider _ffmpegDiagnosticsProvider =
         new BundledFfmpegDiagnosticsProvider();
     private readonly PlaybackContracts.IFfmpegPrewarmService _ffmpegPrewarmService =
@@ -73,8 +73,9 @@ internal sealed class DesktopHostApplication
     private bool _currentIncludeIncomplete;
     private DateTimeOffset? _lastScanCompletedAtUtc;
 
-    public DesktopHostApplication()
+    public DesktopHostApplication(PlaybackContracts.IPlaybackLauncher? playbackLauncher = null)
     {
+        _desktopPlaybackLauncher = playbackLauncher ?? new SystemPlaybackLauncher();
         var settingsPath = Environment.GetEnvironmentVariable(
             "BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH");
         var transcodeCacheRoot = Environment.GetEnvironmentVariable(
@@ -109,11 +110,12 @@ internal sealed class DesktopHostApplication
                 "settings.get" => GetSettings(),
                 "settings.update" => UpdateSettings(parameters),
                 "scan" => await ScanAsync(requestId, parameters, cancellationToken),
+                "scan.issueLocation" => GetScanIssueLocation(parameters),
                 "search" => await SearchAsync(parameters, cancellationToken),
                 "cache.details" => await GetCacheDetailsAsync(parameters, cancellationToken),
-                "storage.get" => await GetStorageAsync(parameters, cancellationToken),
-                "artifacts.cleanup" => await CleanupArtifactsAsync(cancellationToken),
-                "artifacts.clear" => await ClearArtifactsAsync(parameters, cancellationToken),
+                "storage.get" => await GetStorageAsync(requestId, parameters, cancellationToken),
+                "artifacts.cleanup" => await CleanupArtifactsAsync(requestId, cancellationToken),
+                "artifacts.clear" => await ClearArtifactsAsync(requestId, parameters, cancellationToken),
                 "trash.move" => await MoveToTrashAsync(parameters, cancellationToken),
                 "trash.list" => await ListTrashAsync(parameters, cancellationToken),
                 "trash.restore" => await RestoreTrashAsync(parameters, cancellationToken),
@@ -273,7 +275,7 @@ internal sealed class DesktopHostApplication
         cancellationToken.ThrowIfCancellationRequested();
 
         var completedAt = DateTimeOffset.UtcNow;
-        var snapshot = SetCurrentIndex(report.Index, root, includeIncomplete, completedAt);
+        var snapshot = SetCurrentIndex(report.Index, root, includeIncomplete, completedAt, report.Issues);
 
         if (persistSettings)
         {
@@ -281,7 +283,7 @@ internal sealed class DesktopHostApplication
         }
         var page = CreateCachePage(
             snapshot,
-            report.Index.VideoCaches,
+            snapshot.Index.VideoCaches,
             pagination.Offset,
             pagination.PageSize,
             cancellationToken);
@@ -305,6 +307,8 @@ internal sealed class DesktopHostApplication
             report.InvalidEntries,
             report.InaccessibleDirectories,
             report.HasWarnings,
+            issues = snapshot.Issues.Select((issue, id) => new { id, kind = issue.Kind.ToString(), path = BoundWireString(issue.Path), message = BoundWireString(issue.Message) }).ToArray(),
+            issuesTruncated = report.Issues.Count > 100 || report.InvalidEntries + report.InaccessibleDirectories > report.Issues.Count,
             page.IndexToken,
             page.Offset,
             page.PageSize,
@@ -315,7 +319,7 @@ internal sealed class DesktopHostApplication
         };
     }
 
-    private Task<object> SearchAsync(
+    private async Task<object> SearchAsync(
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
@@ -336,17 +340,11 @@ internal sealed class DesktopHostApplication
         };
 
         cancellationToken.ThrowIfCancellationRequested();
-        var matches = string.IsNullOrWhiteSpace(keyword)
-            ? snapshot.Index.VideoCaches
-            : snapshot.Index.Search(options);
-        var page = CreateCachePage(
-            snapshot,
-            matches,
-            pagination.Offset,
-            pagination.PageSize,
-            cancellationToken);
+        var page = await Task.Run(() => CreateCachePage(
+            snapshot, snapshot.Search(options, cancellationToken), pagination.Offset, pagination.PageSize,
+            cancellationToken), cancellationToken);
         EnsureIndexStillCurrent(snapshot);
-        return Task.FromResult<object>(page);
+        return page;
     }
 
     private async Task<object> GetCacheDetailsAsync(
@@ -395,9 +393,12 @@ internal sealed class DesktopHostApplication
     }
 
     private async Task<object> GetStorageAsync(
+        string requestId,
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
+        var activity = CreateDiskActivity(requestId, "storage.get", cancellationToken);
+        var store = new PlaybackArtifactStore(_artifactStore.RootDirectory, activity);
         var settings = _settingsStore.GetState().Settings;
         var cleanupOptions = CreateCleanupOptions(settings);
         var rawRoot = parameters.OptionalString("rootPath") ?? settings.RootPath;
@@ -427,7 +428,7 @@ internal sealed class DesktopHostApplication
             {
                 try
                 {
-                    originalCache = _storageStatisticsService.GetStatistics(root, cancellationToken);
+                    originalCache = new FileSystemCacheStorageStatisticsService().GetStatistics(root, cancellationToken, activity);
                     if (originalCache.FailedEntryCount > 0)
                     {
                         errors.Add($"{originalCache.FailedEntryCount} cache entries could not be measured.");
@@ -444,7 +445,7 @@ internal sealed class DesktopHostApplication
 
                 try
                 {
-                    trash = _trashService.GetStatistics(root, cancellationToken);
+                    trash = new FileSystemCacheTrashService().GetStatistics(root, cancellationToken, activity);
                     if (trash.FailedEntryCount > 0)
                     {
                         errors.Add($"{trash.FailedEntryCount} trash entries could not be measured.");
@@ -462,9 +463,9 @@ internal sealed class DesktopHostApplication
 
             try
             {
-                transcodeCache = _artifactStore.GetStatistics();
+                transcodeCache = store.GetStatistics();
                 cancellationToken.ThrowIfCancellationRequested();
-                transcodePreview = _artifactStore.PreviewCleanup(cleanupOptions);
+                transcodePreview = store.PreviewCleanup(cleanupOptions);
             }
             catch (OperationCanceledException)
             {
@@ -509,17 +510,19 @@ internal sealed class DesktopHostApplication
         };
     }
 
-    private async Task<object> CleanupArtifactsAsync(CancellationToken cancellationToken)
+    private async Task<object> CleanupArtifactsAsync(string requestId, CancellationToken cancellationToken)
     {
+        var store = new PlaybackArtifactStore(_artifactStore.RootDirectory, CreateDiskActivity(requestId, "artifacts.cleanup", cancellationToken));
         var cleanupOptions = CreateCleanupOptions(_settingsStore.GetState().Settings);
         var result = await RunArtifactMaintenanceAsync(
-            () => _artifactStore.Cleanup(cleanupOptions),
+            () => store.Cleanup(cleanupOptions),
             cancellationToken);
         RecordArtifactMaintenance("Manual policy cleanup", result);
         return ToWireArtifactCleanupResult(result);
     }
 
     private async Task<object> ClearArtifactsAsync(
+        string requestId,
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
@@ -530,8 +533,9 @@ internal sealed class DesktopHostApplication
                 "artifacts.clear requires params.confirmed=true because it is irreversible.");
         }
 
+        var store = new PlaybackArtifactStore(_artifactStore.RootDirectory, CreateDiskActivity(requestId, "artifacts.clear", cancellationToken));
         var result = await RunArtifactMaintenanceAsync(
-            () => _artifactStore.Cleanup(CreateClearOptions()),
+            () => store.Cleanup(CreateClearOptions()),
             cancellationToken);
         RecordArtifactMaintenance("Manual cache clear", result);
         return ToWireArtifactCleanupResult(result);
@@ -710,256 +714,166 @@ internal sealed class DesktopHostApplication
     }
 
     private async Task<object> PlayAsync(
-        string requestId,
-        JsonElement parameters,
-        CancellationToken cancellationToken)
+        string requestId, JsonElement parameters, CancellationToken cancellationToken)
     {
         var settings = _settingsStore.GetState().Settings;
         var root = ResolveRequiredRoot(parameters, settings);
-        var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ??
-                                settings.IncludeIncomplete;
-        var targets = ParseSelectionTargets(parameters);
-        var player = ParseWirePlayerPreference(
-            parameters.OptionalString("playerPreference"),
-            settings.PreferredPlayer);
-        var index = await ResolveIndexAsync(
-            requestId,
-            "play",
-            root,
-            includeIncomplete,
-            cancellationToken);
-        var pages = new List<PlaybackTarget>();
-        var failed = new List<string>();
-        foreach (var target in targets)
+        var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ?? settings.IncludeIncomplete;
+        var selections = ParseSelectionTargets(parameters);
+        var player = ParseWirePlayerPreference(parameters.OptionalString("playerPreference"), settings.PreferredPlayer);
+        var index = await ResolveIndexAsync(requestId, "play", root, includeIncomplete, cancellationToken);
+        var failures = new List<MediaFailureDto>();
+        var targets = new List<(BiliVideoCache Cache, int Page)>();
+        var seen = new HashSet<(long Avid, int Page)>();
+        foreach (var selection in selections)
         {
-            if (!index.ByAvid.TryGetValue(target.Avid, out var cache))
+            if (!index.ByAvid.TryGetValue(selection.Avid, out var cache))
             {
-                failed.Add(target.Avid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                failures.Add(new(selection.Avid.ToString(), null, "", "Cache not found."));
                 continue;
             }
-
-            var pageIndexes = target.PageIndexes is { Count: > 0 }
-                ? target.PageIndexes
-                : _playbackService.CreatePagePlans(cache).Select(plan => plan.PageIndex).ToArray();
-            pages.AddRange(pageIndexes
-                .Distinct()
-                .OrderBy(pageIndex => pageIndex)
-                .Select(pageIndex => new PlaybackTarget(cache, pageIndex)));
+            var pages = selection.PageIndexes is { Count: > 0 }
+                ? selection.PageIndexes : cache.Segments.Select(segment => segment.PageIndex).Distinct().ToArray();
+            foreach (var page in pages.Order())
+                if (seen.Add((cache.Avid, page))) targets.Add((cache, page));
         }
-
-        var queued = 0;
-        var launchedArtifactPaths = new List<string>();
-        for (var indexInQueue = 0; indexInQueue < pages.Count; indexInQueue++)
+        var prepared = new List<(PlaybackQueueItem Item, BiliVideoCache Cache, int Page)>();
+        var store = new PlaybackArtifactStore(_artifactStore.RootDirectory);
+        var protectionSeconds = Math.Max(6 * 3600, targets.Sum(target =>
+            target.Cache.Segments.Where(segment => segment.PageIndex == target.Page)
+                .Select(segment => segment.TotalDuration.TotalSeconds).DefaultIfEmpty().Max()) + 3600);
+        var until = DateTimeOffset.UtcNow.AddSeconds(protectionSeconds);
+        for (var ordinal = 0; ordinal < targets.Count; ordinal++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var target = pages[indexInQueue];
-            var ordinal = indexInQueue + 1;
-            var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
-                ReportProgress(new HostProgressEvent(
-                    requestId,
-                    "play",
-                    value.Stage,
-                    value.Percentage,
-                    Current: ordinal,
-                    Total: pages.Count,
-                    Message: $"av{target.Cache.Avid} P{target.PageIndex}",
-                    Details: new
-                    {
-                        elapsedMilliseconds = value.Elapsed.TotalMilliseconds,
-                        estimatedRemainingMilliseconds = value.EstimatedRemaining?.TotalMilliseconds
-                    })));
-            var result = await _playbackService.PlayAsync(
-                target.Cache,
-                target.PageIndex.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                new PlaybackLaunchOptions { PreferredPlayer = player },
-                progress,
-                cancellationToken);
-            if (result.Succeeded)
+            var target = targets[ordinal];
+            try
             {
-                queued++;
-                if (!string.IsNullOrWhiteSpace(result.ManagedArtifactPath))
-                {
-                    ProtectLaunchedArtifact(result.ManagedArtifactPath);
-                    launchedArtifactPaths.Add(result.ManagedArtifactPath);
-                }
+                var plan = _playbackService.CreatePagePlan(target.Cache, target.Page.ToString());
+                var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
+                    ReportProgress(new HostProgressEvent(requestId, "play", value.Stage, value.Percentage,
+                        ordinal + 1, targets.Count, $"av{target.Cache.Avid} P{target.Page}",
+                        new { processedSeconds = value.ProcessedSeconds })));
+                var materialization = await _playbackService.MaterializeAsync(plan.SelectedPlan, progress, cancellationToken);
+                if (!materialization.Succeeded || string.IsNullOrWhiteSpace(materialization.OutputPath))
+                    throw new IOException(materialization.Message);
+                PlaybackBatchLauncher.ValidateLocalFile(materialization.OutputPath);
+                store.ProtectUntilIfManaged(materialization.OutputPath, until, cancellationToken);
+                prepared.Add((new PlaybackQueueItem(materialization.OutputPath, target.Cache.Title + " - " + plan.PartName,
+                    plan.SelectedPlan.Duration), target.Cache, target.Page));
             }
-            else
+            catch (OperationCanceledException) { throw; }
+            catch (Exception exception)
             {
-                failed.Add($"{target.Cache.Avid}:{target.PageIndex}");
+                failures.Add(new(target.Cache.Avid.ToString(), target.Page, BoundWireString(target.Cache.Title), BoundWireString(exception.Message)));
             }
         }
-
-        if (queued > 0)
+        cancellationToken.ThrowIfCancellationRequested();
+        var queued = 0;
+        if (prepared.Count > 0)
         {
-            QueueBackgroundArtifactCleanup("Post-playback policy cleanup", launchedArtifactPaths);
+            try
+            {
+                var launcher = new PlaybackBatchLauncher(store, _desktopPlaybackLauncher);
+                var result = launcher.LaunchBatch(prepared.Select(value => value.Item).ToArray(),
+                    new PlaybackLaunchOptions { PreferredPlayer = player }, cancellationToken);
+                if (!result.Succeeded) throw new IOException(result.Message);
+                queued = prepared.Count;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception exception)
+            {
+                failures.AddRange(prepared.Select(value => new MediaFailureDto(value.Cache.Avid.ToString(),
+                    value.Page, BoundWireString(value.Item.Title), BoundWireString(exception.Message))));
+            }
         }
-
-        return new { queued, failed };
+        if (queued > 0) QueueBackgroundArtifactCleanup("Post-playback policy cleanup");
+        return new PlaybackBatchResultDto(queued, failures);
     }
 
-    private async Task<object> ExportAsync(
-        string requestId,
-        JsonElement parameters,
-        CancellationToken cancellationToken)
+    private async Task<object> ExportAsync(string requestId, JsonElement parameters, CancellationToken cancellationToken)
     {
         var settings = _settingsStore.GetState().Settings;
         var root = ResolveRequiredRoot(parameters, settings);
-        var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ??
-                                settings.IncludeIncomplete;
+        var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ?? settings.IncludeIncomplete;
         var selections = ParseSelectionTargets(parameters);
         var requestedOutputPath = Path.GetFullPath(parameters.RequireString("outputPath"));
         var requestedParent = Path.GetDirectoryName(requestedOutputPath);
         if (string.IsNullOrWhiteSpace(requestedParent) || !Directory.Exists(requestedParent))
-        {
             throw new DirectoryNotFoundException($"Export destination directory not found: {requestedParent}");
-        }
-
-        var index = await ResolveIndexAsync(
-            requestId,
-            "export",
-            root,
-            includeIncomplete,
-            cancellationToken);
+        var index = await ResolveIndexAsync(requestId, "export", root, includeIncomplete, cancellationToken);
         var requests = ExpandExportTargets(index, selections);
-        if (requests.Count == 0)
-        {
-            throw new RpcException("not_found", "None of the requested export targets exist in the index.");
-        }
-
+        var failures = selections.Where(selection => !index.ByAvid.ContainsKey(selection.Avid))
+            .Select(selection => new MediaFailureDto(selection.Avid.ToString(), null, "", "Cache not found.")).ToList();
+        if (requests.Count == 0) return new ExportBatchResultDto(null, 0, failures, false);
         var destinationIsDirectory = requests.Count > 1 || Directory.Exists(requestedOutputPath);
-        var destination = destinationIsDirectory
-            ? ResolveBatchExportDirectory(requestedOutputPath)
-            : requestedOutputPath;
-        string? stagingDirectory = destinationIsDirectory
-            ? CreateBatchExportStagingDirectory(destination)
-            : null;
+        var destination = destinationIsDirectory ? ResolveBatchExportDirectory(requestedOutputPath) : requestedOutputPath;
+        string? stagingDirectory = destinationIsDirectory ? CreateBatchExportStagingDirectory(destination) : null;
+        string? stagingFile = destinationIsDirectory ? null : Path.Combine(requestedParent,
+            "." + Path.GetFileName(destination) + "." + Guid.NewGuid().ToString("N") + ".exporting");
         var workingDestination = stagingDirectory ?? destination;
-        var exported = new List<object>();
-        var failures = new List<object>();
+        var preparedCount = 0;
         try
         {
-            for (var requestIndex = 0; requestIndex < requests.Count; requestIndex++)
+            // Missing selections must also prevent a single-file export from committing.
+            if (failures.Count > 0) return new ExportBatchResultDto(null, 0, failures, false);
+            for (var ordinal = 0; ordinal < requests.Count; ordinal++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var target = requests[requestIndex];
-                if (!index.ByAvid.TryGetValue(target.Avid, out var cache))
-                {
-                    failures.Add(new { target.Avid, target.SegmentKey, message = "Cache not found." });
-                    continue;
-                }
-
-                CachePlaybackPagePlan pagePlan;
+                var target = requests[ordinal];
+                var cache = index.ByAvid[target.Avid];
                 try
                 {
-                    pagePlan = _playbackService.CreatePagePlan(cache, target.SegmentKey);
+                    var plan = _playbackService.CreatePagePlan(cache, target.SegmentKey);
+                    var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
+                        ReportProgress(new HostProgressEvent(requestId, "export", value.Stage, value.Percentage,
+                            ordinal + 1, requests.Count, $"av{target.Avid} P{plan.PageIndex}",
+                            new { processedSeconds = value.ProcessedSeconds })));
+                    var materialization = await _playbackService.MaterializeAsync(plan.SelectedPlan, progress, cancellationToken);
+                    if (!materialization.Succeeded || string.IsNullOrWhiteSpace(materialization.OutputPath))
+                        throw new IOException(materialization.Message);
+                    if (!destinationIsDirectory && PathsEqual(materialization.OutputPath, destination))
+                        throw new IOException("The export source and destination are the same file.");
+                    var output = destinationIsDirectory
+                        ? PortableFileNaming.EnsureUnique(workingDestination, PortableFileNaming.Build(cache.Title,
+                            cache.Avid, plan.PageIndex, plan.PartName, cache.Segments.Select(segment => segment.PageIndex).Distinct().Count() > 1), ".mp4")
+                        : stagingFile!;
+                    await CopyAtomicallyAsync(materialization.OutputPath, output, cancellationToken, bytes =>
+                        ReportProgress(new HostProgressEvent(requestId, "export", "copying", Current: ordinal + 1,
+                            Total: requests.Count, Details: new { bytesCopied = bytes })));
+                    preparedCount++;
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception exception)
                 {
-                    failures.Add(new
-                    {
-                        target.Avid,
-                        target.SegmentKey,
-                        message = BoundWireString(exception.Message)
-                    });
-                    continue;
+                    failures.Add(new(target.Avid.ToString(), int.TryParse(target.SegmentKey, out var page) ? page : null,
+                        BoundWireString(cache.Title), BoundWireString(exception.Message)));
                 }
-
-                if (!pagePlan.IsPlayable)
-                {
-                    failures.Add(new
-                    {
-                        target.Avid,
-                        target.SegmentKey,
-                        message = BoundWireString(
-                            pagePlan.SelectedPlan.Message ?? pagePlan.Message ?? "Page is not playable.")
-                    });
-                    continue;
-                }
-
-                var ordinal = requestIndex + 1;
-                var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
-                    ReportProgress(new HostProgressEvent(
-                        requestId,
-                        "export",
-                        value.Stage,
-                        value.Percentage,
-                        Current: ordinal,
-                        Total: requests.Count,
-                        Message: $"av{target.Avid} P{pagePlan.PageIndex}",
-                        Details: new
-                        {
-                            target.Avid,
-                            pagePlan.PageIndex,
-                            elapsedMilliseconds = value.Elapsed.TotalMilliseconds,
-                            estimatedRemainingMilliseconds = value.EstimatedRemaining?.TotalMilliseconds
-                        })));
-
-                var materialization = await _playbackService.MaterializeAsync(
-                    pagePlan.SelectedPlan,
-                    progress,
-                    cancellationToken);
-                if (!materialization.Succeeded || string.IsNullOrWhiteSpace(materialization.OutputPath))
-                {
-                    failures.Add(new
-                    {
-                        target.Avid,
-                        target.SegmentKey,
-                        message = BoundWireString(materialization.Message)
-                    });
-                    continue;
-                }
-
-                var outputPath = destinationIsDirectory
-                    ? PortableFileNaming.EnsureUnique(
-                        workingDestination,
-                        PortableFileNaming.Build(
-                            cache.Title,
-                            cache.Avid,
-                            pagePlan.PageIndex,
-                            pagePlan.PartName,
-                            cache.Segments.Select(segment => segment.PageIndex).Distinct().Count() > 1),
-                        ".mp4")
-                    : destination;
-                await CopyAtomicallyAsync(materialization.OutputPath, outputPath, cancellationToken);
-                exported.Add(new
-                {
-                    target.Avid,
-                    pagePlan.PageIndex,
-                    pagePlan.PartName,
-                    outputPath,
-                    materialization.MaterializerName
-                });
             }
-
-            if (failures.Count > 0 || exported.Count != requests.Count)
-            {
-                throw new RpcException(
-                    "operation_failed",
-                    "The export batch was not published because one or more media targets failed.",
-                    new { failures });
-            }
-
+            if (failures.Count > 0) return new ExportBatchResultDto(null, 0, failures, false);
             cancellationToken.ThrowIfCancellationRequested();
             if (stagingDirectory is not null)
             {
                 Directory.Move(stagingDirectory, destination);
                 stagingDirectory = null;
             }
-
-            return new
+            else if (stagingFile is not null)
             {
-                outputPath = destination,
-                exportedCount = exported.Count,
-                failedCount = 0,
-                failures = Array.Empty<object>()
-            };
+                File.Move(stagingFile, destination, overwrite: true);
+                stagingFile = null;
+            }
+            return new ExportBatchResultDto(destination, preparedCount, failures, true);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception exception)
+        {
+            failures.Add(new("", null, "", BoundWireString(exception.Message)));
+            return new ExportBatchResultDto(null, 0, failures, false);
         }
         finally
         {
-            if (stagingDirectory is not null)
-            {
-                TryDeleteDirectory(stagingDirectory);
-            }
+            if (stagingDirectory is not null) TryDeleteDirectory(stagingDirectory);
+            if (stagingFile is not null) TryDelete(stagingFile);
         }
     }
 
@@ -1034,25 +948,22 @@ internal sealed class DesktopHostApplication
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var ordered = caches
-            .OrderByDescending(GetLastUpdatedUtc)
-            .ThenBy(cache => cache.Avid)
-            .ToArray();
+        var ordered = caches as IReadOnlyCollection<BiliVideoCache> ?? caches.ToArray();
         var items = ordered
             .Skip(offset)
             .Take(pageSize)
             .Select(cache =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                return MapCacheSummary(cache);
+                return snapshot.Summaries[cache.Avid];
             })
             .ToArray();
         return new CachePageDto(
             snapshot.IndexToken,
             offset,
             pageSize,
-            ordered.Length,
-            HasMore(offset, pageSize, ordered.Length),
+            ordered.Count,
+            HasMore(offset, pageSize, ordered.Count),
             items);
     }
 
@@ -1142,7 +1053,7 @@ internal sealed class DesktopHostApplication
                 throw StaleIndexException();
             }
 
-            return new CurrentIndexSnapshot(_currentIndex, _currentIndexToken);
+            return _indexSnapshot!;
         }
     }
 
@@ -1150,16 +1061,21 @@ internal sealed class DesktopHostApplication
         CacheIndex index,
         string root,
         bool includeIncomplete,
-        DateTimeOffset completedAtUtc)
+        DateTimeOffset completedAtUtc,
+        IReadOnlyList<CacheScanIssue>? issues = null)
     {
+        var orderedIndex = new CacheIndex(index.VideoCaches.OrderByDescending(GetLastUpdatedUtc).ThenBy(cache => cache.Avid));
+        var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, issues ?? []);
         lock (_stateSync)
         {
-            _currentIndex = index;
-            _currentIndexToken = Guid.NewGuid().ToString("N");
+            _indexSnapshot?.Invalidate();
+            _indexSnapshot = snapshot;
+            _currentIndex = orderedIndex;
+            _currentIndexToken = snapshot.IndexToken;
             _currentRoot = root;
             _currentIncludeIncomplete = includeIncomplete;
             _lastScanCompletedAtUtc = completedAtUtc;
-            return new CurrentIndexSnapshot(_currentIndex, _currentIndexToken);
+            return snapshot;
         }
     }
 
@@ -1554,7 +1470,8 @@ internal sealed class DesktopHostApplication
     private static async Task CopyAtomicallyAsync(
         string sourcePath,
         string destinationPath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<long>? reportProgress = null)
     {
         var source = Path.GetFullPath(sourcePath);
         var destination = Path.GetFullPath(destinationPath);
@@ -1585,7 +1502,21 @@ internal sealed class DesktopHostApplication
                              128 * 1024,
                              useAsync: true))
             {
-                await input.CopyToAsync(output, cancellationToken);
+                var buffer = new byte[128 * 1024];
+                long copied = 0;
+                var nextReport = Environment.TickCount64;
+                int read;
+                while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+                {
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    copied += read;
+                    if (Environment.TickCount64 >= nextReport)
+                    {
+                        reportProgress?.Invoke(copied);
+                        nextReport = Environment.TickCount64 + 250;
+                    }
+                }
+                reportProgress?.Invoke(copied);
                 await output.FlushAsync(cancellationToken);
             }
 
@@ -1941,6 +1872,8 @@ internal sealed class DesktopHostApplication
     {
         lock (_stateSync)
         {
+            _indexSnapshot?.Invalidate();
+            _indexSnapshot = null;
             _currentIndex = null;
             _currentIndexToken = null;
             _currentRoot = null;
@@ -1951,6 +1884,20 @@ internal sealed class DesktopHostApplication
     private void ReportProgress(HostProgressEvent progress)
     {
         ProgressReported?.Invoke(this, progress);
+    }
+
+    private Action CreateDiskActivity(string requestId, string operation, CancellationToken cancellationToken)
+    {
+        var count = 0;
+        var nextReport = 0L;
+        return () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            count++;
+            if (Environment.TickCount64 < nextReport) return;
+            ReportProgress(new HostProgressEvent(requestId, operation, "measuring", Current: count));
+            nextReport = Environment.TickCount64 + 250;
+        };
     }
 
     private static DateTimeOffset GetLastUpdatedUtc(BiliVideoCache cache)
@@ -2027,7 +1974,6 @@ internal sealed class DesktopHostApplication
 
     private sealed record PaginationRequest(int Offset, int PageSize);
 
-    private sealed record CurrentIndexSnapshot(CacheIndex Index, string IndexToken);
 
     private sealed record PlaybackTarget(BiliVideoCache Cache, int PageIndex);
 

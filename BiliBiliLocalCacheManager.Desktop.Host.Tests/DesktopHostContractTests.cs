@@ -27,7 +27,7 @@ public sealed class DesktopHostContractTests
         var result = await DispatchAsync(application, "initialState", "{}");
 
         Assert.Equal(JsonValueKind.Object, result.ValueKind);
-        Assert.Equal(2, result.GetProperty("protocolVersion").GetInt32());
+        Assert.Equal(3, result.GetProperty("protocolVersion").GetInt32());
         var settings = result.GetProperty("settings");
         Assert.Equal(string.Empty, settings.GetProperty("rootPath").GetString());
         Assert.True(settings.GetProperty("rememberRootPath").GetBoolean());
@@ -564,8 +564,7 @@ public sealed class DesktopHostContractTests
             "scan",
             JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
 
-        var failure = await Assert.ThrowsAsync<RpcException>(() =>
-            DispatchAsync(
+        var failure = await DispatchAsync(
                 application,
                 "export",
                 JsonSerializer.Serialize(new
@@ -576,9 +575,11 @@ public sealed class DesktopHostContractTests
                         new { avid = "808", pageIndexes = new[] { 1, 999 } }
                     },
                     outputPath = exportParent
-                })));
+                }));
 
-        Assert.Equal("operation_failed", failure.Code);
+        Assert.False(failure.GetProperty("published").GetBoolean());
+        Assert.Equal(0, failure.GetProperty("exportedCount").GetInt32());
+        Assert.Single(failure.GetProperty("failures").EnumerateArray());
         Assert.Empty(Directory.EnumerateFileSystemEntries(exportParent));
     }
 
@@ -881,6 +882,137 @@ public sealed class DesktopHostContractTests
             parameters.RootElement,
             cancellationToken);
         return JsonSerializer.SerializeToElement(result, WireOptions);
+    }
+
+    [Fact]
+    public async Task PlaybackBatch_ReturnsPartialFailuresAndLaunchesOneOrderedPlaylist()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "First", 2);
+        workspace.CreateCache(102, "Second");
+        var launcher = new QueueRecorder();
+        var application = new DesktopHostApplication(launcher);
+        var result = await DispatchAsync(application, "play", JsonSerializer.Serialize(new {
+            rootPath = workspace.CacheRoot,
+            targets = new[] { new { avid = "101", pageIndexes = new[] { 2, 1, 2, 999 } },
+                new { avid = "102", pageIndexes = new[] { 1 } } }
+        }));
+        Assert.Equal(1, launcher.Calls);
+        Assert.Equal(3, result.GetProperty("queued").GetInt32());
+        var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+        Assert.Equal(999, failure.GetProperty("pageIndex").GetInt32());
+        var paths = File.ReadAllLines(launcher.Path!).Where(line => !line.StartsWith('#')).ToArray();
+        Assert.Equal(3, paths.Length);
+        Assert.Contains(Path.Combine("101", "c_1"), paths[0]);
+        Assert.Contains(Path.Combine("101", "c_2"), paths[1]);
+        Assert.Contains(Path.Combine("102", "c_1"), paths[2]);
+    }
+
+    [Fact]
+    public async Task PlaybackBatch_AllFailuresAndCancellationDoNotLaunch()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "First");
+        var launcher = new QueueRecorder();
+        var application = new DesktopHostApplication(launcher);
+        var request = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot,
+            targets = new[] { new { avid = "101", pageIndexes = new[] { 999 } } } });
+        var result = await DispatchAsync(application, "play", request);
+        Assert.Equal(0, result.GetProperty("queued").GetInt32());
+        Assert.Single(result.GetProperty("failures").EnumerateArray());
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DispatchAsync(application, "play", request, cancellation.Token));
+        Assert.Equal(0, launcher.Calls);
+    }
+
+    [Fact]
+    public async Task ScanIssues_AreBoundedLocatableAndInvalidatedByRescan()
+    {
+        using var workspace = new HostTestWorkspace();
+        for (var i = 1; i <= 105; i++)
+        {
+            var directory = Path.Combine(workspace.CacheRoot, i.ToString(), "1");
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, "entry.json"), "{broken");
+        }
+        var application = workspace.CreateApplication();
+        var scanRequest = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot });
+        var scan = await DispatchAsync(application, "scan", scanRequest);
+        Assert.Equal(105, scan.GetProperty("invalidEntries").GetInt32());
+        Assert.Equal(100, scan.GetProperty("issues").GetArrayLength());
+        Assert.True(scan.GetProperty("issuesTruncated").GetBoolean());
+        var request = JsonSerializer.Serialize(new { indexToken = scan.GetProperty("indexToken").GetString(), issueId = 0 });
+        var location = await DispatchAsync(application, "scan.issueLocation", request);
+        Assert.StartsWith(workspace.CacheRoot, location.GetProperty("path").GetString());
+        await DispatchAsync(application, "scan", scanRequest);
+        var error = await Assert.ThrowsAsync<RpcException>(() => DispatchAsync(application, "scan.issueLocation", request));
+        Assert.Equal("stale_index", error.Code);
+    }
+
+    [Fact]
+    public async Task ExportCopy_ReportsBytesAndKeepsFailedBatchUnpublished()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "First", 2);
+        var application = workspace.CreateApplication();
+        var progress = new List<HostProgressEvent>();
+        application.ProgressReported += (_, value) => progress.Add(value);
+        var result = await DispatchAsync(application, "export", JsonSerializer.Serialize(new {
+            rootPath = workspace.CacheRoot, targets = new[] { new { avid = "101", pageIndexes = new[] { 1, 999 } } },
+            outputPath = workspace.Root
+        }));
+        Assert.False(result.GetProperty("published").GetBoolean());
+        Assert.Contains(progress, value => value.Stage == "copying" && value.Details is not null);
+    }
+
+    private sealed class QueueRecorder : BiliBiliLocalCacheManager.Playback.Contracts.IPlaybackLauncher
+    {
+        public int Calls;
+        public string? Path;
+        public BiliBiliLocalCacheManager.Playback.Models.PlaybackLaunchResult Launch(
+            BiliBiliLocalCacheManager.Playback.Models.PlaybackMaterializationResult value,
+            BiliBiliLocalCacheManager.Playback.Models.PlaybackLaunchOptions? options = null)
+        {
+            Calls++;
+            Path = value.OutputPath;
+            return BiliBiliLocalCacheManager.Playback.Models.PlaybackLaunchResult.Success("Handed off", "test");
+        }
+    }
+
+    [Fact]
+    public async Task SingleExport_CancellationDuringCopyPreservesExistingDestination()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Export");
+        var destination = Path.Combine(workspace.Root, "existing.mp4");
+        File.WriteAllText(destination, "previous file");
+        using var cancellation = new CancellationTokenSource();
+        var application = workspace.CreateApplication();
+        application.ProgressReported += (_, progress) => {
+            if (progress.Stage == "copying") cancellation.Cancel();
+        };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DispatchAsync(application, "export",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, outputPath = destination,
+                targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } } } }), cancellation.Token));
+        Assert.Equal("previous file", File.ReadAllText(destination));
+        Assert.Empty(Directory.EnumerateFiles(workspace.Root, "*.exporting"));
+    }
+
+    [Fact]
+    public async Task StorageTraversal_ReportsRealProgressAndCanBeCancelled()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Statistics", 3);
+        using var cancellation = new CancellationTokenSource();
+        var application = workspace.CreateApplication();
+        var reports = 0;
+        application.ProgressReported += (_, progress) => {
+            if (progress.Operation == "storage.get") { reports++; cancellation.Cancel(); }
+        };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DispatchAsync(application, "storage.get",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }), cancellation.Token));
+        Assert.True(reports > 0);
     }
 
     private static IReadOnlyList<JsonElement> ParseLines(string output) =>

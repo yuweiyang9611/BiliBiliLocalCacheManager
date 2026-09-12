@@ -10,6 +10,7 @@ const api: CacheManagerApi = {
   chooseRootDirectory: (defaultPath?: string) => ipcRenderer.invoke(channels.chooseRoot, defaultPath),
   scan: (options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; offset?: number; pageSize?: number }) => ipcRenderer.invoke(channels.scan, options),
   cancel: () => ipcRenderer.invoke(channels.cancel),
+  locateScanIssue: (indexToken: string, issueId: number) => ipcRenderer.invoke(channels.scanIssueLocation, indexToken, issueId),
   search: (request: SearchRequest) => ipcRenderer.invoke(channels.search, request),
   getCacheDetails: (request: CacheDetailsRequest) => ipcRenderer.invoke(channels.cacheDetails, request),
   cancelCacheDetails: () => ipcRenderer.invoke(channels.cacheDetailsCancel),

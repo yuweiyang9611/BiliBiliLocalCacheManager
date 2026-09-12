@@ -37,6 +37,10 @@ public sealed partial class FfmpegCoreTranscoder
                 percentage => tracker.Report(fallbackStage, percentage),
                 duration);
         }
+        else
+        {
+            processor.NotifyOnProgress(time => tracker.ReportTime(fallbackStage, time));
+        }
 
         var succeeded = await processor
             .CancellableThrough(cancellationToken)

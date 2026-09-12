@@ -209,3 +209,12 @@ dl { margin: 0; } dl > div { display: flex; justify-content: space-between; padd
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+.result-panel { border-bottom: 1px solid var(--border); padding: 8px 0; margin-bottom: 8px; font-size: 13px; }
+.result-panel h2 { font-size: 14px; margin: 0; }
+.result-panel .panel-heading { flex-wrap: wrap; gap: 8px; padding: 6px 0; }
+.result-panel p { margin: 8px 0; }
+.result-list { padding: 0; list-style: none; max-height: 300px; overflow: auto; }
+.result-list li { display: flex; gap: 12px; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 8px 0; }
+.result-list li > div { min-width: 0; }
+.result-list p, .result-list code { white-space: normal; overflow-wrap: anywhere; }
+.result-panel summary { cursor: pointer; }

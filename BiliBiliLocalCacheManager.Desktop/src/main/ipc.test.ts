@@ -165,7 +165,7 @@ describe('IPC cancellable request tracking', () => {
 describe('IPC Host contract wiring', () => {
   it('rejects a malformed initialState response from the Host', async () => {
     const fake = createImmediateBridge({
-      initialState: { protocolVersion: 2 },
+      initialState: { protocolVersion: 3 },
     });
     unregister = registerIpc(fake.bridge, () => null);
 
@@ -389,7 +389,7 @@ function createImmediateBridge(results: Record<string, unknown> = {}): {
       id,
       promise: Promise.resolve((Object.hasOwn(results, method)
         ? results[method]
-        : { outputPath: params.outputPath }) as T),
+        : { outputPath: params.outputPath, published: true, exportedCount: 1, failures: [] }) as T),
       cancel: () => false,
     };
   };
@@ -459,6 +459,8 @@ function validCacheEntry(): JsonObject {
 
 function validScanResult(overrides: JsonObject = {}): JsonObject {
   const result: JsonObject = {
+    issues: [],
+    issuesTruncated: false,
     rootPath: path.resolve('paged-cache'),
     indexToken: 'index-token-1',
     offset: 0,

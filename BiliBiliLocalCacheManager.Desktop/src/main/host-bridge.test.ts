@@ -16,7 +16,7 @@ vi.mock('electron', () => ({
 vi.mock('node:child_process', () => ({ spawn: hostMocks.spawn }));
 vi.mock('node:fs', () => ({ existsSync: hostMocks.existsSync }));
 
-import { createHostEnvironment, DesktopHostBridge } from './host-bridge';
+import { createHostEnvironment, DesktopHostBridge, hostTimeoutPolicy } from './host-bridge';
 
 const originalHostPath = process.env.CACHE_MANAGER_HOST_PATH;
 
@@ -121,6 +121,59 @@ describe('Desktop Host environment', () => {
 });
 
 describe('Desktop Host cancellation', () => {
+  it('uses short query deadlines and progress-based media deadlines', () => {
+    expect(hostTimeoutPolicy('health')).toEqual({ milliseconds: 15_000, idle: false });
+    expect(hostTimeoutPolicy('search')).toEqual({ milliseconds: 60_000, idle: false });
+    expect(hostTimeoutPolicy('export')).toEqual({ milliseconds: 600_000, idle: true });
+  });
+
+  it('keeps an advancing export alive beyond ten minutes, then cancels a stalled export', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    try {
+      const call = bridge.call('export');
+      const rejection = expect(call.promise).rejects.toMatchObject({ code: 'HOST_TIMEOUT' });
+      await vi.advanceTimersByTimeAsync(0);
+      const progress = (bytesCopied: number, requestId = call.id, operation = 'export') =>
+        fake.child.stdout.emit('data', JSON.stringify({ event: 'progress', payload: {
+          requestId, operation, stage: 'copying', details: { bytesCopied },
+        } }) + '\n');
+      await vi.advanceTimersByTimeAsync(500_000);
+      progress(100);
+      await vi.advanceTimersByTimeAsync(500_000);
+      progress(200);
+      expect(fake.writes.filter(value => value.method === 'cancel')).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(500_000);
+      progress(200);
+      progress(300, 'another-request');
+      progress(400, call.id, 'scan');
+      await vi.advanceTimersByTimeAsync(100_001);
+      await rejection;
+      expect(fake.writes.filter(value => value.method === 'cancel')).toHaveLength(1);
+      await bridge.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not renew a timeout from repeated lock waiting or elapsed time', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    try {
+      const call = bridge.call('play');
+      const rejection = expect(call.promise).rejects.toMatchObject({ code: 'HOST_TIMEOUT' });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(500_000);
+      fake.child.stdout.emit('data', JSON.stringify({ event: 'progress', payload: {
+        requestId: call.id, operation: 'play', stage: 'waiting for lock', details: { elapsedMilliseconds: 500_000 },
+      } }) + '\n');
+      await vi.advanceTimersByTimeAsync(100_001);
+      await rejection;
+      await bridge.dispose();
+    } finally { vi.useRealTimers(); }
+  });
   it('sends a Host cancel request before rejecting a timed-out call', async () => {
     const fake = createFakeHostProcess();
     hostMocks.spawn.mockReturnValue(fake.child);

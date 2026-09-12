@@ -5,6 +5,7 @@ export const channels = Object.freeze({
   settingsUpdate: 'cache-manager:settings:update',
   chooseRoot: 'cache-manager:dialog:root',
   scan: 'cache-manager:scan',
+  scanIssueLocation: 'cache-manager:scan:issue-location',
   cancel: 'cache-manager:cancel',
   search: 'cache-manager:search',
   cacheDetails: 'cache-manager:cache:details',

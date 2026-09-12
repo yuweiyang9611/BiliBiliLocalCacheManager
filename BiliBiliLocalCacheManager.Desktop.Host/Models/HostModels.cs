@@ -4,6 +4,10 @@ using System.Text.Json.Serialization;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host;
 
+internal sealed record MediaFailureDto(string Avid, int? PageIndex, string Title, string Message);
+internal sealed record PlaybackBatchResultDto(int Queued, IReadOnlyList<MediaFailureDto> Failures);
+internal sealed record ExportBatchResultDto(string? OutputPath, int ExportedCount, IReadOnlyList<MediaFailureDto> Failures, bool Published);
+
 internal sealed record HostProgressEvent(
     string RequestId,
     string Operation,

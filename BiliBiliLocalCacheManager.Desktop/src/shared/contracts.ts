@@ -5,7 +5,7 @@ export type JsonObject = { [key: string]: JsonValue };
 export type MatchMode = 'contains' | 'prefix' | 'exact';
 export type PlayerPreference = 'system' | 'mpv' | 'vlc';
 
-export const DESKTOP_HOST_PROTOCOL_VERSION = 2 as const;
+export const DESKTOP_HOST_PROTOCOL_VERSION = 3 as const;
 export const DEFAULT_CACHE_PAGE_SIZE = 100;
 export const MAXIMUM_CACHE_PAGE_SIZE = 200;
 
@@ -139,6 +139,8 @@ export interface InitialState {
 }
 
 export interface ScanResult extends CachePage {
+  issues: ScanIssue[];
+  issuesTruncated: boolean;
   rootPath?: string;
   includeIncomplete?: boolean;
   scannedAvidDirectories?: number;
@@ -150,6 +152,11 @@ export interface ScanResult extends CachePage {
   hasWarnings?: boolean;
   completedAtUtc?: string;
 }
+
+export interface ScanIssue { id: number; kind: string; path: string; message: string }
+export interface MediaFailure { avid: string; pageIndex: number | null; title: string; message: string }
+export interface PlaybackBatchResult { queued: number; failures: MediaFailure[] }
+export interface ExportBatchResult { outputPath: string | null; exportedCount: number; failures: MediaFailure[]; published: boolean }
 
 export interface SearchRequest {
   indexToken: string;
@@ -206,6 +213,7 @@ export interface CacheManagerApi {
   chooseRootDirectory(defaultPath?: string): Promise<string | null>;
   scan(options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; offset?: number; pageSize?: number }): Promise<ScanResult>;
   cancel(): Promise<boolean>;
+  locateScanIssue(indexToken: string, issueId: number): Promise<boolean>;
   search(request: SearchRequest): Promise<CachePage>;
   getCacheDetails(request: CacheDetailsRequest): Promise<CacheDetails>;
   cancelCacheDetails(): Promise<boolean>;
@@ -217,8 +225,8 @@ export interface CacheManagerApi {
   listTrash(rootPath: string): Promise<TrashEntry[]>;
   restoreTrash(rootPath: string, entryIds: string[]): Promise<{ restored: string[]; failed: string[] }>;
   purgeTrash(rootPath: string, entryIds: string[]): Promise<{ purged: string[]; failed: string[] }>;
-  play(rootPath: string, targets: SelectionTarget[], playerPreference: PlayerPreference, includeIncomplete: boolean): Promise<{ queued: number }>;
-  exportMedia(rootPath: string, targets: SelectionTarget[], suggestedName: string, includeIncomplete: boolean): Promise<{ outputPath: string } | null>;
+  play(rootPath: string, targets: SelectionTarget[], playerPreference: PlayerPreference, includeIncomplete: boolean): Promise<PlaybackBatchResult>;
+  exportMedia(rootPath: string, targets: SelectionTarget[], suggestedName: string, includeIncomplete: boolean): Promise<ExportBatchResult | null>;
   exportDiagnostics(suggestedName: string, rootPath?: string): Promise<{ outputPath: string } | null>;
   getDesktopInfo(): Promise<DesktopInfo>;
   onProgress(listener: (progress: HostProgress) => void): () => void;

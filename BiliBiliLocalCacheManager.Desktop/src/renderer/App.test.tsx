@@ -38,7 +38,7 @@ const initialItem: CacheEntry = {
   lastUpdated: '2026-08-26T00:00:00Z',
 };
 const initial: InitialState = {
-  protocolVersion: 2,
+  protocolVersion: 3,
   settings: { ...defaultSettings, rootPath: 'D:\\Bilibili\\download' },
   settingsState: { canSave: true, sourceSchemaVersion: 2 },
   items: [initialItem],
@@ -50,9 +50,11 @@ const initial: InitialState = {
 function createCachePage(
   items: CacheEntry[] = initial.items,
   overrides: Partial<CachePage> = {},
-): CachePage {
+): ScanResult {
   return {
     indexToken,
+    issues: [],
+    issuesTruncated: false,
     offset: 0,
     pageSize: 100,
     totalItems: items.length,
@@ -81,12 +83,13 @@ function createCacheDetails(
 
 function createApi(): CacheManagerApi {
   return {
-    health: vi.fn().mockResolvedValue({ protocolVersion: 2, status: 'ok', version: '1.0.0' }),
+    health: vi.fn().mockResolvedValue({ protocolVersion: 3, status: 'ok', version: '1.0.0' }),
     getInitialState: vi.fn().mockResolvedValue(initial),
     getSettings: vi.fn().mockResolvedValue(initial.settings),
     updateSettings: vi.fn().mockImplementation(async (patch) => ({ ...initial.settings, ...patch })),
     chooseRootDirectory: vi.fn().mockResolvedValue(null),
     scan: vi.fn().mockResolvedValue(createCachePage()),
+    locateScanIssue: vi.fn().mockResolvedValue(true),
     cancel: vi.fn().mockResolvedValue(true),
     search: vi.fn().mockResolvedValue(createCachePage()),
     getCacheDetails: vi.fn().mockResolvedValue(createCacheDetails()),
@@ -99,7 +102,7 @@ function createApi(): CacheManagerApi {
     listTrash: vi.fn().mockResolvedValue([]),
     restoreTrash: vi.fn().mockResolvedValue({ restored: [], failed: [] }),
     purgeTrash: vi.fn().mockResolvedValue({ purged: [], failed: [] }),
-    play: vi.fn().mockResolvedValue({ queued: 1 }),
+    play: vi.fn().mockResolvedValue({ queued: 1, failures: [] }),
     exportMedia: vi.fn().mockResolvedValue(null),
     exportDiagnostics: vi.fn().mockResolvedValue(null),
     getDesktopInfo: vi.fn().mockResolvedValue({
@@ -141,6 +144,43 @@ describe('desktop renderer', () => {
   });
 
   afterEach(cleanup);
+
+  it('shows damaged scan entries and locates an issue using its index token', async () => {
+    vi.mocked(api.scan).mockResolvedValue({ ...createCachePage(), invalidEntries: 2, hasWarnings: true,
+      issues: [{ id: 0, kind: 'InvalidEntry', path: 'damaged/entry.json', message: 'Invalid JSON' }], issuesTruncated: true });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    expect(await screen.findByText('Invalid JSON')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '定位问题 1', hidden: true }));
+    await waitFor(() => expect(api.locateScanIssue).toHaveBeenCalledWith(indexToken, 0));
+  });
+
+  it('shows all-failed playback as failure and retries only the failed page', async () => {
+    vi.mocked(api.play).mockResolvedValueOnce({ queued: 0, failures: [{ avid: '100', pageIndex: 1, title: 'Failed page', message: 'Missing media' }] })
+      .mockResolvedValueOnce({ queued: 1, failures: [] });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: '播放' })).toBeDisabled());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '播放' }));
+    expect(await screen.findByText('播放结果：失败')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重试未成功项目' }));
+    await waitFor(() => expect(api.play).toHaveBeenLastCalledWith(initial.settings.rootPath, [{ avid: '100', pageIndexes: [1] }], 'system', false));
+    expect(await screen.findByText('播放结果：全部成功')).toBeInTheDocument();
+  });
+
+  it('keeps failed exports unpublished and retries the original batch', async () => {
+    vi.mocked(api.exportMedia).mockResolvedValue({ published: false, outputPath: null, exportedCount: 0,
+      failures: [{ avid: '100', pageIndex: 1, title: 'Failed page', message: 'Missing media' }] });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    expect(await screen.findByText('导出结果：失败')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重试完整批次' }));
+    await waitFor(() => expect(api.exportMedia).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.exportMedia).mock.calls[1][1]).toEqual([{ avid: '100' }]);
+  });
 
   it('loads settings and cache rows from Desktop Host', async () => {
     render(<App />);
@@ -615,7 +655,7 @@ describe('desktop renderer', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
     const scanCalls = vi.mocked(api.scan).mock.calls.length;
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
-    const pendingPlay = deferred<{ queued: number }>();
+    const pendingPlay = deferred<{ queued: number; failures: [] }>();
     vi.mocked(api.play).mockImplementation(() => pendingPlay.promise);
 
     fireEvent.click(screen.getByRole('button', { name: '播放' }));
@@ -634,7 +674,7 @@ describe('desktop renderer', () => {
     expect(api.exportMedia).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-    await act(async () => { pendingPlay.resolve({ queued: 1 }); });
+    await act(async () => { pendingPlay.resolve({ queued: 1, failures: [] }); });
     await waitFor(() => expect(screen.getByRole('button', { name: '播放' })).not.toBeDisabled());
   });
 

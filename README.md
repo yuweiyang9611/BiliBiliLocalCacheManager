@@ -7,7 +7,7 @@
 - 从 `根目录/avid/分段目录/entry.json` 建立缓存索引，识别新版 DASH、中期 DASH、旧版 Lua 和混合结构
 - 按标题、分段名、UP 主、Bvid 或 Avid 搜索，并报告损坏条目、未完成分段和不可访问目录
 - 对大缓存库使用带会话索引令牌的分页摘要；只有聚焦某条缓存时才分页解析分段和播放结构，列表采用有界虚拟渲染
-- 使用系统默认播放器、mpv 或 VLC 播放，按队列逐项启动，避免批量弹窗
+- 使用系统默认播放器、mpv 或 VLC 播放；批量媒体准备后生成本地 UTF-8 M3U8 播放列表，只启动一次播放器。系统默认播放要求已关联支持 M3U8 的程序
 - 将单条或多选缓存导出为普通 MP4，并复用已有转码产物
 - 统计原始缓存、转码缓存、应用回收站、总占用和预计可释放空间
 - 默认把删除内容移动到应用回收站，支持列表、恢复、撤销和受保护的永久清理
@@ -26,7 +26,7 @@ Electron 44 自带运行所需的 Chromium，不依赖系统浏览器。桌面�
 - 渲染器资源通过只映射打包目录的 `blcm://` 自定义安全协议加载，不授予 `file://` 额外权限。
 - 打包时关闭 `ELECTRON_RUN_AS_NODE`、`NODE_OPTIONS` 和主进程调试参数，并限制应用只能从 ASAR 加载；Windows 包同时启用 ASAR 完整性校验。
 - 缓存和媒体操作在独立 Host 进程中执行，主进程通过逐行 JSON RPC 调用。
-- Host v2 响应在主进程边界做运行时结构校验；过期索引令牌不会触发隐式重扫，必须由用户显式重新扫描。
+- Host v3 响应在主进程边界做运行时结构校验；扫描返回有界问题明细，播放/导出返回结构化逐项失败。过期索引令牌不会触发隐式重扫，必须由用户显式重新扫描。
 - 桌面应用仅支持单实例；第二次启动会聚焦已有窗口。
 - Linux 构建固定使用 Chromium 的 X11/Ozone 后端；在 Wayland 桌面中依赖 XWayland 兼容层，不启用原生 Wayland 后端。
 
@@ -67,6 +67,10 @@ Linux 当前禁用不可逆删除：
 ## 可靠性与数据安全
 
 扫描不会因为单个损坏条目中断，具体问题明细默认最多保留 100 条，统计总数不受此限制。
+
+桌面展示扫描问题及定位入口，播放失败可以仅重试未成功项目；导出失败会撤销本批临时输出，并支持重试完整批次。长操作采用 10 分钟无进展超时，扫描、媒体处理与文件复制持续推进时可超过 10 分钟；取消与超时都会向 Host 发送取消请求。
+
+播放列表及其转码产物的保护记录在重启后仍生效，期限至少 6 小时或队列总时长加 1 小时，不受会话 64 项保护上限影响。保护到期后按维护策略清理；暂停播放器超出期限时，应用无法通过系统文件关联获知实际播放位置。
 
 需要转封装的媒体写入当前用户的本地应用数据目录。桌面端默认保留 30 天、总空间上限 10 GB；清理只处理受管目录中的过期或超限产物，并保护正在生成、最近创建、最近复用和刚交给播放器的文件。产物根据处理配置、缓存结构、规范化源路径、大小和修改时间生成指纹；源媒体在处理期间发生变化时，本次结果会被丢弃。
 
@@ -130,7 +134,7 @@ $env:BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_ARCHIVE_PATH = $archive
 dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj --configuration Release --filter "Category=FFmpegIntegration"
 ```
 
-`.github/workflows/ci.yml` 使用 .NET `10.0.400` 与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。自检会加载真实渲染器、读取隔离设置、通过 Preload/IPC 调用内置 Host，并扫描一条临时缓存夹具。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。稳定的 `ci-required` 汇总检查只有在隐私检查、完整构建/测试/打包矩阵和发行版安装包自检全部成功时才通过。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查是项目发布清单中的人工验收要求，但当前 GitHub workflow 不自动核验测试记录，发布维护者必须在触发发布前完成。
+`.github/workflows/ci.yml` 使用 .NET `10.0.400` 与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。自检会加载真实渲染器、读取隔离设置、通过 Preload/IPC 调用内置 Host，并扫描一条临时缓存夹具。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。稳定的 `ci-required` 汇总检查只有在隐私检查、完整构建/测试/打包矩阵和发行版安装包自检全部成功时才通过。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查仍需人工完成；转正流程会自动核验已提交的验收记录及安装包校验值，缺少必测记录时保持预览状态。
 
 ## CLI 示例
 
@@ -168,7 +172,7 @@ dotnet run --project BiliBiliLocalCacheManager.Cli -- delete 187742 --root "D:\B
 pwsh ./scripts/build-release.ps1 -Version 0.4.0
 ```
 
-Windows Release 可加 `-RunFfmpegIntegrationTests`；`-SkipTests` 与该选项不能同时使用。产物写入 `artifacts/release/`。推送 `v0.4.0` 形式的标签会触发 `.github/workflows/release.yml`，分别生成 Windows 与 Linux 包，合并校验值并创建 GitHub Release。
+Windows Release 可加 `-RunFfmpegIntegrationTests`；`-SkipTests` 与该选项不能同时使用。产物写入 `artifacts/release/`。推送 `v0.4.0` 形式的标签会触发 `.github/workflows/release.yml`，分别生成 Windows 与 Linux 包，合并校验值并创建公开预览 GitHub Release。完成真实桌面验收后，按 [验收记录说明](docs/acceptance/README.md) 从默认分支触发 promote-release，校验同一批文件并转为正式版。带 rc/beta 等后缀的标签不能转正。
 
 发布前必须同步更新 `Directory.Build.props`、`BiliBiliLocalCacheManager.Desktop/package.json` 和 `CHANGELOG.md` 中的版本信息。
 

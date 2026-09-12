@@ -9,6 +9,9 @@ public sealed class FileSystemCacheStorageStatisticsService : ICacheStorageStati
     public CacheStorageStatistics GetStatistics(
         string rootDirectory,
         CancellationToken cancellationToken = default)
+        => GetStatistics(rootDirectory, cancellationToken, null);
+
+    public CacheStorageStatistics GetStatistics(string rootDirectory, CancellationToken cancellationToken, Action? activity)
     {
         var root = CacheRootSafety.ValidatePhysicalRoot(rootDirectory);
         cancellationToken.ThrowIfCancellationRequested();
@@ -51,7 +54,7 @@ public sealed class FileSystemCacheStorageStatisticsService : ICacheStorageStati
                 }
 
                 managedEntryCount = SaturatingAdd(managedEntryCount, 1);
-                var inspection = InspectDirectoryTree(path, cancellationToken);
+                var inspection = InspectDirectoryTree(path, cancellationToken, activity);
                 fileCount = SaturatingAdd(fileCount, inspection.FileCount);
                 totalBytes = SaturatingAdd(totalBytes, inspection.TotalBytes);
             }
@@ -84,7 +87,8 @@ public sealed class FileSystemCacheStorageStatisticsService : ICacheStorageStati
 
     private static DirectoryInspection InspectDirectoryTree(
         string directoryPath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? activity = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var attributes = File.GetAttributes(directoryPath);
@@ -103,6 +107,7 @@ public sealed class FileSystemCacheStorageStatisticsService : ICacheStorageStati
                      SearchOption.TopDirectoryOnly))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            activity?.Invoke();
             attributes = File.GetAttributes(path);
             if (attributes.HasFlag(FileAttributes.ReparsePoint))
             {
@@ -112,7 +117,7 @@ public sealed class FileSystemCacheStorageStatisticsService : ICacheStorageStati
 
             if (attributes.HasFlag(FileAttributes.Directory))
             {
-                var child = InspectDirectoryTree(path, cancellationToken);
+                var child = InspectDirectoryTree(path, cancellationToken, activity);
                 fileCount = SaturatingAdd(fileCount, child.FileCount);
                 totalBytes = SaturatingAdd(totalBytes, child.TotalBytes);
                 continue;

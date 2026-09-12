@@ -3,9 +3,10 @@ import type { SVGProps } from 'react';
 export type IconName =
   | 'library' | 'storage' | 'trash' | 'settings' | 'diagnostics'
   | 'search' | 'folder' | 'refresh' | 'play' | 'export' | 'delete'
-  | 'restore' | 'scan' | 'stop' | 'check' | 'warning' | 'film';
+  | 'restore' | 'scan' | 'stop' | 'check' | 'warning' | 'film' | 'close';
 
 const paths: Record<IconName, React.ReactNode> = {
+  close: <path d="m6 6 12 12M18 6 6 18" />,
   library: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z" /><path d="M4 5.5v16A2.5 2.5 0 0 1 6.5 19H20" /></>,
   storage: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7" /></>,
   trash: <><path d="M3 6h18M8 6V3h8v3m3 0-1 15H6L5 6" /><path d="M10 10v7m4-7v7" /></>,
