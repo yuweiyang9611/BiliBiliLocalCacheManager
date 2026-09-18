@@ -134,11 +134,11 @@ describe('Desktop Host cancellation', () => {
     const bridge = new DesktopHostBridge();
     try {
       const call = bridge.call('export');
-      const rejection = expect(call.promise).rejects.toMatchObject({ code: 'HOST_TIMEOUT' });
+      const rejection = expect(call.promise).rejects.toMatchObject({ code: 'cancelled' });
       await vi.advanceTimersByTimeAsync(0);
       const progress = (bytesCopied: number, requestId = call.id, operation = 'export') =>
         fake.child.stdout.emit('data', JSON.stringify({ event: 'progress', payload: {
-          requestId, operation, stage: 'copying', details: { bytesCopied },
+          requestId, operation, stage: 'copying', phase: 'copy', details: { bytesCopied },
         } }) + '\n');
       await vi.advanceTimersByTimeAsync(500_000);
       progress(100);
@@ -150,6 +150,7 @@ describe('Desktop Host cancellation', () => {
       progress(300, 'another-request');
       progress(400, call.id, 'scan');
       await vi.advanceTimersByTimeAsync(100_001);
+      fake.child.stdout.emit('data', JSON.stringify({ id: call.id, error: { code: 'cancelled', message: 'Cancelled' } }) + '\n');
       await rejection;
       expect(fake.writes.filter(value => value.method === 'cancel')).toHaveLength(1);
       await bridge.dispose();
@@ -163,13 +164,15 @@ describe('Desktop Host cancellation', () => {
     const bridge = new DesktopHostBridge();
     try {
       const call = bridge.call('play');
-      const rejection = expect(call.promise).rejects.toMatchObject({ code: 'HOST_TIMEOUT' });
+      const rejection = expect(call.promise).rejects.toMatchObject({ code: 'cancelled' });
       await vi.advanceTimersByTimeAsync(0);
       await vi.advanceTimersByTimeAsync(500_000);
       fake.child.stdout.emit('data', JSON.stringify({ event: 'progress', payload: {
         requestId: call.id, operation: 'play', stage: 'waiting for lock', details: { elapsedMilliseconds: 500_000 },
       } }) + '\n');
       await vi.advanceTimersByTimeAsync(100_001);
+      expect(fake.writes.filter(value => value.method === 'cancel')).toHaveLength(1);
+      fake.child.stdout.emit('data', JSON.stringify({ id: call.id, error: { code: 'cancelled', message: 'Cancelled' } }) + '\n');
       await rejection;
       await bridge.dispose();
     } finally { vi.useRealTimers(); }
@@ -192,7 +195,7 @@ describe('Desktop Host cancellation', () => {
     await bridge.dispose();
   });
 
-  it('rejects locally and sends Host cancel for an active call', async () => {
+  it('waits for the Host terminal response after requesting cancellation', async () => {
     const fake = createFakeHostProcess();
     hostMocks.spawn.mockReturnValue(fake.child);
     const bridge = new DesktopHostBridge();
@@ -201,6 +204,7 @@ describe('Desktop Host cancellation', () => {
     await vi.waitFor(() => expect(fake.writes).toHaveLength(1));
     expect(call.cancel()).toBe(true);
     expect(call.cancel()).toBe(false);
+    fake.child.stdout.emit('data', JSON.stringify({ id: call.id, error: { code: 'CANCELLED', message: 'Cancelled' } }) + '\n');
     await expect(call.promise).rejects.toMatchObject({ code: 'CANCELLED' });
 
     expect(fake.writes[1]).toMatchObject({
@@ -220,6 +224,109 @@ describe('Desktop Host cancellation', () => {
 
     expect(unavailable).toHaveBeenCalledOnce();
     expect(unavailable).toHaveBeenCalledWith(expect.stringContaining('找不到 .NET Desktop Host'));
+  });
+});
+
+describe('Host lifecycle and confirmed cancellation', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('waits beyond the confirmation deadline and accepts a late successful commit', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const state = vi.fn();
+    bridge.on('operation-state', state);
+    const call = bridge.call('export');
+    const settled = vi.fn();
+    call.promise.then(settled, settled);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(call.cancel()).toBe(true);
+    expect(call.cancel()).toBe(false);
+    await vi.advanceTimersByTimeAsync(29_000);
+    fake.child.stdout.emit('data', JSON.stringify({ event: 'progress', payload: {
+      requestId: call.id, operation: 'export', stage: 'copying', phase: 'copy', current: 1, details: { bytesCopied: 100 },
+    } }) + '\n');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'unconfirmed', requestId: call.id }));
+    expect(settled).not.toHaveBeenCalled();
+    expect(fake.child.kill).not.toHaveBeenCalled();
+    await expect(bridge.call('trash.move').promise).rejects.toMatchObject({ code: 'OUTCOME_UNCONFIRMED' });
+    fake.child.stdout.emit('data', JSON.stringify({ id: call.id, result: { published: true } }) + '\n');
+    await expect(call.promise).resolves.toEqual({ published: true });
+    expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'settled' }));
+    expect(vi.getTimerCount()).toBe(0);
+    await bridge.dispose();
+  });
+
+  it('requests cancellation on a media timeout without declaring an uncommitted outcome', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const state = vi.fn();
+    bridge.on('operation-state', state);
+    const call = bridge.call('play', {}, 10);
+    await vi.advanceTimersByTimeAsync(30_010);
+    expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'unconfirmed' }));
+    const rejected = expect(call.promise).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+    fake.child.emit('exit', 1, null);
+    await rejected;
+    expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'unknown' }));
+    await expect(bridge.call('play').promise).rejects.toMatchObject({ code: 'OUTCOME_UNCONFIRMED' });
+    expect(bridge.acknowledgeUncertain('unrelated')).toBe(false);
+    expect(bridge.acknowledgeUncertain(call.id)).toBe(true);
+    expect(bridge.acknowledgeUncertain(call.id)).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await bridge.dispose();
+  });
+
+  it('isolates delayed data, error, exit and write callbacks across repeated restarts', async () => {
+    vi.useFakeTimers();
+    const bridge = new DesktopHostBridge();
+    const unavailable = vi.fn();
+    bridge.on('unavailable', unavailable);
+    let previous: ReturnType<typeof createFakeHostProcess> | undefined;
+    let callbacks: { data: Function; error: Function; write: (error?: Error | null) => void } | undefined;
+    for (let i = 0; i < 3; i++) {
+      const fake = createFakeHostProcess();
+      fake.child.kill.mockImplementation(() => { fake.child.killed = true; return true; });
+      hostMocks.spawn.mockReturnValue(fake.child);
+      const call = bridge.call('search');
+      await vi.advanceTimersByTimeAsync(0);
+      if (previous && callbacks) {
+        callbacks.data(JSON.stringify({ id: call.id, result: 'poison' }) + '\n');
+        callbacks.error(new Error('late error'));
+        callbacks.write(new Error('late write'));
+        previous.child.emit('exit', 1, null);
+        expect(previous.child.stdout.listenerCount('data')).toBe(0);
+        expect(previous.child.listenerCount('error')).toBe(0);
+      }
+      callbacks = { data: fake.child.stdout.listeners('data')[0], error: fake.child.listeners('error')[0],
+        write: fake.child.stdin.write.mock.calls[0][2] };
+      if (i < 2) {
+        const rejection = expect(call.promise).rejects.toMatchObject({ code: 'HOST_PROTOCOL_ERROR' });
+        fake.child.stdout.emit('data', 'invalid json\n');
+        await rejection;
+      } else {
+        fake.child.stdout.emit('data', JSON.stringify({ id: call.id, result: 'healthy' }) + '\n');
+        await expect(call.promise).resolves.toBe('healthy');
+      }
+      previous = fake;
+    }
+    expect(unavailable).toHaveBeenCalledTimes(2);
+    await bridge.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not spawn a process when disposal races initial startup', async () => {
+    const bridge = new DesktopHostBridge();
+    const call = bridge.call('health');
+    const rejected = expect(call.promise).rejects.toMatchObject({ code: 'APP_CLOSING' });
+    await bridge.dispose();
+    await rejected;
+    expect(hostMocks.spawn).not.toHaveBeenCalled();
+    await expect(bridge.call('health').promise).rejects.toMatchObject({ code: 'APP_CLOSING' });
   });
 });
 

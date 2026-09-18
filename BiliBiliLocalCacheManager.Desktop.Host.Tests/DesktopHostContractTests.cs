@@ -966,16 +966,35 @@ public sealed class DesktopHostContractTests
         Assert.Contains(progress, value => value.Stage == "copying" && value.Details is not null);
     }
 
+    [Fact]
+    public async Task PlaybackBatch_CancellationAfterLaunchStillReturnsActualSuccess()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "First");
+        using var cancellation = new CancellationTokenSource();
+        var launcher = new QueueRecorder { AfterLaunch = cancellation.Cancel };
+        var application = new DesktopHostApplication(launcher);
+        var result = await DispatchAsync(application, "play", JsonSerializer.Serialize(new {
+            rootPath = workspace.CacheRoot, targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } } }
+        }), cancellation.Token);
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(1, launcher.Calls);
+        Assert.Equal(1, result.GetProperty("queued").GetInt32());
+        Assert.Empty(result.GetProperty("failures").EnumerateArray());
+    }
+
     private sealed class QueueRecorder : BiliBiliLocalCacheManager.Playback.Contracts.IPlaybackLauncher
     {
         public int Calls;
         public string? Path;
+        public Action? AfterLaunch;
         public BiliBiliLocalCacheManager.Playback.Models.PlaybackLaunchResult Launch(
             BiliBiliLocalCacheManager.Playback.Models.PlaybackMaterializationResult value,
             BiliBiliLocalCacheManager.Playback.Models.PlaybackLaunchOptions? options = null)
         {
             Calls++;
             Path = value.OutputPath;
+            AfterLaunch?.Invoke();
             return BiliBiliLocalCacheManager.Playback.Models.PlaybackLaunchResult.Success("Handed off", "test");
         }
     }

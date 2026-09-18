@@ -62,6 +62,53 @@ afterEach(() => {
 });
 
 describe('IPC cancellable request tracking', () => {
+  it('preempts only searches belonging to the same sender', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const first = trustedEvent(100);
+    const other = trustedEvent(101);
+    const old = invoke(channels.search, first, validSearchRequest());
+    const oldRejected = expect(old).rejects.toThrow('操作已取消');
+    const otherSearch = invoke(channels.search, other, validSearchRequest());
+    const details = invoke(channels.cacheDetails, first, { indexToken: 'index-token-1', avid: '100' });
+    const next = invoke(channels.search, first, { ...validSearchRequest(), keyword: 'latest' });
+    await oldRejected;
+    expect(fake.cancelledIds).toEqual([fake.calls[0].id]);
+    fake.pending.get(fake.calls[1].id)!.resolve(validScanResult());
+    fake.pending.get(fake.calls[2].id)!.resolve(validCacheDetails());
+    fake.pending.get(fake.calls[3].id)!.resolve(validScanResult());
+    await Promise.all([otherSearch, details, next]);
+    expect(await invoke(channels.searchCancel, first)).toBe(false);
+  });
+
+  it('routes operation state and acknowledgement only to the originating sender', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const owner = trustedEvent(102);
+    const other = trustedEvent(103);
+    const call = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false);
+    const rejected = expect(call).rejects.toThrow('OUTCOME_UNKNOWN');
+    const id = fake.calls[0].id;
+    const payload = { requestId: id, operation: 'play', state: 'unknown', sideEffects: true };
+    fake.bridge.emit('operation-state', payload);
+    fake.pending.get(id)!.reject(new Error('OUTCOME_UNKNOWN'));
+    await rejected;
+    expect(owner.sender.send).toHaveBeenCalledWith(channels.operationState, payload);
+    expect(other.sender.send).not.toHaveBeenCalled();
+    const ack = vi.fn(() => {
+      fake.bridge.emit('operation-state', { ...payload, state: 'settled' });
+      return true;
+    });
+    fake.bridge.acknowledgeUncertain = ack;
+    expect(await invoke(channels.acknowledgeUncertain, other, id)).toBe(false);
+    expect(electronMocks.showMessageBox).not.toHaveBeenCalled();
+    electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
+    expect(await invoke(channels.acknowledgeUncertain, owner, id)).toBe(false);
+    expect(ack).not.toHaveBeenCalled();
+    electronMocks.showMessageBox.mockResolvedValue({ response: 1 });
+    expect(await invoke(channels.acknowledgeUncertain, owner, id)).toBe(true);
+    expect(ack).toHaveBeenCalledWith(id);
+  });
   it('cancels every concurrent request from the renderer, including search', async () => {
     const fake = createDeferredBridge();
     unregister = registerIpc(fake.bridge, () => null);
@@ -411,6 +458,7 @@ function trustedEvent(senderId: number): IpcMainInvokeEvent {
   frame.top = frame;
   const sender = Object.assign(new EventEmitter(), {
     id: senderId,
+    send: vi.fn(),
     isDestroyed: () => false,
   });
   return {

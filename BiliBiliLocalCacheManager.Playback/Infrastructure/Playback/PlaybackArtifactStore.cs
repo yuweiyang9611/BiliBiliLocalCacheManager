@@ -15,11 +15,13 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
     public static PlaybackArtifactStore Shared { get; } = new();
 
     private readonly Action? _activity;
+    private readonly TimeProvider _timeProvider;
 
-    public PlaybackArtifactStore(string? rootDirectory = null, Action? activity = null)
+    public PlaybackArtifactStore(string? rootDirectory = null, Action? activity = null, TimeProvider? timeProvider = null)
     {
         RootDirectory = Path.GetFullPath(rootDirectory ?? GetDefaultRootDirectory());
         _activity = activity;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public string RootDirectory { get; }

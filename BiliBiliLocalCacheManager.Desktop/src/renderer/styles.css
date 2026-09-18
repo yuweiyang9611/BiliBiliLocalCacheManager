@@ -218,3 +218,5 @@ dl { margin: 0; } dl > div { display: flex; justify-content: space-between; padd
 .result-list li > div { min-width: 0; }
 .result-list p, .result-list code { white-space: normal; overflow-wrap: anywhere; }
 .result-panel summary { cursor: pointer; }
+.operation-state { margin: 0; padding: 12px 24px; flex-shrink: 0; }
+.operation-state p { overflow-wrap: anywhere; }

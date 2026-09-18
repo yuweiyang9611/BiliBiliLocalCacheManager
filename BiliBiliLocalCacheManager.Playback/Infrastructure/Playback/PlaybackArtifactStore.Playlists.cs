@@ -48,7 +48,7 @@ public sealed partial class PlaybackArtifactStore
         catch { return DateTimeOffset.MaxValue; }
     }
 
-    private bool HasActiveProtection(string path) => ReadProtection(path) > DateTimeOffset.UtcNow;
+    private bool HasActiveProtection(string path) => ReadProtection(path) > _timeProvider.GetUtcNow();
 
     public string CreatePlaylist(IReadOnlyList<PlaybackQueueItem> items, DateTimeOffset until, CancellationToken cancellationToken = default)
     {

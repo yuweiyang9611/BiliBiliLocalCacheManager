@@ -34,12 +34,12 @@ public sealed partial class FfmpegCoreTranscoder
         if (duration > TimeSpan.Zero)
         {
             processor.NotifyOnProgress(
-                percentage => tracker.Report(fallbackStage, percentage),
+                percentage => tracker.Report(fallbackStage, percentage, "fallback"),
                 duration);
         }
         else
         {
-            processor.NotifyOnProgress(time => tracker.ReportTime(fallbackStage, time));
+            processor.NotifyOnProgress(time => tracker.ReportTime(fallbackStage, time, "fallback"));
         }
 
         var succeeded = await processor

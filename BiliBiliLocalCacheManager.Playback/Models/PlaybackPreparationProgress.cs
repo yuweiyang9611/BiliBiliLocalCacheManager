@@ -5,4 +5,5 @@ public sealed record PlaybackPreparationProgress(
     double? Percentage,
     TimeSpan Elapsed,
     TimeSpan? EstimatedRemaining,
-    double? ProcessedSeconds = null);
+    double? ProcessedSeconds = null,
+    string? Phase = null);

@@ -186,6 +186,7 @@ export interface SelectionTarget {
 }
 
 export interface HostProgress {
+  phase?: 'scan' | 'copy' | 'measure' | 'prepare' | 'probe' | 'concat' | 'mux' | 'fallback';
   requestId: string;
   operation: string;
   stage: string;
@@ -206,6 +207,9 @@ export interface DesktopInfo {
 }
 
 export interface CacheManagerApi {
+  cancelSearch(): Promise<boolean>;
+  acknowledgeUncertain(requestId: string): Promise<boolean>;
+  onOperationState(listener: (state: OperationState) => void): () => void;
   health(): Promise<HostHealth>;
   getInitialState(): Promise<InitialState>;
   getSettings(): Promise<AppSettings>;
@@ -231,6 +235,13 @@ export interface CacheManagerApi {
   getDesktopInfo(): Promise<DesktopInfo>;
   onProgress(listener: (progress: HostProgress) => void): () => void;
   onHostUnavailable(listener: (message: string) => void): () => void;
+}
+
+export interface OperationState {
+  requestId: string;
+  operation: string;
+  state: 'cancelling' | 'unconfirmed' | 'unknown' | 'settled';
+  sideEffects: boolean;
 }
 
 export const defaultSettings: AppSettings = {
