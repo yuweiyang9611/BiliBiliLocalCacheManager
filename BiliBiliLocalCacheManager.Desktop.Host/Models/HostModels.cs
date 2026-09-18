@@ -16,7 +16,8 @@ internal sealed record HostProgressEvent(
     int? Current = null,
     int? Total = null,
     string? Message = null,
-    object? Details = null);
+    object? Details = null,
+    string? Phase = null);
 
 internal sealed class DesktopSettings
 {

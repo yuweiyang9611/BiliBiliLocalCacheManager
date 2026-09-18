@@ -71,6 +71,34 @@ public sealed class IndexSnapshotTests(ITestOutputHelper output)
         output.WriteLine($"items={count} cancelled-query-ms={timer.Elapsed.TotalMilliseconds:F2}");
     }
 
+    [Theory]
+    [InlineData(10_000)]
+    [InlineData(50_000)]
+    public async Task BenchmarkCancellationDuringUncachedSearch(int count)
+    {
+        var snapshot = Snapshot(count);
+        var options = new CacheSearchOptions {
+            Keyword = string.Join(' ', Enumerable.Range(0, 60).Select(i => "absent" + i)),
+            SplitKeywords = true, RequireAllKeywords = false
+        };
+        using var cancellation = new CancellationTokenSource();
+        var timer = Stopwatch.StartNew();
+        long requested = 0;
+        using var registration = cancellation.Token.Register(() => Interlocked.Exchange(ref requested, Stopwatch.GetTimestamp()));
+        cancellation.CancelAfter(TimeSpan.FromMilliseconds(1));
+        try
+        {
+            await Task.Run(() => snapshot.Search(options, cancellation.Token));
+            output.WriteLine($"items={count} uncached-search-finished-before-cancellation-ms={timer.Elapsed.TotalMilliseconds:F2}");
+        }
+        catch (OperationCanceledException)
+        {
+            var observed = Stopwatch.GetElapsedTime(Interlocked.Read(ref requested));
+            output.WriteLine($"items={count} mid-query-cancellation-ms={observed.TotalMilliseconds:F2} total-ms={timer.Elapsed.TotalMilliseconds:F2}");
+            Assert.Equal(0, snapshot.SearchExecutions);
+        }
+    }
+
     private static DesktopHostApplication.CurrentIndexSnapshot Snapshot(int count)
     {
         var epoch = DateTimeOffset.UnixEpoch;

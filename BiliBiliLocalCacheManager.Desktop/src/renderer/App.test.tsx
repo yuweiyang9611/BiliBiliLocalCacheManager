@@ -91,6 +91,9 @@ function createApi(): CacheManagerApi {
     scan: vi.fn().mockResolvedValue(createCachePage()),
     locateScanIssue: vi.fn().mockResolvedValue(true),
     cancel: vi.fn().mockResolvedValue(true),
+    cancelSearch: vi.fn().mockResolvedValue(true),
+    acknowledgeUncertain: vi.fn().mockResolvedValue(true),
+    onOperationState: vi.fn().mockReturnValue(() => undefined),
     search: vi.fn().mockResolvedValue(createCachePage()),
     getCacheDetails: vi.fn().mockResolvedValue(createCacheDetails()),
     cancelCacheDetails: vi.fn().mockResolvedValue(false),
@@ -180,6 +183,50 @@ describe('desktop renderer', () => {
     fireEvent.click(screen.getByRole('button', { name: '重试完整批次' }));
     await waitFor(() => expect(api.exportMedia).toHaveBeenCalledTimes(2));
     expect(vi.mocked(api.exportMedia).mock.calls[1][1]).toEqual([{ avid: '100' }]);
+  });
+
+  it('shows pending cancellation and then the actual successful export result', async () => {
+    const pending = deferred<Awaited<ReturnType<CacheManagerApi['exportMedia']>>>();
+    vi.mocked(api.exportMedia).mockReturnValue(pending.promise);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    const state = vi.mocked(api.onOperationState).mock.calls[0][0];
+    await act(async () => state({ requestId: 'export-1', operation: 'export', state: 'cancelling', sideEffects: true }));
+    expect(screen.getByRole('button', { name: '正在取消' })).toBeDisabled();
+    await act(async () => state({ requestId: 'export-1', operation: 'export', state: 'unconfirmed', sideEffects: true }));
+    expect(screen.getByText('结果待确认')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '导出' })).toBeDisabled();
+    expect(screen.queryByText('导出结果：已取消')).not.toBeInTheDocument();
+    await act(async () => {
+      state({ requestId: 'export-1', operation: 'export', state: 'settled', sideEffects: true });
+      pending.resolve({ published: true, exportedCount: 1, outputPath: 'result.mp4', failures: [] });
+    });
+    expect(await screen.findByText('导出结果：全部成功')).toBeInTheDocument();
+    expect(screen.queryByText('结果待确认')).not.toBeInTheDocument();
+  });
+
+  it('does not claim an unknown export is unpublished and requires acknowledgement before retry', async () => {
+    const pending = deferred<Awaited<ReturnType<CacheManagerApi['exportMedia']>>>();
+    vi.mocked(api.exportMedia).mockReturnValue(pending.promise);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    const state = vi.mocked(api.onOperationState).mock.calls[0][0];
+    await act(async () => {
+      state({ requestId: 'export-1', operation: 'export', state: 'unknown', sideEffects: true });
+      pending.reject(new Error('OUTCOME_UNKNOWN: 操作结果无法确认'));
+    });
+    expect(await screen.findByText('导出结果：结果无法确认')).toBeInTheDocument();
+    expect(screen.queryByText(/本批导出未发布/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重试完整批次' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '已核对结果' }));
+    await waitFor(() => expect(api.acknowledgeUncertain).toHaveBeenCalledWith('export-1'));
+    expect(screen.getByRole('button', { name: '重试完整批次' })).toBeDisabled();
+    await act(async () => state({ requestId: 'export-1', operation: 'export', state: 'settled', sideEffects: true }));
+    expect(screen.getByRole('button', { name: '重试完整批次' })).not.toBeDisabled();
   });
 
   it('loads settings and cache rows from Desktop Host', async () => {
@@ -494,8 +541,6 @@ describe('desktop renderer', () => {
     fireEvent.change(input, { target: { value: '最新条件' } });
     expect(api.search).toHaveBeenCalledTimes(1);
 
-    await act(async () => { oldSearch.resolve(oldResult); });
-    expect(screen.queryByText('旧搜索结果')).not.toBeInTheDocument();
     await waitFor(() => expect(api.search).toHaveBeenCalledTimes(2));
     expect(api.search).toHaveBeenLastCalledWith(expect.objectContaining({
       indexToken,
@@ -506,6 +551,7 @@ describe('desktop renderer', () => {
     expect(screen.queryByText('旧搜索结果')).not.toBeInTheDocument();
 
     await act(async () => { latestSearch.resolve(latestResult); });
+    await act(async () => { oldSearch.resolve(oldResult); });
     expect(await screen.findByText('最新搜索结果')).toBeInTheDocument();
     expect(screen.queryByText('旧搜索结果')).not.toBeInTheDocument();
   });

@@ -263,7 +263,7 @@ internal sealed partial class DesktopHostApplication
                     value.ProcessedAvidDirectories,
                     value.ProcessedSegmentDirectories,
                     value.IncludedEntries
-                })));
+                }, Phase: "scan")));
 
         var report = await Task.Run(
             () => _cacheManager.BuildIndexWithReport(
@@ -739,12 +739,13 @@ internal sealed partial class DesktopHostApplication
         }
         var prepared = new List<(PlaybackQueueItem Item, BiliVideoCache Cache, int Page)>();
         var store = new PlaybackArtifactStore(_artifactStore.RootDirectory);
-        var protectionSeconds = Math.Max(6 * 3600, targets.Sum(target =>
-            target.Cache.Segments.Where(segment => segment.PageIndex == target.Page)
-                .Select(segment => segment.TotalDuration.TotalSeconds).DefaultIfEmpty().Max()) + 3600);
-        var until = DateTimeOffset.UtcNow.AddSeconds(protectionSeconds);
+        await using var protection = new PlaybackPreparationProtection(store, cancellationToken);
+        PlaybackBatchResultDto ProtectionFailure() => new(0, failures.Concat(targets.Select(target =>
+            new MediaFailureDto(target.Cache.Avid.ToString(), target.Page, BoundWireString(target.Cache.Title),
+                BoundWireString("Playback preparation protection failed: " + protection.Failure?.Message)))).ToArray());
         for (var ordinal = 0; ordinal < targets.Count; ordinal++)
         {
+            if (protection.Failure is not null) return ProtectionFailure();
             cancellationToken.ThrowIfCancellationRequested();
             var target = targets[ordinal];
             try
@@ -753,21 +754,24 @@ internal sealed partial class DesktopHostApplication
                 var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
                     ReportProgress(new HostProgressEvent(requestId, "play", value.Stage, value.Percentage,
                         ordinal + 1, targets.Count, $"av{target.Cache.Avid} P{target.Page}",
-                        new { processedSeconds = value.ProcessedSeconds })));
-                var materialization = await _playbackService.MaterializeAsync(plan.SelectedPlan, progress, cancellationToken);
+                        new { processedSeconds = value.ProcessedSeconds }, Phase: value.Phase)));
+                var materialization = await _playbackService.MaterializeAsync(plan.SelectedPlan, progress, protection.Token);
                 if (!materialization.Succeeded || string.IsNullOrWhiteSpace(materialization.OutputPath))
                     throw new IOException(materialization.Message);
                 PlaybackBatchLauncher.ValidateLocalFile(materialization.OutputPath);
-                store.ProtectUntilIfManaged(materialization.OutputPath, until, cancellationToken);
+                protection.Register(materialization.OutputPath);
                 prepared.Add((new PlaybackQueueItem(materialization.OutputPath, target.Cache.Title + " - " + plan.PartName,
                     plan.SelectedPlan.Duration), target.Cache, target.Page));
             }
+            catch (Exception) when (protection.Failure is not null) { return ProtectionFailure(); }
             catch (OperationCanceledException) { throw; }
             catch (Exception exception)
             {
                 failures.Add(new(target.Cache.Avid.ToString(), target.Page, BoundWireString(target.Cache.Title), BoundWireString(exception.Message)));
             }
         }
+        await protection.StopAsync();
+        if (protection.Failure is not null) return ProtectionFailure();
         cancellationToken.ThrowIfCancellationRequested();
         var queued = 0;
         if (prepared.Count > 0)
@@ -776,10 +780,11 @@ internal sealed partial class DesktopHostApplication
             {
                 var launcher = new PlaybackBatchLauncher(store, _desktopPlaybackLauncher);
                 var result = launcher.LaunchBatch(prepared.Select(value => value.Item).ToArray(),
-                    new PlaybackLaunchOptions { PreferredPlayer = player }, cancellationToken);
+                    new PlaybackLaunchOptions { PreferredPlayer = player }, protection.Token);
                 if (!result.Succeeded) throw new IOException(result.Message);
                 queued = prepared.Count;
             }
+            catch (Exception) when (protection.Failure is not null) { return ProtectionFailure(); }
             catch (OperationCanceledException) { throw; }
             catch (Exception exception)
             {
@@ -828,7 +833,7 @@ internal sealed partial class DesktopHostApplication
                     var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
                         ReportProgress(new HostProgressEvent(requestId, "export", value.Stage, value.Percentage,
                             ordinal + 1, requests.Count, $"av{target.Avid} P{plan.PageIndex}",
-                            new { processedSeconds = value.ProcessedSeconds })));
+                            new { processedSeconds = value.ProcessedSeconds }, Phase: value.Phase)));
                     var materialization = await _playbackService.MaterializeAsync(plan.SelectedPlan, progress, cancellationToken);
                     if (!materialization.Succeeded || string.IsNullOrWhiteSpace(materialization.OutputPath))
                         throw new IOException(materialization.Message);
@@ -840,7 +845,7 @@ internal sealed partial class DesktopHostApplication
                         : stagingFile!;
                     await CopyAtomicallyAsync(materialization.OutputPath, output, cancellationToken, bytes =>
                         ReportProgress(new HostProgressEvent(requestId, "export", "copying", Current: ordinal + 1,
-                            Total: requests.Count, Details: new { bytesCopied = bytes })));
+                            Total: requests.Count, Details: new { bytesCopied = bytes }, Phase: "copy")));
                     preparedCount++;
                 }
                 catch (OperationCanceledException) { throw; }
@@ -921,7 +926,7 @@ internal sealed partial class DesktopHostApplication
                     value.ProcessedAvidDirectories,
                     value.ProcessedSegmentDirectories,
                     value.IncludedEntries
-                })));
+                }, Phase: "scan")));
         var options = new CacheIndexBuildOptions
         {
             IncludeIncompleteEntries = includeIncomplete
@@ -1895,7 +1900,7 @@ internal sealed partial class DesktopHostApplication
             cancellationToken.ThrowIfCancellationRequested();
             count++;
             if (Environment.TickCount64 < nextReport) return;
-            ReportProgress(new HostProgressEvent(requestId, operation, "measuring", Current: count));
+            ReportProgress(new HostProgressEvent(requestId, operation, "measuring", Current: count, Phase: "measure"));
             nextReport = Environment.TickCount64 + 250;
         };
     }

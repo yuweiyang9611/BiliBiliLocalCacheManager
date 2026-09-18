@@ -158,13 +158,13 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
             if (totalDuration > TimeSpan.Zero)
             {
                 processor.NotifyOnProgress(
-                    percentage => tracker.Report(concatStage, percentage),
+                    percentage => tracker.Report(concatStage, percentage, "concat"),
                     totalDuration);
             }
             else
             {
                 tracker.Report(concatStage, percentage: null);
-                processor.NotifyOnProgress(time => tracker.ReportTime(concatStage, time));
+                processor.NotifyOnProgress(time => tracker.ReportTime(concatStage, time, "concat"));
             }
 
             var succeeded = await processor
@@ -251,13 +251,13 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         if (duration > TimeSpan.Zero)
         {
             processor.NotifyOnProgress(
-                percentage => tracker.Report(muxStage, percentage),
+                percentage => tracker.Report(muxStage, percentage, "mux"),
                 duration);
         }
         else
         {
             tracker.Report(muxStage, percentage: null);
-            processor.NotifyOnProgress(time => tracker.ReportTime(muxStage, time));
+            processor.NotifyOnProgress(time => tracker.ReportTime(muxStage, time, "mux"));
         }
 
         try
@@ -320,12 +320,14 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         private string? _stage;
         private double _lastPercentage;
 
-        public void ReportTime(string stage, TimeSpan processed)
+        public void ReportTime(string stage, TimeSpan processed, string phase)
         {
-            progress?.Report(new PlaybackPreparationProgress(stage, null, _stopwatch.Elapsed, null, processed.TotalSeconds));
+            progress?.Report(new PlaybackPreparationProgress(stage, null, _stopwatch.Elapsed, null, processed.TotalSeconds, phase));
         }
 
-        public void Report(string stage, double? percentage)
+        public void Report(string stage, double? percentage) => Report(stage, percentage, "prepare");
+
+        public void Report(string stage, double? percentage, string phase)
         {
             if (progress is null)
             {
@@ -369,7 +371,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
                     stage,
                     normalized,
                     elapsed,
-                    remaining));
+                    remaining, Phase: phase));
             }
         }
     }

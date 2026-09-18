@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Reliability
+
+- Isolate Host process callbacks and requests across restarts and shutdown.
+- Confirm cancellation using terminal Host results; retain uncertain outcomes and guard against duplicate side effects.
+- Renew playback preparation protection and use monotonic, phase-scoped progress for idle deadlines.
+- Preempt superseded searches per renderer and ignore stale successes and failures.
+
 ### Added
 
 - Add Host protocol v3 scan issue details, root-bound location actions, structured playback/export outcomes and targeted retries.

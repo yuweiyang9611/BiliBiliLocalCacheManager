@@ -9,6 +9,7 @@ import type {
   CachePage,
   DesktopInfo,
   HostProgress,
+  OperationState,
   JsonObject,
   PlayerPreference,
   SearchRequest,
@@ -43,6 +44,8 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     sender: IpcMainInvokeEvent['sender'];
     calls: Map<string, HostCall<unknown>>;
     detailCallIds: Set<string>;
+    searchCallIds: Set<string>;
+    uncertainIds: Set<string>;
     onDestroyed(): void;
   };
   const activeRequests = new Map<number, SenderState>();
@@ -52,7 +55,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     ipcMain.handle(channel, listener);
   };
   const host = <T>(method: string, params: JsonObject = {}, timeoutMs?: number) => bridge.call<T>(method, params, timeoutMs);
-  const track = async <T>(event: IpcMainInvokeEvent, call: HostCall<T>, kind?: 'cache-details'): Promise<T> => {
+  const track = async <T>(event: IpcMainInvokeEvent, call: HostCall<T>, kind?: 'cache-details' | 'search'): Promise<T> => {
     const sender = event.sender;
     const senderId = sender.id;
     if (sender.isDestroyed()) {
@@ -67,19 +70,22 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
         activeRequests.delete(senderId);
         for (const activeCall of current.calls.values()) activeCall.cancel();
       };
-      state = { sender, calls: new Map<string, HostCall<unknown>>(), detailCallIds: new Set<string>(), onDestroyed };
+      state = { sender, calls: new Map<string, HostCall<unknown>>(), detailCallIds: new Set<string>(),
+        searchCallIds: new Set<string>(), uncertainIds: new Set<string>(), onDestroyed };
       activeRequests.set(senderId, state);
       sender.once('destroyed', onDestroyed);
     }
     state.calls.set(call.id, call as HostCall<unknown>);
     if (kind === 'cache-details') state.detailCallIds.add(call.id);
+    if (kind === 'search') state.searchCallIds.add(call.id);
     try {
       return await call.promise;
     } finally {
       const current = activeRequests.get(senderId);
       current?.calls.delete(call.id);
       current?.detailCallIds.delete(call.id);
-      if (current?.calls.size === 0) {
+      current?.searchCallIds.delete(call.id);
+      if (current?.calls.size === 0 && current.uncertainIds.size === 0) {
         current.sender.removeListener('destroyed', current.onDestroyed);
         activeRequests.delete(senderId);
       }
@@ -149,9 +155,32 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   handle(channels.search, async (event, request) => {
     assertTrusted(event);
     const validatedRequest = validateSearchRequest(request);
-    const result = validateCachePage(await track(event, host<unknown>('search', validatedRequest as unknown as JsonObject)));
+    const state = activeRequests.get(event.sender.id);
+    for (const id of state?.searchCallIds ?? []) state?.calls.get(id)?.cancel();
+    const result = validateCachePage(await track(event, host<unknown>('search', validatedRequest as unknown as JsonObject), 'search'));
     assertPageMatchesRequest(result, validatedRequest, 'search', true);
     return result;
+  });
+  handle(channels.searchCancel, (event) => {
+    assertTrusted(event);
+    const state = activeRequests.get(event.sender.id);
+    let requested = false;
+    for (const id of state?.searchCallIds ?? []) requested = state?.calls.get(id)?.cancel() === true || requested;
+    return requested;
+  });
+  handle(channels.acknowledgeUncertain, async (event, value) => {
+    assertTrusted(event);
+    const id = assertNonEmptyString(value, 'requestId', 128);
+    const state = activeRequests.get(event.sender.id);
+    if (!state?.uncertainIds.has(id)) return false;
+    const parent = BrowserWindow.fromWebContents(event.sender) ?? getWindow() ?? undefined;
+    const options = { type: 'warning' as const, title: '确认操作结果',
+      message: '是否已核对输出文件或缓存状态？',
+      detail: '上次操作可能已经完成。解除限制不会撤销操作，请确认后再重试。',
+      buttons: ['返回检查', '已核对，解除限制'], defaultId: 0, cancelId: 0, noLink: true };
+    const answer = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+    if (answer.response !== 1 || event.sender.isDestroyed()) return false;
+    return bridge.acknowledgeUncertain(id);
   });
   handle(channels.cacheDetails, async (event, request) => {
     assertTrusted(event);
@@ -315,11 +344,28 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
 
   const onEvent = (name: string, payload: unknown) => {
     if (name !== 'progress' || !isRecord(payload)) return;
-    getWindow()?.webContents.send(channels.progress, payload as unknown as HostProgress);
+    for (const state of activeRequests.values())
+      if (typeof payload.requestId === 'string' && state.calls.has(payload.requestId) && !state.sender.isDestroyed())
+        state.sender.send(channels.progress, payload as unknown as HostProgress);
+  };
+  const onOperationState = (payload: OperationState) => {
+    if (!isRecord(payload) || typeof payload.requestId !== 'string' || typeof payload.operation !== 'string' ||
+        typeof payload.sideEffects !== 'boolean' || !['cancelling', 'unconfirmed', 'unknown', 'settled'].includes(payload.state)) return;
+    for (const [senderId, state] of activeRequests) {
+      if (!state.calls.has(payload.requestId) && !state.uncertainIds.has(payload.requestId)) continue;
+      if (payload.state === 'unknown') state.uncertainIds.add(payload.requestId);
+      if (payload.state === 'settled') state.uncertainIds.delete(payload.requestId);
+      if (!state.sender.isDestroyed()) state.sender.send(channels.operationState, payload);
+      if (state.calls.size === 0 && state.uncertainIds.size === 0) {
+        state.sender.removeListener('destroyed', state.onDestroyed);
+        activeRequests.delete(senderId);
+      }
+    }
   };
   const onUnavailable = (message: string) => getWindow()?.webContents.send(channels.unavailable, message);
   bridge.on('event', onEvent);
   bridge.on('unavailable', onUnavailable);
+  bridge.on('operation-state', onOperationState);
 
   return () => {
     for (const [channel] of handlers) ipcMain.removeHandler(channel);
@@ -330,6 +376,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     activeRequests.clear();
     bridge.off('event', onEvent);
     bridge.off('unavailable', onUnavailable);
+    bridge.off('operation-state', onOperationState);
   };
 }
 

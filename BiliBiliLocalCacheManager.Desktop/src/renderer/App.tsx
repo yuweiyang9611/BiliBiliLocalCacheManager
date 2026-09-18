@@ -10,6 +10,7 @@ import type {
   DesktopInfo,
   HostHealth,
   HostProgress,
+  OperationState,
   PlayerPreference,
   SearchRequest,
   SelectionTarget,
@@ -35,7 +36,7 @@ type CachePageState = Pick<CachePage, 'offset' | 'pageSize' | 'totalItems' | 'ha
 type BatchReport = {
   kind: 'play' | 'export'; rootPath: string; targets: SelectionTarget[];
   includeIncomplete: boolean; playerPreference: PlayerPreference;
-  status: 'success' | 'partial' | 'failed' | 'cancelled'; succeeded: number; failures: MediaFailure[];
+  status: 'success' | 'partial' | 'failed' | 'cancelled' | 'unknown'; succeeded: number; failures: MediaFailure[];
 };
 
 const initialCachePage: CachePageState = {
@@ -75,6 +76,12 @@ export function App() {
   const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<string>>(new Set());
   const [selectedTrashIds, setSelectedTrashIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>('正在连接 Desktop Host…');
+  const [searching, setSearching] = useState(false);
+  const [operationStates, setOperationStates] = useState<Record<string, OperationState>>({});
+  const blockedOperations = useRef(false);
+  const unresolved = Object.values(operationStates);
+  const operationsBlocked = unresolved.some(state => state.sideEffects);
+  const cancelling = unresolved.some(state => state.state === 'cancelling' || state.state === 'unconfirmed');
   const [initialized, setInitialized] = useState(false);
   const [bootstrapStatus, setBootstrapStatus] = useState<BootstrapStatus>('loading');
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -142,6 +149,9 @@ export function App() {
   }, []);
 
   const invalidateIndex = useCallback(() => {
+    void window.cacheManager.cancelSearch().catch(() => undefined);
+    searchDrainActive.current = false;
+    setSearching(false);
     setScanReport(null);
     latestSearchRevision.current += 1;
     pendingSearch.current = null;
@@ -169,6 +179,7 @@ export function App() {
   }, []);
 
   const run = useCallback(async <T,>(label: string, operation: () => Promise<T>): Promise<T | undefined> => {
+    if (blockedOperations.current) { notify('info', '上次操作结果尚未确认，请先核对结果。'); return undefined; }
     if (operationInFlight.current) return undefined;
     operationInFlight.current = true;
     setBusy(label);
@@ -200,6 +211,16 @@ export function App() {
   useEffect(() => {
     let disposed = false;
     const unsubscribeProgress = window.cacheManager.onProgress((value) => setProgress(value));
+    const unsubscribeState = window.cacheManager.onOperationState((value) => {
+      if (value.operation === 'search' || value.operation === 'cache.details') return;
+      setOperationStates(current => {
+        const next = { ...current };
+        if (value.state === 'settled') delete next[value.requestId];
+        else next[value.requestId] = value;
+        blockedOperations.current = Object.values(next).some(state => state.sideEffects);
+        return next;
+      });
+    });
     const unsubscribeUnavailable = window.cacheManager.onHostUnavailable((message) => {
       setHealth(null);
       invalidateIndex();
@@ -267,7 +288,10 @@ export function App() {
         resumePendingSearch.current();
       }
     })();
-    return () => { disposed = true; unsubscribeProgress(); unsubscribeUnavailable(); };
+    return () => {
+      disposed = true; unsubscribeProgress(); unsubscribeUnavailable(); unsubscribeState();
+      void window.cacheManager.cancelSearch().catch(() => undefined);
+    };
   }, [invalidateIndex, notify, replaceLibraryItems, reportScan]);
 
   const focusedItem = useMemo(
@@ -375,37 +399,28 @@ export function App() {
   }, [activeRootPath, invalidateIndex, invalidateStorage, notify, replaceLibraryItems, reportScan, run, settings.includeIncomplete]);
 
   const drainSearchQueue = useCallback(async () => {
-    if (searchDrainActive.current || operationInFlight.current || !pendingSearch.current) return;
+    if (operationInFlight.current || !pendingSearch.current) return;
+    const queued = pendingSearch.current;
+    pendingSearch.current = null;
     searchDrainActive.current = true;
-    operationInFlight.current = true;
-    setBusy('正在筛选…');
+    setSearching(true);
     try {
-      while (pendingSearch.current) {
-        const queued = pendingSearch.current;
-        pendingSearch.current = null;
-        try {
-          const result = await window.cacheManager.search(queued.request);
-          const context = searchContextRef.current;
-          if (queued.revision !== latestSearchRevision.current ||
-              !context.hasActiveIndex ||
-              !sameSearchRequest(context.request, queued.request)) continue;
-          replaceLibraryItems(result.items, result);
-        } catch (error) {
-          if (queued.revision !== latestSearchRevision.current) continue;
-          if (isStaleIndexError(error)) {
-            invalidateIndex();
-            notify('info', '缓存索引已失效，请重新扫描。');
-          } else {
-            notify(isCancellationError(error) ? 'info' : 'error', isCancellationError(error) ? '操作已取消。' : describeError(error));
-          }
-        }
-      }
+      const result = await window.cacheManager.search(queued.request);
+      const context = searchContextRef.current;
+      if (queued.revision === latestSearchRevision.current && context.hasActiveIndex &&
+          sameSearchRequest(context.request, queued.request)) replaceLibraryItems(result.items, result);
+    } catch (error) {
+      if (queued.revision !== latestSearchRevision.current || !searchContextRef.current.hasActiveIndex ||
+          !sameSearchRequest(searchContextRef.current.request, queued.request)) return;
+      if (isStaleIndexError(error)) {
+        invalidateIndex();
+        notify('info', '缓存索引已失效，请重新扫描。');
+      } else if (!isCancellationError(error)) notify('error', describeError(error));
     } finally {
-      searchDrainActive.current = false;
-      operationInFlight.current = false;
-      setBusy(null);
-      setProgress(null);
-      if (pendingSearch.current) resumePendingSearch.current();
+      if (queued.revision === latestSearchRevision.current) {
+        searchDrainActive.current = false;
+        setSearching(false);
+      }
     }
   }, [invalidateIndex, notify, replaceLibraryItems]);
   resumePendingSearch.current = () => { void drainSearchQueue(); };
@@ -461,6 +476,10 @@ export function App() {
     if (searchDrainActive.current) {
       latestSearchRevision.current += 1;
       pendingSearch.current = null;
+      searchDrainActive.current = false;
+      setSearching(false);
+      await window.cacheManager.cancelSearch().catch(error => notify('error', describeError(error)));
+      return;
     }
     if (detailsLoading) {
       detailsRevision.current += 1;
@@ -487,7 +506,7 @@ export function App() {
     const result = await run('正在准备播放…', async () => {
       try { return await window.cacheManager.play(context.rootPath, requestedTargets, context.playerPreference, context.includeIncomplete); }
       catch (error) {
-        setBatchReport({ ...context, status: isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
+        setBatchReport({ ...context, status: isUnknownOutcome(error) ? 'unknown' : isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
           failures: [{ avid: '', pageIndex: null, title: '', message: describeError(error) }] });
         throw error;
       }
@@ -511,7 +530,7 @@ export function App() {
     const result = await run('正在导出 MP4…', async () => {
       try { return await window.cacheManager.exportMedia(context.rootPath, requestedTargets, `${title}.mp4`, context.includeIncomplete); }
       catch (error) {
-        setBatchReport({ ...context, status: isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
+        setBatchReport({ ...context, status: isUnknownOutcome(error) ? 'unknown' : isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
           failures: [{ avid: '', pageIndex: null, title: '', message: describeError(error) }] });
         throw error;
       }
@@ -726,7 +745,7 @@ export function App() {
   }, [invalidateIndex, invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, run]);
 
   useEffect(() => {
-    const uiBusy = Boolean(busy) || detailsLoading;
+    const uiBusy = Boolean(busy) || detailsLoading || searching || operationsBlocked;
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'F5') { event.preventDefault(); if (!uiBusy) void scan(); }
       if (event.key === 'Escape' && uiBusy) { event.preventDefault(); void cancelCurrentOperation(); }
@@ -737,9 +756,9 @@ export function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [busy, cancelCurrentOperation, detailsLoading, exportMedia, moveToTrash, page, scan, undoLastDelete]);
+  }, [busy, cancelCurrentOperation, detailsLoading, exportMedia, moveToTrash, page, scan, undoLastDelete, searching, operationsBlocked]);
 
-  const uiBusy = Boolean(busy) || detailsLoading;
+  const uiBusy = Boolean(busy) || detailsLoading || searching || operationsBlocked;
 
   if (bootstrapStatus === 'failed') {
     return <div
@@ -793,10 +812,19 @@ export function App() {
           <div><h1>{navigation.find((item) => item.id === page)?.label}</h1><p>{pageSubtitle(page)}</p></div>
           <div className="top-actions">
             {undoDeleteBatch && <button className="button secondary" onClick={() => void undoLastDelete()} disabled={uiBusy}><Icon name="restore" />撤销删除 <kbd>Ctrl+Z</kbd></button>}
-            {uiBusy && <button className="button ghost" onClick={() => void cancelCurrentOperation()}><Icon name="stop" />取消</button>}
+            {(busy || searching || detailsLoading) && <button className="button ghost" disabled={cancelling} onClick={() => void cancelCurrentOperation()}><Icon name="stop" />{cancelling ? '正在取消' : '取消'}</button>}
             <button className="button primary" onClick={() => void scan()} disabled={uiBusy}><Icon name="scan" />扫描缓存 <kbd>F5</kbd></button>
           </div>
         </header>
+        {unresolved.map(state => <section className="result-panel operation-state" role="status" key={state.requestId}>
+          <h2>{state.state === 'unknown' ? '结果无法确认' : state.state === 'unconfirmed' ? '结果待确认' : '正在取消'}</h2>
+          <p>{state.state === 'unknown' ? 'Host 已退出，操作可能已完成。请核对输出文件或缓存状态。'
+            : state.state === 'unconfirmed' ? 'Host 尚未返回最终结果，仍在等待确认。请勿重复执行该操作。'
+            : '已发送取消请求，正在等待 Host 的最终结果。'}</p>
+          {state.state === 'unknown' && <button className="button secondary" onClick={() =>
+            void window.cacheManager.acknowledgeUncertain(state.requestId).catch(error => notify('error', describeError(error)))}>
+            <Icon name="check" />已核对结果</button>}
+        </section>)}
 
         {progress && <div className="operation-progress"><div style={{ width: `${clamp(progress.percentage ?? 12, 2, 100)}%` }} /><span>{progress.message ?? progress.stage}</span></div>}
 
@@ -811,10 +839,11 @@ export function App() {
             {scanReport.issuesTruncated && <p>仅展示前 100 条问题，汇总计数包含全部条目。</p>}
           </section>}
           {batchReport && batchReport.rootPath === activeRootPath && <section className="result-panel" aria-label="操作结果">
-            <div className="panel-heading"><h2>{batchReport.kind === 'play' ? '播放' : '导出'}结果：{{ success: '全部成功', partial: '部分失败', failed: '失败', cancelled: '已取消' }[batchReport.status]}</h2>
+            <div className="panel-heading"><h2>{batchReport.kind === 'play' ? '播放' : '导出'}结果：{{ success: '全部成功', partial: '部分失败', failed: '失败', cancelled: '已取消', unknown: '结果无法确认' }[batchReport.status]}</h2>
               <button className="icon-button" title="关闭结果" aria-label="关闭操作结果" onClick={() => setBatchReport(null)}><Icon name="close" /></button></div>
             <p>{batchReport.kind === 'play' ? `已交给播放器 ${batchReport.succeeded} 项` : `已发布 ${batchReport.succeeded} 项`}，失败 {batchReport.failures.length} 项。</p>
-            {batchReport.kind === 'export' && batchReport.status !== 'success' && <p>本批导出未发布。重试将重新执行完整批次，并复用已生成的转码缓存。</p>}
+            {batchReport.kind === 'export' && batchReport.status !== 'success' && batchReport.status !== 'unknown' && <p>本批导出未发布。重试将重新执行完整批次，并复用已生成的转码缓存。</p>}
+            {batchReport.status === 'unknown' && <p>操作可能已经完成，请先核对输出文件或缓存状态。</p>}
             {batchReport.failures.length > 0 && <details open><summary>失败明细</summary><ul className="result-list">{batchReport.failures.map((failure, index) =>
               <li key={index}><div><strong>{failure.title || (failure.avid ? `av${failure.avid}` : '操作失败')} {failure.pageIndex !== null ? `P${failure.pageIndex}` : ''}</strong><p>{failure.message}</p></div></li>)}</ul></details>}
             {batchReport.status !== 'success' && batchReport.targets.length > 0 && <button className="button secondary" disabled={uiBusy}
@@ -832,13 +861,13 @@ export function App() {
           {page === 'storage' && <StoragePage
             storage={storage}
             settings={settings}
-            busy={Boolean(busy)}
+            busy={Boolean(busy) || operationsBlocked}
             refresh={refreshStorage}
             cleanup={cleanupTranscodeCache}
             clear={requestClearTranscodeCache}
             open={openTranscodeCache}
           />}
-          {page === 'trash' && <TrashPage entries={trash} selected={selectedTrashIds} setSelected={setSelectedTrashIds} busy={Boolean(busy)} canPurge={capabilities.trashPurge} refresh={refreshTrash} restore={() => {
+          {page === 'trash' && <TrashPage entries={trash} selected={selectedTrashIds} setSelected={setSelectedTrashIds} busy={Boolean(busy) || operationsBlocked} canPurge={capabilities.trashPurge} refresh={refreshTrash} restore={() => {
             if (!selectedTrashIds.size) return notify('info', '请选择要恢复的条目。');
             const rootPath = trashState.rootPath;
             if (!rootPath || rootPath !== activeRootPath) return notify('error', '回收站内容与当前缓存目录不一致，请刷新后重试。');
@@ -951,14 +980,14 @@ export function App() {
             } else {
               notify('success', '设置已保存。');
             }
-          }} busy={Boolean(busy)} />}
+          }} busy={Boolean(busy) || operationsBlocked} />}
           {page === 'diagnostics' && <DiagnosticsPage health={health} desktop={desktop} activities={activities} refresh={async () => {
             const value = await run('正在检查运行环境…', () => window.cacheManager.health());
             if (value) { setHealth(value); notify(value.status === 'ok' ? 'success' : 'error', '运行环境检查完成。'); }
           }} exportReport={async () => {
             const value = await run('正在导出诊断报告…', () => window.cacheManager.exportDiagnostics(`BLCM-diagnostics-${dateStamp()}.zip`, activeRootPath || undefined));
             if (value) notify('success', `诊断报告已导出：${value.outputPath}`);
-          }} busy={Boolean(busy)} />}
+          }} busy={Boolean(busy) || operationsBlocked} />}
         </section>
 
         <footer className="statusbar"><span>{busy ?? (detailsLoading ? '正在加载分段详情…' : items.length ? `当前显示 ${cachePage.offset + 1}–${cachePage.offset + items.length} / ${cachePage.totalItems} 条缓存，已选 ${selectedIds.size} 条 · ${formatBytes(selectedBytes(items, selectedIds))}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
@@ -1141,6 +1170,10 @@ function formatDuration(seconds: number): string { if (!Number.isFinite(seconds)
 function formatDate(value: string | null): string { if (!value) return '未知'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }); }
 function trashTime(entry: TrashEntry): number { if (!entry.deletedAt) return 0; const value = new Date(entry.deletedAt).getTime(); return Number.isNaN(value) ? 0 : value; }
 function artifactCleanupMessage(prefix: string, result: ArtifactCleanupResult): string { return `${prefix}：删除 ${result.deletedFileCount} 个文件，释放 ${formatBytes(result.freedBytes)}，失败 ${result.failedFileCount} 个，剩余 ${formatBytes(result.remainingBytes)}。`; }
+function isUnknownOutcome(error: unknown): boolean {
+  return /OUTCOME_UNKNOWN|结果无法确认/i.test(describeError(error));
+}
+
 function isCancellationError(error: unknown): boolean {
   if (typeof error === 'string') return /cancel|取消/i.test(error);
   if (!(error instanceof Error)) return false;

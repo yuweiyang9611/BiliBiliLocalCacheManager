@@ -1,4 +1,7 @@
 export const channels = Object.freeze({
+  searchCancel: 'cache-manager:search-cancel',
+  operationState: 'cache-manager:operation-state',
+  acknowledgeUncertain: 'cache-manager:acknowledge-uncertain',
   health: 'cache-manager:health',
   initialState: 'cache-manager:initial-state',
   settingsGet: 'cache-manager:settings:get',
