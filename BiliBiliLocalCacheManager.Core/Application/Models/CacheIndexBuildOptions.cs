@@ -41,6 +41,11 @@ public sealed class CacheIndexBuildOptions
     /// </summary>
     public int MaxReportedIssues { get; set; } = 100;
 
+    /// <summary>
+    /// 单个字节数字段及同一 avid 的总缓存大小上限；null 表示不额外限制。
+    /// </summary>
+    public long? MaximumCacheBytes { get; set; }
+
     public CacheIndexBuildOptions Clone()
     {
         var copy = new CacheIndexBuildOptions
@@ -48,7 +53,8 @@ public sealed class CacheIndexBuildOptions
             EntryFileName = EntryFileName,
             IncludeIncompleteEntries = IncludeIncompleteEntries,
             ThrowOnInvalidEntry = ThrowOnInvalidEntry,
-            MaxReportedIssues = Math.Max(0, MaxReportedIssues)
+            MaxReportedIssues = Math.Max(0, MaxReportedIssues),
+            MaximumCacheBytes = MaximumCacheBytes
         };
 
         copy.VideoFileExtensions.Clear();

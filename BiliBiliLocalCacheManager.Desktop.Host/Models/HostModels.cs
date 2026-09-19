@@ -110,6 +110,7 @@ internal sealed record CacheSummaryDto(
     int SegmentCount,
     long SizeBytes,
     bool IsAllCompleted,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     DateTimeOffset? LastUpdated);
 
 internal sealed record CachePageDto(

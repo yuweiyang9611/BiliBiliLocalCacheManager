@@ -186,6 +186,23 @@ describe('desktop renderer', () => {
     expect(vi.mocked(api.exportMedia).mock.calls[1][1]).toEqual([{ avid: '100' }]);
   });
 
+  it('groups more than 1000 failed playback pages into one bounded retry request', async () => {
+    const pages = Array.from({ length: 1001 }, (_, index) => index + 2);
+    vi.mocked(api.play).mockResolvedValueOnce({ queued: 1, failures: pages.map(pageIndex => ({
+      avid: '100', pageIndex, title: 'Failed page', message: 'Missing media',
+    })) }).mockResolvedValueOnce({ queued: pages.length, failures: [] });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '播放' }));
+    expect(await screen.findByText('播放结果：部分失败')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重试未成功项目' }));
+    await waitFor(() => expect(api.play).toHaveBeenLastCalledWith(initial.settings.rootPath,
+      [{ avid: '100', pageIndexes: pages }], 'system', false));
+    expect(api.play).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText('播放结果：全部成功')).toBeInTheDocument();
+  });
+
   it('shows pending cancellation and then the actual successful export result', async () => {
     const pending = deferred<Awaited<ReturnType<CacheManagerApi['exportMedia']>>>();
     vi.mocked(api.exportMedia).mockReturnValue(pending.promise);
@@ -398,6 +415,57 @@ describe('desktop renderer', () => {
     expect(api.scan).not.toHaveBeenCalled();
   });
 
+  it.each(['Root directory does not exist', 'Access denied'])('allows changing the root after startup scan fails: %s', async (message) => {
+    vi.mocked(api.getInitialState).mockResolvedValue({ ...initial,
+      settings: { ...initial.settings, scanOnStartup: true } });
+    vi.mocked(api.scan).mockRejectedValueOnce(new Error(message));
+    const { container } = render(<App />);
+    expect(await screen.findByText(`启动扫描失败：${message}`)).toBeInTheDocument();
+    const shell = container.querySelector('[data-renderer-bootstrap]');
+    expect(shell).toHaveAttribute('data-renderer-bootstrap', 'ready');
+    expect(shell).toHaveAttribute('data-renderer-ready', 'true');
+    expect(shell).toHaveAttribute('data-settings-loaded', 'true');
+    expect(shell).toHaveAttribute('data-startup-scan', 'failed');
+    expect(shell).toHaveAttribute('data-startup-scan-count', '0');
+    expect(shell).toHaveAttribute('data-bootstrap-error', '');
+    expect(screen.queryByText('桌面端初始化失败')).not.toBeInTheDocument();
+    expect(screen.queryByText('测试缓存')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.change(screen.getByDisplayValue(initial.settings.rootPath), { target: { value: 'E:\\Recovered' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledWith(expect.objectContaining({ rootPath: 'E:\\Recovered' })));
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存设置' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: '缓存库' }));
+    expect(screen.getByText('测试缓存')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('E:\\Recovered')).toBeInTheDocument();
+  });
+
+  it('keeps the application usable after cancelling the startup scan', async () => {
+    const pending = deferred<ScanResult>();
+    vi.mocked(api.getInitialState).mockResolvedValue({ ...initial,
+      settings: { ...initial.settings, scanOnStartup: true } });
+    vi.mocked(api.scan).mockImplementationOnce(() => pending.promise);
+    const { container } = render(<App />);
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    act(() => vi.mocked(api.onProgress).mock.calls[0][0]({
+      requestId: 'startup', operation: 'scan', stage: 'scanning', message: 'Startup progress',
+    }));
+    expect(screen.getByText('Startup progress')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(api.cancel).toHaveBeenCalledOnce());
+    await act(async () => pending.reject(new Error('cancelled')));
+    expect(screen.getByText('启动扫描已取消。')).toBeInTheDocument();
+    const shell = container.querySelector('[data-renderer-bootstrap]');
+    expect(shell).toHaveAttribute('data-renderer-bootstrap', 'ready');
+    expect(shell).toHaveAttribute('data-startup-scan', 'cancelled');
+    expect(shell).toHaveAttribute('data-bootstrap-error', '');
+    expect(screen.queryByText('Startup progress')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    expect(await screen.findByText('测试缓存')).toBeInTheDocument();
+    expect(api.scan).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ['忘记目录', { rootPath: '', rememberRootPath: false, scanOnStartup: false }, false],
     ['仅记住，不扫描', { rootPath: 'D:\\Bilibili\\download', rememberRootPath: true, scanOnStartup: false }, false],
@@ -471,6 +539,37 @@ describe('desktop renderer', () => {
     expect(screen.queryByText('测试缓存')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '播放' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '删除' })).toBeDisabled();
+  });
+
+  it.each(['root', 'includeIncomplete'] as const)('shows scan issues after changing settings: %s', async (change) => {
+    vi.mocked(api.scan).mockResolvedValue({ ...createCachePage(), invalidEntries: 2, inaccessibleDirectories: 1,
+      hasWarnings: true, issuesTruncated: true,
+      issues: [{ id: 0, kind: 'InvalidEntry', path: 'damaged/entry.json', message: 'Settings scan damage' }] });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    if (change === 'root') fireEvent.change(screen.getByDisplayValue(initial.settings.rootPath), { target: { value: 'E:\\NewCache' } });
+    else fireEvent.click(screen.getByRole('checkbox', { name: '扫描时包含下载未完成的缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    const notice = await screen.findByText(/设置已保存。扫描完成.*损坏 2 条，无法访问 1 处/);
+    expect(notice.closest('.toast')).toHaveClass('error');
+    expect(screen.getByLabelText('扫描结果')).toHaveTextContent('Settings scan damage');
+    expect(screen.getByText('仅展示前 100 条问题，汇总计数包含全部条目。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '定位问题 1', hidden: true }));
+    await waitFor(() => expect(api.locateScanIssue).toHaveBeenCalledWith(indexToken, 0));
+    fireEvent.click(screen.getByRole('button', { name: '缓存库' }));
+    expect(screen.getByLabelText('扫描结果')).toHaveTextContent('Settings scan damage');
+  });
+
+  it('shows scan issues after enabling startup scan for legacy settings', async () => {
+    vi.mocked(api.getInitialState).mockResolvedValue({ ...initial,
+      settingsState: { canSave: true, sourceSchemaVersion: 1 }, items: [] });
+    vi.mocked(api.scan).mockResolvedValue({ ...createCachePage(), invalidEntries: 1, hasWarnings: true,
+      issues: [{ id: 0, kind: 'InvalidEntry', path: 'damaged/entry.json', message: 'Legacy scan damage' }] });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '启用并立即扫描' }));
+    expect(await screen.findByText('Legacy scan damage')).toBeInTheDocument();
+    expect(screen.getByText(/已启用启动扫描。扫描完成.*损坏 1 条/).closest('.toast')).toHaveClass('error');
   });
 
   it('keeps the library empty and does not scan when a saved root is blank', async () => {
@@ -854,6 +953,45 @@ describe('desktop renderer', () => {
     expect(screen.queryByText('已恢复条目')).not.toBeInTheDocument();
     expect(screen.getByText('未恢复条目')).toBeInTheDocument();
     expect(api.scan).not.toHaveBeenCalled();
+  });
+
+  it('preserves undo for committed moves when a later item fails', async () => {
+    vi.mocked(api.getInitialState).mockResolvedValue({ ...initial,
+      items: [...initial.items, { ...initialItem, id: '101', avid: '101', title: 'Failed move' }] });
+    vi.mocked(api.moveToTrash).mockResolvedValue({ moved: ['100'], failed: ['101'], cancelled: false, unprocessed: [] });
+    render(<App />);
+    await screen.findByText('Failed move');
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 Failed move' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认' }));
+    const notice = await screen.findByText(/已移动 1 项，失败 1 项/);
+    expect(notice.closest('.toast')).toHaveClass('error');
+    expect(screen.getByRole('button', { name: /撤销删除/ })).not.toBeDisabled();
+    expect(screen.queryByText('测试缓存')).not.toBeInTheDocument();
+    expect(screen.queryByText(/已取消剩余操作/)).not.toBeInTheDocument();
+  });
+
+  it('keeps partial restore results and reports damage from the follow-up scan', async () => {
+    vi.mocked(api.listTrash).mockResolvedValue([
+      { id: 'trash-100', avid: '100', title: 'Restored entry', sizeBytes: 1, deletedAt: null },
+      { id: 'trash-101', avid: '101', title: 'Failed restore', sizeBytes: 1, deletedAt: null },
+    ]);
+    vi.mocked(api.restoreTrash).mockResolvedValue({ restored: ['trash-100'], failed: ['trash-101'], cancelled: false, unprocessed: [] });
+    vi.mocked(api.scan).mockResolvedValue({ ...createCachePage(), invalidEntries: 1, hasWarnings: true,
+      issues: [{ id: 0, kind: 'InvalidEntry', path: 'damaged/entry.json', message: 'Restore scan damage' }] });
+    render(<App />);
+    await screen.findByText('测试缓存');
+    fireEvent.click(screen.getByRole('button', { name: '回收站' }));
+    await screen.findByText('Restored entry');
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择全部回收站条目' }));
+    fireEvent.click(screen.getByRole('button', { name: '恢复所选' }));
+    expect(await screen.findByText(/已恢复 1 项，失败 1 项/)).toBeInTheDocument();
+    expect(screen.queryByText('Restored entry')).not.toBeInTheDocument();
+    expect(screen.getByText('Failed restore')).toBeInTheDocument();
+    expect(screen.getByText(/扫描完成.*损坏 1 条/).closest('.toast')).toHaveClass('error');
+    fireEvent.click(screen.getByRole('button', { name: '缓存库' }));
+    expect(screen.getByLabelText('扫描结果')).toHaveTextContent('Restore scan damage');
   });
 
   it('preserves completed cleanup counts when the follow-up storage refresh fails', async () => {

@@ -12,6 +12,7 @@ public sealed partial class DesktopHostContractTests
     private static readonly JsonSerializerOptions WireOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
 
