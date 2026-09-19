@@ -76,6 +76,8 @@ export function App() {
   const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<string>>(new Set());
   const [selectedTrashIds, setSelectedTrashIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>('正在连接 Desktop Host…');
+  const [inspectionBusy, setInspectionBusy] = useState<string | null>(null);
+  const inspectionInFlight = useRef(false);
   const [searching, setSearching] = useState(false);
   const [operationStates, setOperationStates] = useState<Record<string, OperationState>>({});
   const blockedOperations = useRef(false);
@@ -180,7 +182,7 @@ export function App() {
 
   const run = useCallback(async <T,>(label: string, operation: () => Promise<T>): Promise<T | undefined> => {
     if (blockedOperations.current) { notify('info', '上次操作结果尚未确认，请先核对结果。'); return undefined; }
-    if (operationInFlight.current) return undefined;
+    if (operationInFlight.current || inspectionInFlight.current) return undefined;
     operationInFlight.current = true;
     setBusy(label);
     try {
@@ -200,6 +202,29 @@ export function App() {
       resumePendingSearch.current();
     }
   }, [invalidateIndex, notify]);
+
+  const inspect = useCallback(async <T,>(label: string, operation: () => Promise<T>): Promise<T | undefined> => {
+    if (inspectionInFlight.current || (operationInFlight.current && !blockedOperations.current)) return undefined;
+    inspectionInFlight.current = true;
+    setInspectionBusy(label);
+    try {
+      return await operation();
+    } catch (error) {
+      notify(isCancellationError(error) ? 'info' : 'error', isCancellationError(error) ? '核对操作已取消。' : describeError(error));
+      return undefined;
+    } finally {
+      inspectionInFlight.current = false;
+      setInspectionBusy(null);
+    }
+  }, [notify]);
+
+  const refreshAfterMutation = useCallback(async <T,>(operation: () => Promise<T>): Promise<T | null> => {
+    try { return await operation(); }
+    catch (error) {
+      notify('info', '文件操作结果已保留，但刷新失败，请稍后重新核对：' + describeError(error));
+      return null;
+    }
+  }, [notify]);
 
   const reportScan = useCallback((result: ScanResult) => {
     setScanReport(result);
@@ -593,7 +618,7 @@ export function App() {
         setUndoDeleteBatch(completed.result.moved.length > 0
           ? { rootPath, avids: completed.result.moved }
           : null);
-        notify(completed.result.failed.length ? 'error' : 'success', `已移动 ${completed.result.moved.length} 项，失败 ${completed.result.failed.length} 项。${completed.result.moved.length ? '可按 Ctrl+Z 撤销。' : ''}`);
+        notify(diskOutcomeKind(completed.result), diskOutcomeMessage('移动', completed.result.moved.length, completed.result) + (completed.result.moved.length ? '可按 Ctrl+Z 撤销。' : ''));
       })(); },
     });
   }, [activeRootPath, invalidateIndex, invalidateRootViews, items, notify, replaceLibraryItems, run, selectedIds]);
@@ -626,42 +651,46 @@ export function App() {
       });
       const restoreResult = entryIds.length
         ? await window.cacheManager.restoreTrash(rootPath, entryIds)
-        : { restored: [], failed: [] };
+        : { restored: [], failed: [], cancelled: false, unprocessed: [] };
       if (restoreResult.restored.length > 0) invalidateIndex();
-      const scanResult = restoreResult.restored.length
-        ? await window.cacheManager.scan({
+      const scanResult = restoreResult.restored.length && !restoreResult.cancelled
+        ? await refreshAfterMutation(() => window.cacheManager.scan({
           rootPath,
           includeIncomplete: settings.includeIncomplete,
           persistSettings: false,
           offset: 0,
           pageSize: DEFAULT_CACHE_PAGE_SIZE,
-        })
+        }))
         : null;
       return {
         restoreResult,
         scanResult,
         missingCount: batch.avids.length - entryIds.length,
+        remainingAvids: batch.avids.filter(avid => {
+          const entry = newestByAvid.get(avid);
+          return entry && !restoreResult.restored.includes(entry.id);
+        }),
       };
     });
     if (!completed) return;
-    setUndoDeleteBatch(null);
+    setUndoDeleteBatch(completed.remainingAvids.length ? { rootPath, avids: completed.remainingAvids } : null);
     invalidateRootViews();
     if (completed.scanResult) {
       setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete, indexToken: completed.scanResult.indexToken });
       replaceLibraryItems(completed.scanResult.items, completed.scanResult);
     }
     const failedCount = completed.restoreResult.failed.length + completed.missingCount;
-    notify(failedCount ? 'error' : 'success', `已撤销 ${completed.restoreResult.restored.length} 项删除，失败 ${failedCount} 项。`);
-  }, [activeRootPath, invalidateIndex, invalidateRootViews, notify, replaceLibraryItems, run, settings.includeIncomplete, undoDeleteBatch]);
+    notify(failedCount ? 'error' : diskOutcomeKind(completed.restoreResult), diskOutcomeMessage('撤销删除', completed.restoreResult.restored.length, completed.restoreResult, failedCount));
+  }, [activeRootPath, invalidateIndex, invalidateRootViews, notify, refreshAfterMutation, replaceLibraryItems, run, settings.includeIncomplete, undoDeleteBatch]);
 
   const refreshStorage = useCallback(async (announce = true) => {
     const rootPath = activeRootPath;
-    const value = await run('正在统计存储…', () => window.cacheManager.getStorage(rootPath || undefined));
+    const value = await inspect('正在统计存储…', () => window.cacheManager.getStorage(rootPath || undefined));
     if (value) {
       bindStorage(rootPath, value);
       if (announce) notify('success', '存储统计已刷新。');
     }
-  }, [activeRootPath, bindStorage, notify, run]);
+  }, [activeRootPath, bindStorage, notify, inspect]);
 
   const refreshTrash = useCallback(async (announce = true) => {
     const rootPath = activeRootPath;
@@ -669,35 +698,36 @@ export function App() {
       setTrashState({ rootPath, value: [] });
       return;
     }
-    const value = await run('正在读取回收站…', () => window.cacheManager.listTrash(rootPath));
+    const value = await inspect('正在读取回收站…', () => window.cacheManager.listTrash(rootPath));
     if (value) {
       bindTrash(rootPath, value);
       setSelectedTrashIds(new Set());
       if (announce) notify('success', '回收站已刷新。');
     }
-  }, [activeRootPath, bindTrash, notify, run]);
+  }, [activeRootPath, bindTrash, notify, inspect]);
 
   useEffect(() => {
-    if (!initialized || busy || legacySettingsMigration) return;
+    if (!initialized || (busy && !operationsBlocked) || legacySettingsMigration) return;
     if (page === 'storage' && storageState.rootPath !== activeRootPath) void refreshStorage(false);
     if (page === 'trash' && trashState.rootPath !== activeRootPath) void refreshTrash(false);
-  }, [activeRootPath, busy, initialized, legacySettingsMigration, page, refreshStorage, refreshTrash, storageState.rootPath, trashState.rootPath]);
+  }, [activeRootPath, busy, initialized, legacySettingsMigration, operationsBlocked, page, refreshStorage, refreshTrash, storageState.rootPath, trashState.rootPath]);
 
   const cleanupTranscodeCache = useCallback(async () => {
     const rootPath = activeRootPath;
     const completed = await run('正在按策略清理转码缓存…', async () => {
       const result = await window.cacheManager.cleanupTranscodeCache();
-      return { result, snapshot: await window.cacheManager.getStorage(rootPath || undefined) };
+      return { result, snapshot: result.cancelled ? null : await refreshAfterMutation(() => window.cacheManager.getStorage(rootPath || undefined)) };
     });
     if (!completed) return;
-    bindStorage(rootPath, completed.snapshot);
-    notify(completed.result.failedFileCount ? 'error' : 'success', artifactCleanupMessage('清理完成', completed.result));
-  }, [activeRootPath, bindStorage, notify, run]);
+    if (completed.snapshot) bindStorage(rootPath, completed.snapshot);
+    else invalidateStorage();
+    notify(completed.result.failedFileCount ? 'error' : completed.result.cancelled ? 'info' : 'success', artifactCleanupMessage('清理完成', completed.result));
+  }, [activeRootPath, bindStorage, invalidateStorage, notify, refreshAfterMutation, run]);
 
   const openTranscodeCache = useCallback(async () => {
-    const opened = await run('正在打开转码缓存目录…', () => window.cacheManager.openTranscodeCache());
+    const opened = await inspect('正在打开转码缓存目录…', () => window.cacheManager.openTranscodeCache());
     if (opened) notify('success', '已打开受管转码缓存目录。');
-  }, [notify, run]);
+  }, [notify, inspect]);
 
   const requestClearTranscodeCache = useCallback(() => {
     const rootPath = activeRootPath;
@@ -709,14 +739,15 @@ export function App() {
         const completed = await run('正在清空转码缓存…', async () => {
           const result = await window.cacheManager.clearTranscodeCache();
           if (!result) return null;
-          return { result, snapshot: await window.cacheManager.getStorage(rootPath || undefined) };
+          return { result, snapshot: result.cancelled ? null : await refreshAfterMutation(() => window.cacheManager.getStorage(rootPath || undefined)) };
         });
         if (!completed) return;
-        bindStorage(rootPath, completed.snapshot);
-        notify(completed.result.failedFileCount ? 'error' : 'success', artifactCleanupMessage('清空完成', completed.result));
+        if (completed.snapshot) bindStorage(rootPath, completed.snapshot);
+        else invalidateStorage();
+        notify(completed.result.failedFileCount ? 'error' : completed.result.cancelled ? 'info' : 'success', artifactCleanupMessage('清空完成', completed.result));
       })(); },
     });
-  }, [activeRootPath, bindStorage, notify, run]);
+  }, [activeRootPath, bindStorage, invalidateStorage, notify, refreshAfterMutation, run]);
 
   const resolveLegacySettingsMigration = useCallback(async (choice: 'scan' | 'remember' | 'forget') => {
     const migration = legacySettingsMigration;
@@ -763,7 +794,7 @@ export function App() {
   }, [invalidateIndex, invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, run]);
 
   useEffect(() => {
-    const uiBusy = Boolean(busy) || detailsLoading || searching || operationsBlocked;
+    const uiBusy = Boolean(busy) || Boolean(inspectionBusy) || detailsLoading || searching || operationsBlocked;
     const handler = (event: KeyboardEvent) => {
       if (event.key === 'F5') { event.preventDefault(); if (!uiBusy) void scan(); }
       if (event.key === 'Escape' && uiBusy) { event.preventDefault(); void cancelCurrentOperation(); }
@@ -774,9 +805,10 @@ export function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [busy, cancelCurrentOperation, detailsLoading, exportMedia, moveToTrash, page, scan, undoLastDelete, searching, operationsBlocked]);
+  }, [busy, inspectionBusy, cancelCurrentOperation, detailsLoading, exportMedia, moveToTrash, page, scan, undoLastDelete, searching, operationsBlocked]);
 
-  const uiBusy = Boolean(busy) || detailsLoading || searching || operationsBlocked;
+  const uiBusy = Boolean(busy) || Boolean(inspectionBusy) || detailsLoading || searching || operationsBlocked;
+  const inspectionDisabled = !initialized || Boolean(inspectionBusy) || (Boolean(busy) && !operationsBlocked);
 
   if (bootstrapStatus === 'failed') {
     return <div
@@ -830,7 +862,7 @@ export function App() {
           <div><h1>{navigation.find((item) => item.id === page)?.label}</h1><p>{pageSubtitle(page)}</p></div>
           <div className="top-actions">
             {undoDeleteBatch && <button className="button secondary" onClick={() => void undoLastDelete()} disabled={uiBusy}><Icon name="restore" />撤销删除 <kbd>Ctrl+Z</kbd></button>}
-            {(busy || searching || detailsLoading) && <button className="button ghost" disabled={cancelling} onClick={() => void cancelCurrentOperation()}><Icon name="stop" />{cancelling ? '正在取消' : '取消'}</button>}
+            {(busy || inspectionBusy || searching || detailsLoading) && <button className="button ghost" disabled={cancelling} onClick={() => void cancelCurrentOperation()}><Icon name="stop" />{cancelling ? '正在取消' : '取消'}</button>}
             <button className="button primary" onClick={() => void scan()} disabled={uiBusy}><Icon name="scan" />扫描缓存 <kbd>F5</kbd></button>
           </div>
         </header>
@@ -879,13 +911,14 @@ export function App() {
           {page === 'storage' && <StoragePage
             storage={storage}
             settings={settings}
-            busy={Boolean(busy) || operationsBlocked}
+            busy={uiBusy}
+            inspectionDisabled={inspectionDisabled}
             refresh={refreshStorage}
             cleanup={cleanupTranscodeCache}
             clear={requestClearTranscodeCache}
             open={openTranscodeCache}
           />}
-          {page === 'trash' && <TrashPage entries={trash} selected={selectedTrashIds} setSelected={setSelectedTrashIds} busy={Boolean(busy) || operationsBlocked} canPurge={capabilities.trashPurge} refresh={refreshTrash} restore={() => {
+          {page === 'trash' && <TrashPage entries={trash} selected={selectedTrashIds} setSelected={setSelectedTrashIds} busy={uiBusy} inspectionDisabled={inspectionDisabled} canPurge={capabilities.trashPurge} refresh={refreshTrash} restore={() => {
             if (!selectedTrashIds.size) return notify('info', '请选择要恢复的条目。');
             const rootPath = trashState.rootPath;
             if (!rootPath || rootPath !== activeRootPath) return notify('error', '回收站内容与当前缓存目录不一致，请刷新后重试。');
@@ -895,14 +928,14 @@ export function App() {
               const completed = await run('正在恢复缓存…', async () => {
                 const result = await window.cacheManager.restoreTrash(rootPath, entryIds);
                 if (result.restored.length > 0) invalidateIndex();
-                const scanResult = result.restored.length
-                  ? await window.cacheManager.scan({
+                const scanResult = result.restored.length && !result.cancelled
+                  ? await refreshAfterMutation(() => window.cacheManager.scan({
                     rootPath,
                     includeIncomplete: settings.includeIncomplete,
                     persistSettings: false,
                     offset: 0,
                     pageSize: DEFAULT_CACHE_PAGE_SIZE,
-                  })
+                  }))
                   : null;
                 return { result, scanResult };
               });
@@ -918,7 +951,7 @@ export function App() {
                 setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete, indexToken: completed.scanResult.indexToken });
                 replaceLibraryItems(completed.scanResult.items, completed.scanResult);
               }
-              notify(completed.result.failed.length ? 'error' : 'success', `已恢复 ${completed.result.restored.length} 项。`);
+              notify(diskOutcomeKind(completed.result), diskOutcomeMessage('恢复', completed.result.restored.length, completed.result));
             })();
           }} purge={(all) => setConfirm({
             title: (() => {
@@ -947,7 +980,7 @@ export function App() {
                   : current);
               }
               invalidateStorage(); setSelectedTrashIds(new Set());
-              notify(completed.result.failed.length ? 'error' : 'success', `已永久删除 ${completed.result.purged.length} 项。`);
+              notify(diskOutcomeKind(completed.result), diskOutcomeMessage('永久删除', completed.result.purged.length, completed.result));
             })(); },
           })} />}
           {page === 'settings' && <SettingsPage value={draftSettings} setValue={setDraftSettings} browse={async () => {
@@ -998,17 +1031,17 @@ export function App() {
             } else {
               notify('success', '设置已保存。');
             }
-          }} busy={Boolean(busy) || operationsBlocked} />}
+          }} busy={uiBusy} />}
           {page === 'diagnostics' && <DiagnosticsPage health={health} desktop={desktop} activities={activities} refresh={async () => {
             const value = await run('正在检查运行环境…', () => window.cacheManager.health());
             if (value) { setHealth(value); notify(value.status === 'ok' ? 'success' : 'error', '运行环境检查完成。'); }
           }} exportReport={async () => {
             const value = await run('正在导出诊断报告…', () => window.cacheManager.exportDiagnostics(`BLCM-diagnostics-${dateStamp()}.zip`, activeRootPath || undefined));
             if (value) notify('success', `诊断报告已导出：${value.outputPath}`);
-          }} busy={Boolean(busy) || operationsBlocked} />}
+          }} busy={uiBusy} />}
         </section>
 
-        <footer className="statusbar"><span>{busy ?? (detailsLoading ? '正在加载分段详情…' : items.length ? `当前显示 ${cachePage.offset + 1}–${cachePage.offset + items.length} / ${cachePage.totalItems} 条缓存，已选 ${selectedIds.size} 条 · ${formatBytes(selectedBytes(items, selectedIds))}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
+        <footer className="statusbar"><span>{inspectionBusy ?? busy ?? (detailsLoading ? '正在加载分段详情…' : items.length ? `当前显示 ${cachePage.offset + 1}–${cachePage.offset + items.length} / ${cachePage.totalItems} 条缓存，已选 ${selectedIds.size} 条 · ${formatBytes(selectedBytes(items, selectedIds))}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
       </main>
 
       <div className="toast-stack" aria-live="polite">{notices.map((notice) => <div key={notice.id} className={`toast ${notice.kind}`}><Icon name={notice.kind === 'error' ? 'warning' : 'check'} /><span>{notice.message}</span></div>)}</div>
@@ -1143,16 +1176,16 @@ function SegmentRow({ item, checked, toggle, play }: { item: CacheSegment; check
   return <tr onDoubleClick={play}><td className="check-cell"><input aria-label={`选择分段 ${item.partName}`} type="checkbox" checked={checked} onChange={toggle} /></td><td>{item.pageIndex}</td><td><strong>{item.partName || item.segmentKey}</strong><small>{item.segmentKey}</small></td><td>{item.structureKind}</td><td>{item.materialKind}</td><td>{formatBytes(item.sizeBytes)}</td><td>{formatDuration(item.durationSeconds)}</td><td><span className={item.isPlayable ? 'dot good' : 'dot'} />{item.isPlayable ? '可播放' : '不可用'}</td></tr>;
 }
 
-function StoragePage({ storage, settings, refresh, cleanup, clear, open, busy }: { storage: StorageSnapshot; settings: AppSettings; refresh(): Promise<void>; cleanup(): Promise<void>; clear(): void; open(): Promise<void>; busy: boolean }) {
+function StoragePage({ storage, settings, refresh, cleanup, clear, open, busy, inspectionDisabled }: { storage: StorageSnapshot; settings: AppSettings; refresh(): Promise<void>; cleanup(): Promise<void>; clear(): void; open(): Promise<void>; busy: boolean; inspectionDisabled: boolean }) {
   const max = Math.max(storage.originalCache.bytes, storage.transcodeCache.bytes, storage.trash.bytes, 1);
   return <div className="stack"><section className="metric-grid"><Metric label="原始缓存" value={formatBytes(storage.originalCache.bytes)} detail={`${storage.originalCache.itemCount} 项`} color="blue" /><Metric label="转码缓存" value={formatBytes(storage.transcodeCache.bytes)} detail={`${storage.transcodeCache.itemCount} 项`} color="violet" /><Metric label="应用回收站" value={formatBytes(storage.trash.bytes)} detail={`${storage.trash.itemCount} 项`} color="amber" /><Metric label="合计占用" value={formatBytes(storage.totalBytes)} detail="由应用管理" color="green" /></section>
-    <section className="card storage-chart"><div className="panel-heading"><div><h2>空间分布</h2><span>{storage.lastMaintenanceSummary ?? '最近没有自动维护记录'}</span></div><button className="button secondary" onClick={() => void refresh()} disabled={busy}><Icon name="refresh" />刷新统计</button></div>
+    <section className="card storage-chart"><div className="panel-heading"><div><h2>空间分布</h2><span>{storage.lastMaintenanceSummary ?? '最近没有自动维护记录'}</span></div><button className="button secondary" onClick={() => void refresh()} disabled={inspectionDisabled}><Icon name="refresh" />刷新统计</button></div>
       {[['B 站原始缓存', storage.originalCache.bytes, 'blue'], ['转码缓存', storage.transcodeCache.bytes, 'violet'], ['应用回收站', storage.trash.bytes, 'amber']].map(([label, bytes, color]) => <div className="bar-row" key={label as string}><div><span>{label}</span><b>{formatBytes(bytes as number)}</b></div><div className="bar-track"><i className={color as string} style={{ width: `${Math.max(2, (bytes as number) / max * 100)}%` }} /></div></div>)}
-    </section><section className="card policy-card"><div><h2>转码缓存策略</h2><p>超过 {settings.transcodeCacheRetentionDays} 天或总量超过 {settings.transcodeCacheMaxSizeGigabytes} GB 时进行维护。可在“设置”中调整。</p></div><div className="toolbar"><button className="button ghost" onClick={() => void open()} disabled={busy}><Icon name="folder" />打开转码缓存目录</button><button className="button secondary" onClick={() => void cleanup()} disabled={busy}><Icon name="refresh" />按策略清理</button><button className="button danger" onClick={clear} disabled={busy}><Icon name="delete" />清空转码缓存</button></div></section></div>;
+    </section><section className="card policy-card"><div><h2>转码缓存策略</h2><p>超过 {settings.transcodeCacheRetentionDays} 天或总量超过 {settings.transcodeCacheMaxSizeGigabytes} GB 时进行维护。可在“设置”中调整。</p></div><div className="toolbar"><button className="button ghost" onClick={() => void open()} disabled={inspectionDisabled}><Icon name="folder" />打开转码缓存目录</button><button className="button secondary" onClick={() => void cleanup()} disabled={busy}><Icon name="refresh" />按策略清理</button><button className="button danger" onClick={clear} disabled={busy}><Icon name="delete" />清空转码缓存</button></div></section></div>;
 }
 
-function TrashPage({ entries, selected, setSelected, refresh, restore, purge, busy, canPurge }: { entries: TrashEntry[]; selected: Set<string>; setSelected(value: Set<string>): void; refresh(): Promise<void>; restore(): void; purge(all: boolean): void; busy: boolean; canPurge: boolean }) {
-  return <section className="card full-panel"><div className="panel-heading"><div><h2>应用回收站</h2><span>{entries.length} 项 · {formatBytes(entries.reduce((sum, item) => sum + item.sizeBytes, 0))}{!canPurge ? ' · 当前平台暂不支持永久清理' : ''}</span></div><div className="toolbar"><button className="button ghost" onClick={() => void refresh()} disabled={busy}><Icon name="refresh" />刷新</button><button className="button secondary" onClick={restore} disabled={!selected.size || busy}><Icon name="restore" />恢复所选</button>{canPurge && <button className="button danger" onClick={() => purge(true)} disabled={!entries.length || busy}>清空回收站</button>}</div></div>
+function TrashPage({ entries, selected, setSelected, refresh, restore, purge, busy, inspectionDisabled, canPurge }: { entries: TrashEntry[]; selected: Set<string>; setSelected(value: Set<string>): void; refresh(): Promise<void>; restore(): void; purge(all: boolean): void; busy: boolean; inspectionDisabled: boolean; canPurge: boolean }) {
+  return <section className="card full-panel"><div className="panel-heading"><div><h2>应用回收站</h2><span>{entries.length} 项 · {formatBytes(entries.reduce((sum, item) => sum + item.sizeBytes, 0))}{!canPurge ? ' · 当前平台暂不支持永久清理' : ''}</span></div><div className="toolbar"><button className="button ghost" onClick={() => void refresh()} disabled={inspectionDisabled}><Icon name="refresh" />刷新</button><button className="button secondary" onClick={restore} disabled={!selected.size || busy}><Icon name="restore" />恢复所选</button>{canPurge && <button className="button danger" onClick={() => purge(true)} disabled={!entries.length || busy}>清空回收站</button>}</div></div>
     {entries.length ? <div className="table-scroll"><table><thead><tr><th className="check-cell"><input aria-label="选择全部回收站条目" type="checkbox" checked={selected.size === entries.length} onChange={(event) => setSelected(event.target.checked ? new Set(entries.map((item) => item.id)) : new Set())} /></th><th>标题</th><th>AV 号</th><th>大小</th><th>删除时间</th><th>原位置</th></tr></thead><tbody>{entries.map((item) => <tr key={item.id}><td className="check-cell"><input aria-label={`选择 ${item.title}`} type="checkbox" checked={selected.has(item.id)} onChange={() => setSelected(toggleSet(selected, item.id))} /></td><td><strong>{item.title || '未命名缓存'}</strong></td><td>av{item.avid}</td><td>{formatBytes(item.sizeBytes)}</td><td>{formatDate(item.deletedAt)}</td><td className="path-cell" title={item.originalPath}>{item.originalPath ?? '—'}</td></tr>)}</tbody></table></div> : <Empty icon="trash" title="回收站为空" body="从缓存库删除的项目会先移到这里，避免误删。" />}
   </section>;
 }
@@ -1187,7 +1220,14 @@ function formatBytes(bytes: number): string { if (!Number.isFinite(bytes) || byt
 function formatDuration(seconds: number): string { if (!Number.isFinite(seconds) || seconds <= 0) return '—'; const total = Math.round(seconds); const h = Math.floor(total / 3600); const m = Math.floor((total % 3600) / 60); const s = total % 60; return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`; }
 function formatDate(value: string | null): string { if (!value) return '未知'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }); }
 function trashTime(entry: TrashEntry): number { if (!entry.deletedAt) return 0; const value = new Date(entry.deletedAt).getTime(); return Number.isNaN(value) ? 0 : value; }
-function artifactCleanupMessage(prefix: string, result: ArtifactCleanupResult): string { return `${prefix}：删除 ${result.deletedFileCount} 个文件，释放 ${formatBytes(result.freedBytes)}，失败 ${result.failedFileCount} 个，剩余 ${formatBytes(result.remainingBytes)}。`; }
+type DiskOutcome = { failed: string[]; cancelled?: boolean; unprocessed?: string[] };
+function diskOutcomeKind(result: DiskOutcome): Notice['kind'] { return result.failed.length ? 'error' : result.cancelled ? 'info' : 'success'; }
+function diskOutcomeMessage(action: string, count: number, result: DiskOutcome, failed = result.failed.length): string {
+  return `已${action} ${count} 项，失败 ${failed} 项${result.unprocessed?.length ? `，未执行 ${result.unprocessed.length} 项` : ''}。${result.cancelled ? '已取消剩余操作。' : ''}`;
+}
+function artifactCleanupMessage(prefix: string, result: ArtifactCleanupResult): string {
+  return `${result.cancelled ? '清理已停止' : prefix}：删除 ${result.deletedFileCount} 个文件，释放 ${formatBytes(result.freedBytes)}，失败 ${result.failedFileCount} 个，未执行 ${result.unprocessedFileCount ?? 0} 个，剩余${result.remainingBytesEstimated ? '约' : ''} ${formatBytes(result.remainingBytes)}。`;
+}
 function isUnknownOutcome(error: unknown): boolean {
   return /OUTCOME_UNKNOWN|结果无法确认/i.test(describeError(error));
 }

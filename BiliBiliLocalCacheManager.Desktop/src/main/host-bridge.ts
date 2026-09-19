@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import type { Writable } from 'node:stream';
 import type { JsonObject, JsonValue, OperationState } from '../shared/contracts';
 import { JsonLineDecoder, type HostMessage } from './protocol';
 
@@ -44,6 +45,8 @@ export function hostTimeoutPolicy(method: string): { milliseconds: number; idle:
 
 const MAX_HOST_REQUEST_BYTES = 1024 * 1024;
 const HOST_OUTPUT_DRAIN_TIMEOUT_MS = 5_000;
+const HOST_SHUTDOWN_GRACE_MS = 1_500;
+const HOST_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 const unsafePackagedHostEnvironmentVariables = new Set([
   'CACHE_MANAGER_HOST_PATH',
@@ -129,6 +132,7 @@ export class DesktopHostBridge extends EventEmitter {
   #pending = new Map<string, PendingRequest>();
   #starting: Promise<HostContext> | null = null;
   #stopping = false;
+  #disposal: Promise<void> | null = null;
   #states = new Map<string, OperationState>();
   readonly #trustedEnvOverrides: NodeJS.ProcessEnv;
 
@@ -225,17 +229,45 @@ export class DesktopHostBridge extends EventEmitter {
     return true;
   }
 
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
     this.#stopping = true;
+    return this.#disposal ??= this.#dispose();
+  }
+
+  async #dispose(): Promise<void> {
     await this.#starting?.catch(() => undefined);
-    await Promise.all([...this.#contexts].map(async context => {
+    const results = await Promise.allSettled([...this.#contexts].map(async context => {
       this.#endContext(context, new DesktopHostError('桌面应用正在关闭。', 'APP_CLOSING'));
-      const force = setTimeout(() => { if (!context.draining) context.child.kill(); }, 1_500);
-      if (!context.draining) context.child.stdin.end();
-      try { await context.closed; }
-      finally { clearTimeout(force); context.detach(); }
+      const force = setTimeout(() => {
+        if (!context.draining) {
+          try { context.child.kill('SIGKILL'); } catch { /* The final deadline also covers failed kills. */ }
+        }
+      }, HOST_SHUTDOWN_GRACE_MS);
+      let deadline: NodeJS.Timeout | undefined;
+      const timeout = new Promise<false>(resolve => {
+        deadline = setTimeout(() => resolve(false), HOST_SHUTDOWN_TIMEOUT_MS);
+      });
+      try {
+        if (!context.draining) {
+          try { context.child.stdin.end(); } catch { /* Continue to the forced shutdown deadline. */ }
+        }
+        if (!await Promise.race([context.closed.then(() => true), timeout])) {
+          throw new DesktopHostError('Desktop Host 未在关闭期限内退出。', 'HOST_SHUTDOWN_TIMEOUT');
+        }
+      } finally {
+        clearTimeout(force);
+        clearTimeout(deadline);
+        // Also release inherited pipes when the output-drain deadline wins.
+        context.child.stdin.destroy();
+        context.child.stdout.destroy();
+        context.child.stderr.destroy();
+        context.child.unref();
+        context.detach();
+      }
     }));
     this.#states.clear();
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
 
   #start(): Promise<HostContext> {
@@ -293,6 +325,10 @@ export class DesktopHostBridge extends EventEmitter {
       if (context.draining || outputClosed) return;
       this.#endContext(context, new DesktopHostError('Desktop Host 进程错误：' + value.message, 'HOST_START_FAILED'), true);
     };
+    const stopInputErrors = watchInputErrors(child.stdin, value => {
+      if (context.ended || context.draining || outputClosed) return;
+      this.#endContext(context, new DesktopHostError('Desktop Host 输入管道错误：' + value.message, 'HOST_WRITE_FAILED'), true);
+    });
     const close = (code: number | null, signal: string | null, outputComplete = true) => {
       if (outputClosed) return;
       outputClosed = true;
@@ -319,12 +355,14 @@ export class DesktopHostBridge extends EventEmitter {
     };
     context.detach = () => {
       clearTimeout(drainTimer);
+      stopInputErrors();
       child.stdout.removeListener('data', data);
       child.stderr.removeListener('data', stderr);
       child.removeListener('exit', exit);
       child.removeListener('close', close);
       child.removeListener('error', error);
       this.#contexts.delete(context);
+      closed();
     };
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -390,6 +428,18 @@ export class DesktopHostBridge extends EventEmitter {
     if (kill) context.child.kill();
     if (!this.#stopping) this.emit('unavailable', error.message);
   }
+}
+
+function watchInputErrors(input: Writable, listener: ((error: Error) => void) | undefined): () => void {
+  const onError = (error: Error) => listener?.(error);
+  input.on('error', onError);
+  input.once('close', () => {
+    listener = undefined;
+    input.removeListener('error', onError);
+  });
+  // Child close and even input.closed can precede a queued stream error.
+  // Drop the instance callback at detach, but guard errors until stream close.
+  return () => { listener = undefined; };
 }
 
 function resolveHostLaunch(): { command: string; args: string[]; hostPath: string } {

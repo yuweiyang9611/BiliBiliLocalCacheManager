@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DesktopHostBridge } from './host-bridge';
+import { AppShutdown } from './app-shutdown';
 import { registerIpc } from './ipc';
 import {
   packagedRendererUrl,
@@ -123,6 +124,13 @@ let unregisterIpc: (() => void) | null = null;
 const bridge = new DesktopHostBridge({
   trustedEnvOverrides: trustedHostEnvironmentOverrides,
 });
+const shutdown = new AppShutdown(async () => {
+  try { unregisterIpc?.(); }
+  finally {
+    unregisterIpc = null;
+    await bridge.dispose();
+  }
+}, () => app.quit(), error => console.error('[shutdown]', error));
 const dirname = __dirname;
 let smokeCompleted = false;
 
@@ -242,7 +250,11 @@ async function completeSmokeTest(exitCode: number, message: string): Promise<voi
   smokeCompleted = true;
   const write = exitCode === 0 ? console.log : console.error;
   write(`[smoke] ${message}`);
-  await bridge.dispose();
+  try { await bridge.dispose(); }
+  catch (error) {
+    exitCode = 1;
+    console.error('[smoke] Desktop Host shutdown failed.', error);
+  }
   if (smokeDataRoot) {
     try { rmSync(smokeDataRoot, { recursive: true, force: true }); } catch { /* Never prevent Electron from exiting. */ }
   }
@@ -251,6 +263,7 @@ async function completeSmokeTest(exitCode: number, message: string): Promise<voi
 
 if (supported && singleInstance) {
   app.on('second-instance', () => {
+    if (shutdown.isShuttingDown) return;
     if (!mainWindow) mainWindow = createWindow();
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
@@ -258,6 +271,7 @@ if (supported && singleInstance) {
   });
 
   app.whenReady().then(() => {
+    if (shutdown.isShuttingDown) return;
     Menu.setApplicationMenu(null);
     registerRendererProtocol();
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -267,6 +281,7 @@ if (supported && singleInstance) {
   });
 
   app.on('activate', () => {
+    if (shutdown.isShuttingDown) return;
     if (!mainWindow) mainWindow = createWindow();
   });
 
@@ -277,9 +292,5 @@ if (supported && singleInstance) {
     }
     app.quit();
   });
-  app.on('before-quit', () => {
-    unregisterIpc?.();
-    unregisterIpc = null;
-    void bridge.dispose();
-  });
+  app.on('before-quit', event => shutdown.beforeQuit(event));
 }

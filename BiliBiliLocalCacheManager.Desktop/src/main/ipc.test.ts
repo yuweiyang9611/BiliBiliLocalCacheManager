@@ -244,6 +244,32 @@ describe('IPC cancellable request tracking', () => {
 });
 
 describe('IPC Host contract wiring', () => {
+  it.each([
+    { method: 'trash.move', channel: channels.trashMove, args: [path.resolve('cache'), ['100']], result: { moved: ['100'], failed: [], cancelled: true, unprocessed: ['200'] } },
+    { method: 'trash.restore', channel: channels.trashRestore, args: [path.resolve('cache'), ['entry-1']], result: { restored: ['entry-1'], failed: [], cancelled: true, unprocessed: ['entry-2'] } },
+    { method: 'trash.purge', channel: channels.trashPurge, args: [path.resolve('cache'), ['entry-1']], result: { purged: ['entry-1'], failed: [], cancelled: false, unprocessed: [] } },
+    { method: 'artifacts.cleanup', channel: channels.artifactsCleanup, args: [], result: { deletedFileCount: 1, freedBytes: 42, failedFileCount: 0, remainingBytes: 123, cancelled: true, unprocessedFileCount: 2, remainingBytesEstimated: true } },
+    { method: 'artifacts.clear', channel: channels.artifactsClear, args: [], result: { deletedFileCount: 1, freedBytes: 42, failedFileCount: 0, remainingBytes: 123, cancelled: true, unprocessedFileCount: 2, remainingBytesEstimated: true } },
+  ])('validates and preserves $method cancellation outcomes', async ({ method, channel, args, result }) => {
+    const fake = createImmediateBridge({ [method]: result });
+    unregister = registerIpc(fake.bridge, () => null);
+    electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
+    expect(await invoke(channel, trustedEvent(34), ...args)).toEqual(result);
+  });
+
+  it.each([
+    { method: 'trash.move', channel: channels.trashMove, args: [path.resolve('cache'), ['100']], result: { moved: [], failed: [], unprocessed: [1] } },
+    { method: 'trash.restore', channel: channels.trashRestore, args: [path.resolve('cache'), ['entry-1']], result: { restored: [], failed: [], cancelled: 'true' } },
+    { method: 'trash.purge', channel: channels.trashPurge, args: [path.resolve('cache'), ['entry-1']], result: { purged: null, failed: [] } },
+    { method: 'artifacts.cleanup', channel: channels.artifactsCleanup, args: [], result: { deletedFileCount: 1, freedBytes: 42, failedFileCount: 0, remainingBytes: 123, unprocessedFileCount: -1 } },
+    { method: 'artifacts.clear', channel: channels.artifactsClear, args: [], result: { deletedFileCount: 1, freedBytes: 42, failedFileCount: 0, remainingBytes: 123, remainingBytesEstimated: 'true' } },
+  ])('rejects malformed $method outcomes', async ({ method, channel, args, result }) => {
+    const fake = createImmediateBridge({ [method]: result });
+    unregister = registerIpc(fake.bridge, () => null);
+    electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
+    await expect(invoke(channel, trustedEvent(35), ...args)).rejects.toThrow(/Desktop Host/);
+  });
+
   it('rejects a malformed initialState response from the Host', async () => {
     const fake = createImmediateBridge({
       initialState: { protocolVersion: 3 },
@@ -367,6 +393,16 @@ describe('IPC export destinations', () => {
 });
 
 describe('IPC trash root safety', () => {
+  it('reports the complete unprocessed snapshot when the native purge confirmation is cancelled', async () => {
+    const fake = createImmediateBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    electronMocks.showMessageBox.mockResolvedValue({ response: 1 });
+
+    expect(await invoke(channels.trashPurge, trustedEvent(36), path.resolve('cache'), ['entry-1', 'entry-2']))
+      .toEqual({ purged: [], failed: [], cancelled: true, unprocessed: ['entry-1', 'entry-2'] });
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it('requires an explicit root and a non-empty entry snapshot before showing confirmation', async () => {
     const fake = createImmediateBridge();
     unregister = registerIpc(fake.bridge, () => null);
@@ -470,7 +506,9 @@ function createImmediateBridge(results: Record<string, unknown> = {}): {
       id,
       promise: Promise.resolve((Object.hasOwn(results, method)
         ? results[method]
-        : { outputPath: params.outputPath, published: true, exportedCount: 1, failures: [] }) as T),
+        : method === 'trash.purge'
+          ? { purged: params.entryIds, failed: [] }
+          : { outputPath: params.outputPath, published: true, exportedCount: 1, failures: [] }) as T),
       cancel: () => false,
     };
   };

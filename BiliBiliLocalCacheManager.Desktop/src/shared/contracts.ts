@@ -99,7 +99,14 @@ export interface ArtifactCleanupResult {
   freedBytes: number;
   failedFileCount: number;
   remainingBytes: number;
+  cancelled?: boolean;
+  unprocessedFileCount?: number;
+  remainingBytesEstimated?: boolean;
 }
+
+export interface TrashMoveResult { moved: string[]; failed: string[]; cancelled?: boolean; unprocessed?: string[] }
+export interface TrashRestoreResult { restored: string[]; failed: string[]; cancelled?: boolean; unprocessed?: string[] }
+export interface TrashPurgeResult { purged: string[]; failed: string[]; cancelled?: boolean; unprocessed?: string[] }
 
 export interface TrashEntry {
   id: string;
@@ -226,10 +233,10 @@ export interface CacheManagerApi {
   cleanupTranscodeCache(): Promise<ArtifactCleanupResult>;
   clearTranscodeCache(): Promise<ArtifactCleanupResult | null>;
   openTranscodeCache(): Promise<boolean>;
-  moveToTrash(rootPath: string, avids: string[]): Promise<{ moved: string[]; failed: string[] }>;
+  moveToTrash(rootPath: string, avids: string[]): Promise<TrashMoveResult>;
   listTrash(rootPath: string): Promise<TrashEntry[]>;
-  restoreTrash(rootPath: string, entryIds: string[]): Promise<{ restored: string[]; failed: string[] }>;
-  purgeTrash(rootPath: string, entryIds: string[]): Promise<{ purged: string[]; failed: string[] }>;
+  restoreTrash(rootPath: string, entryIds: string[]): Promise<TrashRestoreResult>;
+  purgeTrash(rootPath: string, entryIds: string[]): Promise<TrashPurgeResult>;
   play(rootPath: string, targets: SelectionTarget[], playerPreference: PlayerPreference, includeIncomplete: boolean): Promise<PlaybackBatchResult>;
   exportMedia(rootPath: string, targets: SelectionTarget[], suggestedName: string, includeIncomplete: boolean): Promise<ExportBatchResult | null>;
   exportDiagnostics(suggestedName: string, rootPath?: string): Promise<{ outputPath: string } | null>;

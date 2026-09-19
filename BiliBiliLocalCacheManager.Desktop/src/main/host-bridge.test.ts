@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostMocks = vi.hoisted(() => ({
@@ -321,6 +322,109 @@ describe('Host lifecycle and confirmed cancellation', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(['request', 'cancel'] as const)('handles a real Writable %s callback failure and its later stream error once', async failure => {
+    const fake = createFakeHostProcess();
+    const input = new Writable({
+      write(chunk, _encoding, callback) {
+        const request = JSON.parse(chunk.toString()) as { method: string };
+        callback((request.method === 'cancel') === (failure === 'cancel') ? new Error('broken input') : null);
+      },
+    });
+    Object.assign(fake.child, { stdin: input });
+    const inputClosed = new Promise<void>(resolve => input.once('close', resolve));
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const unavailable = vi.fn();
+    bridge.on('unavailable', unavailable);
+    const call = bridge.call(failure === 'cancel' ? 'export' : 'search');
+    const result = call.promise.catch(error => error.code);
+    if (failure === 'cancel') {
+      await vi.waitFor(() => expect(input.listenerCount('error')).toBe(1));
+      call.cancel();
+    }
+    await inputClosed;
+    expect(await result).toBe(failure === 'cancel' ? 'OUTCOME_UNKNOWN' : 'HOST_WRITE_FAILED');
+    expect(unavailable).toHaveBeenCalledOnce();
+    expect(fake.child.kill).toHaveBeenCalledOnce();
+    expect(input.listenerCount('error')).toBe(0);
+    expect(input.listenerCount('close')).toBe(0);
+    await bridge.dispose();
+  });
+
+  it('handles a stream-only input failure without treating side effects as cancelled', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const state = vi.fn();
+    const unavailable = vi.fn();
+    bridge.on('operation-state', state);
+    bridge.on('unavailable', unavailable);
+    const call = bridge.call('export');
+    const result = call.promise.catch(error => error.code);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(() => fake.child.stdin.emit('error', new Error('pipe disconnected'))).not.toThrow();
+    expect(await result).toBe('OUTCOME_UNKNOWN');
+    expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'unknown' }));
+    expect(unavailable).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    fake.child.stdin.emit('close');
+    expect(fake.child.stdin.listenerCount('error')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    await bridge.dispose();
+  });
+
+  it('absorbs detached old input errors until input close without affecting a new Host', async () => {
+    vi.useFakeTimers();
+    const old = createFakeHostProcess();
+    const next = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValueOnce(old.child).mockReturnValueOnce(next.child);
+    const bridge = new DesktopHostBridge();
+    const unavailable = vi.fn();
+    bridge.on('unavailable', unavailable);
+    const first = bridge.call('search');
+    const firstResult = first.promise.catch(error => error.code);
+    await vi.advanceTimersByTimeAsync(0);
+    old.child.stdin.write.mock.calls[0][2](new Error('write failed'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await firstResult).toBe('HOST_WRITE_FAILED');
+    expect(old.child.stdin.listenerCount('error')).toBe(1);
+    const second = bridge.call('health');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(() => old.child.stdin.emit('error', new Error('late stream error'))).not.toThrow();
+    old.child.stdin.emit('close');
+    expect(old.child.stdin.listenerCount('error')).toBe(0);
+    expect(unavailable).toHaveBeenCalledOnce();
+    next.child.stdout.emit('data', JSON.stringify({ id: second.id, result: 'healthy' }) + '\n');
+    await expect(second.promise).resolves.toBe('healthy');
+    await bridge.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('guards a queued destroy error after shutdown detaches the child', async () => {
+    const fake = createFakeHostProcess();
+    const input = new Writable({
+      write(_chunk, _encoding, callback) { callback(); },
+      final(callback) { callback(); fake.child.emit('exit', 0, null); fake.child.emit('close', 0, null); },
+      destroy(_error, callback) { queueMicrotask(() => callback(new Error('late destroy failure'))); },
+    });
+    Object.assign(fake.child, { stdin: input });
+    const inputClosed = new Promise<void>(resolve => input.once('close', resolve));
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const unavailable = vi.fn();
+    bridge.on('unavailable', unavailable);
+    const call = bridge.call('search');
+    const result = call.promise.catch(error => error.code);
+    await vi.waitFor(() => expect(input.listenerCount('error')).toBe(1));
+    await bridge.dispose();
+    await inputClosed;
+    expect(await result).toBe('APP_CLOSING');
+    expect(unavailable).not.toHaveBeenCalled();
+    expect(input.listenerCount('error')).toBe(0);
+    expect(input.listenerCount('close')).toBe(0);
+  });
+
   it('does not spawn a process when disposal races initial startup', async () => {
     const bridge = new DesktopHostBridge();
     const call = bridge.call('health');
@@ -329,6 +433,110 @@ describe('Host lifecycle and confirmed cancellation', () => {
     await rejected;
     expect(hostMocks.spawn).not.toHaveBeenCalled();
     await expect(bridge.call('health').promise).rejects.toMatchObject({ code: 'APP_CLOSING' });
+  });
+
+  it('shares shutdown across repeated disposals and waits for graceful close', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    fake.child.stdin.end.mockImplementation(() => {});
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const call = bridge.call('search');
+    const result = call.promise.catch(error => error.code);
+    await vi.advanceTimersByTimeAsync(0);
+    const disposal = bridge.dispose();
+    expect(bridge.dispose()).toBe(disposal);
+    const done = vi.fn();
+    void disposal.then(done);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(done).not.toHaveBeenCalled();
+    expect(fake.child.stdin.end).toHaveBeenCalledOnce();
+    expect(await result).toBe('APP_CLOSING');
+    fake.child.emit('exit', 0, null);
+    fake.child.emit('close', 0, null);
+    await disposal;
+    expect(fake.child.kill).not.toHaveBeenCalled();
+    expect(fake.child.stdin.listenerCount('error')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('force kills only on shutdown when the graceful deadline expires', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    fake.child.stdin.end.mockImplementation(() => {});
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const call = bridge.call('play');
+    void call.promise.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    const disposal = bridge.dispose();
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(fake.child.kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await disposal;
+    expect(fake.child.kill).toHaveBeenCalledExactlyOnceWith('SIGKILL');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['false', 'throw', 'no-close'] as const)('bounds a %s kill and releases handles', async failure => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    fake.child.stdin.end.mockImplementation(() => { throw new Error('closed input'); });
+    fake.child.kill.mockImplementation(() => {
+      if (failure === 'throw') throw new Error('access denied');
+      if (failure === 'no-close') fake.child.emit('exit', null, 'SIGKILL');
+      return failure !== 'false';
+    });
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const call = bridge.call('search');
+    void call.promise.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    const disposal = bridge.dispose();
+    const result = disposal.catch(error => error.code);
+    await vi.advanceTimersByTimeAsync(4_999);
+    const done = vi.fn();
+    void result.then(done);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(done).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBe('HOST_SHUTDOWN_TIMEOUT');
+    expect(bridge.dispose()).toBe(disposal);
+    expect(fake.child.kill).toHaveBeenCalledOnce();
+    expect(fake.child.stdin.destroy).toHaveBeenCalledOnce();
+    expect(fake.child.stdout.destroy).toHaveBeenCalledOnce();
+    expect(fake.child.stderr.destroy).toHaveBeenCalledOnce();
+    expect(fake.child.unref).toHaveBeenCalledOnce();
+    expect(fake.child.stdin.listenerCount('error')).toBe(0);
+    expect(fake.child.stdout.listenerCount('data')).toBe(0);
+    expect(fake.child.listenerCount('exit')).toBe(0);
+    expect(fake.child.listenerCount('close')).toBe(0);
+    expect(fake.child.listenerCount('error')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(bridge.call('health').promise).rejects.toMatchObject({ code: 'APP_CLOSING' });
+  });
+
+  it('releases calls waiting for output drain when shutdown reaches its deadline', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const first = bridge.call('search');
+    void first.promise.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    fake.child.emit('exit', 0, null);
+    const waiting = bridge.call('health');
+    const waitingResult = waiting.promise.catch(error => error.code);
+    const disposal = bridge.dispose();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await disposal;
+    expect(await waitingResult).toBe('APP_CLOSING');
+    expect(hostMocks.spawn).toHaveBeenCalledOnce();
+    expect(fake.child.kill).not.toHaveBeenCalled();
+    expect(fake.child.stdout.destroy).toHaveBeenCalledOnce();
+    expect(fake.child.stderr.destroy).toHaveBeenCalledOnce();
+    expect(fake.child.unref).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it.each(['success', 'cancelled', 'error'] as const)('drains a split terminal %s response after exit', async outcome => {
@@ -350,8 +558,10 @@ describe('Host lifecycle and confirmed cancellation', () => {
     expect(fake.child.stdout.listenerCount('data')).toBe(1);
     // A late write failure must not discard the terminal response either.
     fake.child.stdin.write.mock.calls[0][2](new Error('closed pipe'));
+    expect(() => fake.child.stdin.emit('error', new Error('late input error'))).not.toThrow();
     fake.child.stdout.emit('data', message.slice(20));
     fake.child.emit('close', 0, null);
+    fake.child.stdin.emit('close');
     expect(await result).toEqual(outcome === 'success' ? { published: true } : outcome === 'cancelled' ? 'CANCELLED' : 'EXPORT_FAILED');
     expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'settled' }));
     expect(state.mock.calls.some(([value]) => value.state === 'unknown')).toBe(false);
@@ -439,15 +649,18 @@ function createFakeHostProcess(): {
 function createFakeChild(writes: Array<{ id: string; method: string; params: Record<string, unknown> }>) {
   const child = new EventEmitter() as EventEmitter & {
     killed: boolean;
-    stdin: EventEmitter & { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
-    stdout: EventEmitter & { setEncoding: ReturnType<typeof vi.fn> };
-    stderr: EventEmitter & { setEncoding: ReturnType<typeof vi.fn> };
+    stdin: EventEmitter & { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> };
+    stdout: EventEmitter & { setEncoding: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> };
+    stderr: EventEmitter & { setEncoding: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> };
     kill: ReturnType<typeof vi.fn>;
+    unref: ReturnType<typeof vi.fn>;
   };
   child.killed = false;
-  child.stdout = Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
-  child.stderr = Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
+  child.stdout = Object.assign(new EventEmitter(), { setEncoding: vi.fn(), destroy: vi.fn() });
+  child.stderr = Object.assign(new EventEmitter(), { setEncoding: vi.fn(), destroy: vi.fn() });
+  child.unref = vi.fn();
   child.stdin = Object.assign(new EventEmitter(), {
+    destroy: vi.fn(() => { child.stdin.emit('close'); }),
     write: vi.fn((chunk: string, _encoding: string, callback: (error?: Error | null) => void) => {
       writes.push(JSON.parse(chunk.trim()) as { id: string; method: string; params: Record<string, unknown> });
       callback(null);

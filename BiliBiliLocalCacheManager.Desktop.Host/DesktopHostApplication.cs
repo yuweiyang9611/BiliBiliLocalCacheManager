@@ -49,7 +49,7 @@ internal sealed partial class DesktopHostApplication
     ];
 
     private readonly CoreContracts.ICacheManager _cacheManager = new CacheManager();
-    private readonly CoreContracts.ICacheTrashService _trashService = new FileSystemCacheTrashService();
+    private readonly CoreContracts.ICacheTrashService _trashService;
     private readonly PlaybackContracts.IPlaybackArtifactStore _artifactStore;
     private readonly CachePlaybackService _playbackService;
     private readonly PlaybackContracts.IPlaybackLauncher _desktopPlaybackLauncher;
@@ -73,9 +73,12 @@ internal sealed partial class DesktopHostApplication
     private bool _currentIncludeIncomplete;
     private DateTimeOffset? _lastScanCompletedAtUtc;
 
-    public DesktopHostApplication(PlaybackContracts.IPlaybackLauncher? playbackLauncher = null)
+    public DesktopHostApplication(
+        PlaybackContracts.IPlaybackLauncher? playbackLauncher = null,
+        CoreContracts.ICacheTrashService? trashService = null)
     {
         _desktopPlaybackLauncher = playbackLauncher ?? new SystemPlaybackLauncher();
+        _trashService = trashService ?? new FileSystemCacheTrashService();
         var settingsPath = Environment.GetEnvironmentVariable(
             "BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH");
         var transcodeCacheRoot = Environment.GetEnvironmentVariable(
@@ -559,12 +562,13 @@ internal sealed partial class DesktopHostApplication
                 var failed = new List<string>();
                 foreach (var avid in avids)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
+                    if (cancellationToken.IsCancellationRequested) break;
                     var item = _trashService.MoveToTrash(root, avid);
                     var avidText = avid.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     if (item.Succeeded)
                     {
                         moved.Add(avidText);
+                        ClearCurrentIndex();
                     }
                     else
                     {
@@ -572,12 +576,10 @@ internal sealed partial class DesktopHostApplication
                     }
                 }
 
-                return new { moved, failed };
+                var unprocessed = avids.Skip(moved.Count + failed.Count)
+                    .Select(avid => avid.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                return new { moved, failed, unprocessed, cancelled = unprocessed.Length > 0 };
             }, cancellationToken);
-            if (result.moved.Count > 0)
-            {
-                ClearCurrentIndex();
-            }
 
             return result;
         }
@@ -616,7 +618,7 @@ internal sealed partial class DesktopHostApplication
                 var failed = new List<string>();
                 foreach (var entryId in entryIds)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
+                    if (cancellationToken.IsCancellationRequested) break;
                     if (!entries.TryGetValue(entryId, out var entry) || !entry.IsRestorable)
                     {
                         failed.Add(entryId);
@@ -627,6 +629,7 @@ internal sealed partial class DesktopHostApplication
                     if (operation.Succeeded)
                     {
                         restored.Add(entryId);
+                        ClearCurrentIndex();
                     }
                     else
                     {
@@ -634,12 +637,9 @@ internal sealed partial class DesktopHostApplication
                     }
                 }
 
-                return new { restored, failed };
+                var unprocessed = entryIds.Skip(restored.Count + failed.Count).ToArray();
+                return new { restored, failed, unprocessed, cancelled = unprocessed.Length > 0 };
             }, cancellationToken);
-            if (result.restored.Count > 0)
-            {
-                ClearCurrentIndex();
-            }
 
             return result;
         }
@@ -678,6 +678,7 @@ internal sealed partial class DesktopHostApplication
             return await Task.Run<object>(() =>
             {
                 var selectedIds = requestedIds.ToHashSet(PathComparer);
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     _trashService.Purge(
@@ -699,12 +700,14 @@ internal sealed partial class DesktopHostApplication
                         });
                 }
 
-                var remaining = _trashService.ListEntries(root, cancellationToken)
+                // Purge is a non-cancellable transaction. Reconcile its committed
+                // outcome even if cancellation arrived while deletion was running.
+                var remaining = _trashService.ListEntries(root, CancellationToken.None)
                     .Select(entry => entry.TrashPath)
                     .ToHashSet(PathComparer);
                 var purged = selectedIds.Where(id => !remaining.Contains(id)).ToArray();
                 var failed = selectedIds.Where(remaining.Contains).ToArray();
-                return new { purged, failed };
+                return new { purged, failed, unprocessed = Array.Empty<string>(), cancelled = false };
             }, cancellationToken);
         }
         finally
@@ -1869,7 +1872,10 @@ internal sealed partial class DesktopHostApplication
             deletedFileCount = result.DeletedFileCount,
             freedBytes = result.FreedBytes,
             failedFileCount = result.FailedFileCount,
-            remainingBytes = result.RemainingBytes
+            remainingBytes = result.RemainingBytes,
+            cancelled = result.Cancelled,
+            unprocessedFileCount = result.UnprocessedFileCount,
+            remainingBytesEstimated = result.RemainingBytesEstimated
         };
     }
 
