@@ -95,6 +95,11 @@ describe('IPC cancellable request tracking', () => {
     await rejected;
     expect(owner.sender.send).toHaveBeenCalledWith(channels.operationState, payload);
     expect(other.sender.send).not.toHaveBeenCalled();
+    expect(await invoke(channels.operationStates, owner)).toEqual([payload]);
+    expect(await invoke(channels.operationStates, other)).toEqual([]);
+    const snapshot = await invoke(channels.operationStates, owner) as Array<{ state: string }>;
+    snapshot[0].state = 'settled';
+    expect(await invoke(channels.operationStates, owner)).toEqual([payload]);
     const ack = vi.fn(() => {
       fake.bridge.emit('operation-state', { ...payload, state: 'settled' });
       return true;
@@ -108,6 +113,35 @@ describe('IPC cancellable request tracking', () => {
     electronMocks.showMessageBox.mockResolvedValue({ response: 1 });
     expect(await invoke(channels.acknowledgeUncertain, owner, id)).toBe(true);
     expect(ack).toHaveBeenCalledWith(id);
+    expect(await invoke(channels.operationStates, owner)).toEqual([]);
+  });
+
+  it('restores pending states without a Host call and removes settled or destroyed state', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const owner = trustedEvent(104);
+    const call = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false);
+    const id = fake.calls[0].id;
+    const payload = { requestId: id, operation: 'play', state: 'cancelling', sideEffects: true };
+    fake.bridge.emit('operation-state', payload);
+    expect(await invoke(channels.operationStates, owner)).toEqual([payload]);
+    fake.bridge.emit('operation-state', { ...payload, state: 'unconfirmed' });
+    expect(await invoke(channels.operationStates, owner)).toEqual([{ ...payload, state: 'unconfirmed' }]);
+    expect(fake.calls).toHaveLength(1);
+    fake.bridge.emit('operation-state', { ...payload, state: 'settled' });
+    fake.pending.get(id)!.resolve({ queued: 1, failures: [] });
+    await call;
+    expect(await invoke(channels.operationStates, owner)).toEqual([]);
+
+    const next = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false);
+    const rejected = expect(next).rejects.toThrow();
+    fake.bridge.emit('operation-state', { ...payload, requestId: fake.calls[1].id });
+    owner.sender.emit('destroyed');
+    await rejected;
+    expect(await invoke(channels.operationStates, trustedEvent(105))).toEqual([]);
+    const untrusted = trustedEvent(106);
+    Object.assign(untrusted.senderFrame!, { url: 'https://untrusted.invalid/' });
+    expect(() => invoke(channels.operationStates, untrusted)).toThrow();
   });
   it('cancels every concurrent request from the renderer, including search', async () => {
     const fake = createDeferredBridge();

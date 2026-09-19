@@ -210,6 +210,7 @@ export interface CacheManagerApi {
   cancelSearch(): Promise<boolean>;
   acknowledgeUncertain(requestId: string): Promise<boolean>;
   onOperationState(listener: (state: OperationState) => void): () => void;
+  getOperationStates(): Promise<OperationState[]>;
   health(): Promise<HostHealth>;
   getInitialState(): Promise<InitialState>;
   getSettings(): Promise<AppSettings>;

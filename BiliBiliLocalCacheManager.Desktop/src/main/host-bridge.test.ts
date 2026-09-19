@@ -271,6 +271,7 @@ describe('Host lifecycle and confirmed cancellation', () => {
     expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'unconfirmed' }));
     const rejected = expect(call.promise).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
     fake.child.emit('exit', 1, null);
+    fake.child.emit('close', 1, null);
     await rejected;
     expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'unknown' }));
     await expect(bridge.call('play').promise).rejects.toMatchObject({ code: 'OUTCOME_UNCONFIRMED' });
@@ -299,6 +300,7 @@ describe('Host lifecycle and confirmed cancellation', () => {
         callbacks.error(new Error('late error'));
         callbacks.write(new Error('late write'));
         previous.child.emit('exit', 1, null);
+        previous.child.emit('close', 1, null);
         expect(previous.child.stdout.listenerCount('data')).toBe(0);
         expect(previous.child.listenerCount('error')).toBe(0);
       }
@@ -327,6 +329,101 @@ describe('Host lifecycle and confirmed cancellation', () => {
     await rejected;
     expect(hostMocks.spawn).not.toHaveBeenCalled();
     await expect(bridge.call('health').promise).rejects.toMatchObject({ code: 'APP_CLOSING' });
+  });
+
+  it.each(['success', 'cancelled', 'error'] as const)('drains a split terminal %s response after exit', async outcome => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const state = vi.fn();
+    bridge.on('operation-state', state);
+    const call = bridge.call('export');
+    const result = call.promise.then(value => value, error => error.code);
+    await vi.advanceTimersByTimeAsync(0);
+    call.cancel();
+    const message = JSON.stringify(outcome === 'success'
+      ? { id: call.id, result: { published: true } }
+      : { id: call.id, error: { code: outcome === 'cancelled' ? 'CANCELLED' : 'EXPORT_FAILED', message: outcome } }) + '\n';
+    fake.child.stdout.emit('data', message.slice(0, 20));
+    fake.child.emit('exit', 0, null);
+    expect(fake.child.stdout.listenerCount('data')).toBe(1);
+    // A late write failure must not discard the terminal response either.
+    fake.child.stdin.write.mock.calls[0][2](new Error('closed pipe'));
+    fake.child.stdout.emit('data', message.slice(20));
+    fake.child.emit('close', 0, null);
+    expect(await result).toEqual(outcome === 'success' ? { published: true } : outcome === 'cancelled' ? 'CANCELLED' : 'EXPORT_FAILED');
+    expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'settled' }));
+    expect(state.mock.calls.some(([value]) => value.state === 'unknown')).toBe(false);
+    expect(fake.child.stdout.listenerCount('data')).toBe(0);
+    expect(fake.child.listenerCount('error')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    await bridge.dispose();
+  });
+
+  it('flushes a final response without a newline only when output is closed', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const call = bridge.call('export');
+    const settled = vi.fn();
+    void call.promise.then(settled);
+    await vi.advanceTimersByTimeAsync(0);
+    fake.child.emit('exit', 0, null);
+    fake.child.stdout.emit('data', JSON.stringify({ id: call.id, result: { published: true } }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).not.toHaveBeenCalled();
+    fake.child.emit('close', 0, null);
+    await expect(call.promise).resolves.toEqual({ published: true });
+    expect(vi.getTimerCount()).toBe(0);
+    await bridge.dispose();
+  });
+
+  it('waits for output closure before restarting and preserves the old final response', async () => {
+    vi.useFakeTimers();
+    const old = createFakeHostProcess();
+    const next = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValueOnce(old.child).mockReturnValueOnce(next.child);
+    const bridge = new DesktopHostBridge();
+    const first = bridge.call('search');
+    await vi.advanceTimersByTimeAsync(0);
+    old.child.emit('exit', 0, null);
+    const second = bridge.call('health');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostMocks.spawn).toHaveBeenCalledTimes(1);
+    expect(old.writes).toHaveLength(1);
+    old.child.stdout.emit('data', JSON.stringify({ id: first.id, result: 'old result' }) + '\n');
+    old.child.emit('close', 0, null);
+    await expect(first.promise).resolves.toBe('old result');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostMocks.spawn).toHaveBeenCalledTimes(2);
+    next.child.stdout.emit('data', JSON.stringify({ id: second.id, result: 'new result' }) + '\n');
+    await expect(second.promise).resolves.toBe('new result');
+    await bridge.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds output draining and marks only unanswered side effects unknown', async () => {
+    vi.useFakeTimers();
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const call = bridge.call('export');
+    const result = call.promise.catch(error => error.code);
+    await vi.advanceTimersByTimeAsync(0);
+    fake.child.emit('exit', 1, null);
+    fake.child.stdout.emit('data', '{"id":');
+    const settled = vi.fn();
+    void result.then(settled);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBe('OUTCOME_UNKNOWN');
+    expect(fake.child.stdout.listenerCount('data')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(fake.child.kill).not.toHaveBeenCalled();
+    await bridge.dispose();
   });
 });
 
@@ -357,12 +454,12 @@ function createFakeChild(writes: Array<{ id: string; method: string; params: Rec
       return true;
     }),
     end: vi.fn(() => {
-      queueMicrotask(() => child.emit('exit', 0, null));
+      queueMicrotask(() => { child.emit('exit', 0, null); child.emit('close', 0, null); });
     }),
   });
   child.kill = vi.fn(() => {
     child.killed = true;
-    queueMicrotask(() => child.emit('exit', null, 'SIGTERM'));
+    queueMicrotask(() => { child.emit('exit', null, 'SIGTERM'); child.emit('close', null, 'SIGTERM'); });
     return true;
   });
   return child;

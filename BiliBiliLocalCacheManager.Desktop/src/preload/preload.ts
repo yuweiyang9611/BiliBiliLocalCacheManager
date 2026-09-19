@@ -13,6 +13,7 @@ const api: CacheManagerApi = {
   cancelSearch: () => ipcRenderer.invoke(channels.searchCancel),
   acknowledgeUncertain: (id) => ipcRenderer.invoke(channels.acknowledgeUncertain, id),
   onOperationState: (listener) => subscribe(channels.operationState, listener),
+  getOperationStates: () => ipcRenderer.invoke(channels.operationStates),
   locateScanIssue: (indexToken: string, issueId: number) => ipcRenderer.invoke(channels.scanIssueLocation, indexToken, issueId),
   search: (request: SearchRequest) => ipcRenderer.invoke(channels.search, request),
   getCacheDetails: (request: CacheDetailsRequest) => ipcRenderer.invoke(channels.cacheDetails, request),

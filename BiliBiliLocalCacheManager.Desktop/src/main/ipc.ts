@@ -46,6 +46,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     detailCallIds: Set<string>;
     searchCallIds: Set<string>;
     uncertainIds: Set<string>;
+    operationStates: Map<string, OperationState>;
     onDestroyed(): void;
   };
   const activeRequests = new Map<number, SenderState>();
@@ -71,7 +72,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
         for (const activeCall of current.calls.values()) activeCall.cancel();
       };
       state = { sender, calls: new Map<string, HostCall<unknown>>(), detailCallIds: new Set<string>(),
-        searchCallIds: new Set<string>(), uncertainIds: new Set<string>(), onDestroyed };
+        searchCallIds: new Set<string>(), uncertainIds: new Set<string>(), operationStates: new Map(), onDestroyed };
       activeRequests.set(senderId, state);
       sender.once('destroyed', onDestroyed);
     }
@@ -167,6 +168,11 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     let requested = false;
     for (const id of state?.searchCallIds ?? []) requested = state?.calls.get(id)?.cancel() === true || requested;
     return requested;
+  });
+  handle(channels.operationStates, (event) => {
+    assertTrusted(event);
+    const state = activeRequests.get(event.sender.id);
+    return [...(state?.operationStates.values() ?? [])].map(value => ({ ...value }));
   });
   handle(channels.acknowledgeUncertain, async (event, value) => {
     assertTrusted(event);
@@ -353,6 +359,8 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
         typeof payload.sideEffects !== 'boolean' || !['cancelling', 'unconfirmed', 'unknown', 'settled'].includes(payload.state)) return;
     for (const [senderId, state] of activeRequests) {
       if (!state.calls.has(payload.requestId) && !state.uncertainIds.has(payload.requestId)) continue;
+      if (payload.state === 'settled') state.operationStates.delete(payload.requestId);
+      else state.operationStates.set(payload.requestId, { ...payload });
       if (payload.state === 'unknown') state.uncertainIds.add(payload.requestId);
       if (payload.state === 'settled') state.uncertainIds.delete(payload.requestId);
       if (!state.sender.isDestroyed()) state.sender.send(channels.operationState, payload);
