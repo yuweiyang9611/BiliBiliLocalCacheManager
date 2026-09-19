@@ -21,6 +21,7 @@ import type {
 } from '../shared/contracts';
 import { DEFAULT_CACHE_PAGE_SIZE, defaultSettings, emptyStorage } from '../shared/contracts';
 import { Icon, type IconName } from './components/Icon';
+import { buildPlaybackRetryTargets } from './playback-retry-targets';
 
 type Page = 'library' | 'storage' | 'trash' | 'settings' | 'diagnostics';
 type Notice = { id: number; kind: 'success' | 'error' | 'info'; message: string };
@@ -31,12 +32,13 @@ type LegacySettingsMigration = { rootPath: string };
 type IndexBinding = { rootPath: string; includeIncomplete: boolean; indexToken: string };
 type QueuedSearch = { revision: number; request: SearchRequest };
 type BootstrapStatus = 'loading' | 'ready' | 'failed';
-type StartupScanStatus = 'not-required' | 'running' | 'completed' | 'failed';
+type StartupScanStatus = 'not-required' | 'running' | 'completed' | 'failed' | 'cancelled';
 type CachePageState = Pick<CachePage, 'offset' | 'pageSize' | 'totalItems' | 'hasMore'>;
 type BatchReport = {
   kind: 'play' | 'export'; rootPath: string; targets: SelectionTarget[];
   includeIncomplete: boolean; playerPreference: PlayerPreference;
   status: 'success' | 'partial' | 'failed' | 'cancelled' | 'unknown'; succeeded: number; failures: MediaFailure[];
+  retryUnavailable?: string;
 };
 
 const initialCachePage: CachePageState = {
@@ -226,11 +228,11 @@ export function App() {
     }
   }, [notify]);
 
-  const reportScan = useCallback((result: ScanResult) => {
+  const reportScan = useCallback((result: ScanResult, prefix = '') => {
     setScanReport(result);
     const errors = (result.invalidEntries ?? 0) + (result.inaccessibleDirectories ?? 0);
     notify(errors > 0 ? 'error' : result.hasWarnings ? 'info' : 'success',
-      `扫描完成，共发现 ${result.totalItems} 条缓存；损坏 ${result.invalidEntries ?? 0} 条，无法访问 ${result.inaccessibleDirectories ?? 0} 处，跳过未完成 ${result.skippedIncompleteEntries ?? 0} 条。`);
+      `${prefix}扫描完成，共发现 ${result.totalItems} 条缓存；损坏 ${result.invalidEntries ?? 0} 条，无法访问 ${result.inaccessibleDirectories ?? 0} 处，跳过未完成 ${result.skippedIncompleteEntries ?? 0} 条。`);
   }, [notify]);
 
   useEffect(() => {
@@ -300,19 +302,27 @@ export function App() {
         } else if (loadedSettings.scanOnStartup && legacyRootPath) {
           setStartupScanStatus('running');
           setBusy('正在自动扫描缓存…');
-          const result = await window.cacheManager.scan({
-            rootPath: legacyRootPath,
-            includeIncomplete: loadedSettings.includeIncomplete,
-            persistSettings: false,
-            offset: 0,
-            pageSize: DEFAULT_CACHE_PAGE_SIZE,
-          });
-          if (disposed) return;
-          setIndexBinding({ rootPath: legacyRootPath, includeIncomplete: loadedSettings.includeIncomplete, indexToken: result.indexToken });
-          replaceLibraryItems(result.items, result);
-          setStartupScanCount(result.totalItems);
-          setStartupScanStatus('completed');
-          reportScan(result);
+          try {
+            const result = await window.cacheManager.scan({
+              rootPath: legacyRootPath,
+              includeIncomplete: loadedSettings.includeIncomplete,
+              persistSettings: false,
+              offset: 0,
+              pageSize: DEFAULT_CACHE_PAGE_SIZE,
+            });
+            if (disposed) return;
+            setIndexBinding({ rootPath: legacyRootPath, includeIncomplete: loadedSettings.includeIncomplete, indexToken: result.indexToken });
+            replaceLibraryItems(result.items, result);
+            setStartupScanCount(result.totalItems);
+            setStartupScanStatus('completed');
+            reportScan(result);
+          } catch (error) {
+            if (disposed) return;
+            invalidateIndex();
+            const cancelled = isCancellationError(error);
+            setStartupScanStatus(cancelled ? 'cancelled' : 'failed');
+            notify(cancelled ? 'info' : 'error', cancelled ? '启动扫描已取消。' : `启动扫描失败：${describeError(error)}`);
+          }
         }
         if (disposed) return;
         setBootstrapStatus('ready');
@@ -327,6 +337,7 @@ export function App() {
         if (disposed) return;
         operationInFlight.current = false;
         setBusy(null);
+        setProgress(null);
         setInitialized(true);
         resumePendingSearch.current();
       }
@@ -556,7 +567,11 @@ export function App() {
     });
     if (result) {
       const failures = result.failures;
-      setBatchReport({ ...context, targets: failures.map((failure) => ({ avid: failure.avid, ...(failure.pageIndex === null ? {} : { pageIndexes: [failure.pageIndex] }) })),
+      let retryTargets: SelectionTarget[] = [];
+      let retryUnavailable: string | undefined;
+      try { retryTargets = buildPlaybackRetryTargets(failures); }
+      catch (error) { retryUnavailable = describeError(error); }
+      setBatchReport({ ...context, targets: retryTargets, retryUnavailable,
         status: result.queued === 0 ? 'failed' : failures.length ? 'partial' : 'success', succeeded: result.queued, failures });
       notify(result.queued === 0 ? 'error' : failures.length ? 'info' : 'success', `已将 ${result.queued} 个页面交给播放器，失败 ${failures.length} 项。`);
     }
@@ -678,10 +693,11 @@ export function App() {
     if (completed.scanResult) {
       setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete, indexToken: completed.scanResult.indexToken });
       replaceLibraryItems(completed.scanResult.items, completed.scanResult);
+      reportScan(completed.scanResult);
     }
     const failedCount = completed.restoreResult.failed.length + completed.missingCount;
     notify(failedCount ? 'error' : diskOutcomeKind(completed.restoreResult), diskOutcomeMessage('撤销删除', completed.restoreResult.restored.length, completed.restoreResult, failedCount));
-  }, [activeRootPath, invalidateIndex, invalidateRootViews, notify, refreshAfterMutation, replaceLibraryItems, run, settings.includeIncomplete, undoDeleteBatch]);
+  }, [activeRootPath, invalidateIndex, invalidateRootViews, notify, refreshAfterMutation, replaceLibraryItems, reportScan, run, settings.includeIncomplete, undoDeleteBatch]);
 
   const refreshStorage = useCallback(async (announce = true) => {
     const rootPath = activeRootPath;
@@ -790,8 +806,8 @@ export function App() {
     setIndexBinding({ rootPath: migration.rootPath, includeIncomplete: sessionSettings.includeIncomplete, indexToken: result.indexToken });
     replaceLibraryItems(result.items, result);
     invalidateStorage();
-    notify('success', `已启用启动扫描，共发现 ${result.totalItems} 条缓存。`);
-  }, [invalidateIndex, invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, run]);
+    reportScan(result, '已启用启动扫描。');
+  }, [invalidateIndex, invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, reportScan, run]);
 
   useEffect(() => {
     const uiBusy = Boolean(busy) || Boolean(inspectionBusy) || detailsLoading || searching || operationsBlocked;
@@ -879,7 +895,7 @@ export function App() {
         {progress && <div className="operation-progress"><div style={{ width: `${clamp(progress.percentage ?? 12, 2, 100)}%` }} /><span>{progress.message ?? progress.stage}</span></div>}
 
         <section className="page-content">
-          {page === 'library' && scanReport && <section className="result-panel" aria-label="扫描结果">
+          {(page === 'library' || page === 'settings') && scanReport && <section className="result-panel" aria-label="扫描结果">
             <div className="panel-heading"><h2>扫描结果</h2><span>损坏 {scanReport.invalidEntries ?? 0} · 无法访问 {scanReport.inaccessibleDirectories ?? 0} · 跳过未完成 {scanReport.skippedIncompleteEntries ?? 0}</span></div>
             {scanReport.issues.length > 0 && <details><summary>问题明细（{scanReport.issues.length}）</summary><ul className="result-list">
               {scanReport.issues.map((issue) => <li key={issue.id}><div><strong>{issue.kind}</strong><p>{issue.message}</p><code>{issue.path}</code></div>
@@ -894,6 +910,7 @@ export function App() {
             <p>{batchReport.kind === 'play' ? `已交给播放器 ${batchReport.succeeded} 项` : `已发布 ${batchReport.succeeded} 项`}，失败 {batchReport.failures.length} 项。</p>
             {batchReport.kind === 'export' && batchReport.status !== 'success' && batchReport.status !== 'unknown' && <p>本批导出未发布。重试将重新执行完整批次，并复用已生成的转码缓存。</p>}
             {batchReport.status === 'unknown' && <p>操作可能已经完成，请先核对输出文件或缓存状态。</p>}
+            {batchReport.retryUnavailable && <p>{batchReport.retryUnavailable}</p>}
             {batchReport.failures.length > 0 && <details open><summary>失败明细</summary><ul className="result-list">{batchReport.failures.map((failure, index) =>
               <li key={index}><div><strong>{failure.title || (failure.avid ? `av${failure.avid}` : '操作失败')} {failure.pageIndex !== null ? `P${failure.pageIndex}` : ''}</strong><p>{failure.message}</p></div></li>)}</ul></details>}
             {batchReport.status !== 'success' && batchReport.targets.length > 0 && <button className="button secondary" disabled={uiBusy}
@@ -950,6 +967,7 @@ export function App() {
               if (completed.scanResult) {
                 setIndexBinding({ rootPath, includeIncomplete: settings.includeIncomplete, indexToken: completed.scanResult.indexToken });
                 replaceLibraryItems(completed.scanResult.items, completed.scanResult);
+                reportScan(completed.scanResult);
               }
               notify(diskOutcomeKind(completed.result), diskOutcomeMessage('恢复', completed.result.restored.length, completed.result));
             })();
@@ -1027,7 +1045,7 @@ export function App() {
             }
             if (completed.scanResult) {
               invalidateStorage();
-              notify('success', `设置已保存并重新扫描，共发现 ${completed.scanResult.totalItems} 条缓存。`);
+              reportScan(completed.scanResult, '设置已保存。');
             } else {
               notify('success', '设置已保存。');
             }

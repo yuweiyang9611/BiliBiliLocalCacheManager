@@ -34,6 +34,11 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         var root = CacheRootSafety.ValidatePhysicalRoot(rootDirectory);
         cancellationToken.ThrowIfCancellationRequested();
         var effectiveOptions = (options ?? new CacheIndexBuildOptions()).Clone();
+        if (effectiveOptions.MaximumCacheBytes is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaximumCacheBytes cannot be negative.");
+        }
+
         NormalizeVideoExtensions(effectiveOptions);
 
         var state = new ScanAccumulator(effectiveOptions.MaxReportedIssues);
@@ -115,7 +120,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                 var json = File.ReadAllText(entryPath);
                 cancellationToken.ThrowIfCancellationRequested();
                 var raw = CacheEntryRaw.FromJson(json);
-                ValidateRawEntry(raw, directoryAvid);
+                ValidateRawEntry(raw, directoryAvid, options.MaximumCacheBytes);
 
                 if (!options.IncludeIncompleteEntries && !raw.IsCompleted)
                 {
@@ -124,7 +129,20 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                 }
 
                 var videoFiles = EnumerateVideoFiles(segmentDirectory, options);
-                accumulator.Add(BiliSegmentFactory.FromRaw(raw, entryPath, segmentDirectory, videoFiles));
+                var segment = BiliSegmentFactory.FromRaw(raw, entryPath, segmentDirectory, videoFiles);
+                if (options.MaximumCacheBytes is long maximumCacheBytes)
+                {
+                    var includedBytes = state.IncludedCacheBytes.GetValueOrDefault(directoryAvid);
+                    if (segment.TotalBytes > maximumCacheBytes - includedBytes)
+                    {
+                        throw new InvalidDataException(
+                            $"同一 avid ({directoryAvid}) 的缓存总字节数超出允许上限 ({maximumCacheBytes})。");
+                    }
+
+                    state.IncludedCacheBytes[directoryAvid] = includedBytes + segment.TotalBytes;
+                }
+
+                accumulator.Add(segment);
                 state.IncludedEntries++;
             }
             catch (Exception ex) when (!options.ThrowOnInvalidEntry && IsEntryFailure(ex))
@@ -271,7 +289,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                avid > 0;
     }
 
-    private static void ValidateRawEntry(CacheEntryRaw raw, long directoryAvid)
+    private static void ValidateRawEntry(CacheEntryRaw raw, long directoryAvid, long? maximumCacheBytes)
     {
         if (raw.Avid <= 0)
         {
@@ -306,6 +324,13 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
             throw new InvalidDataException("entry.json 的缓存字节数不能为负数。");
         }
 
+        if (maximumCacheBytes is long maximum)
+        {
+            ValidateByteCount(raw.TotalBytes, "total_bytes", maximum);
+            ValidateByteCount(raw.DownloadedBytes, "downloaded_bytes", maximum);
+            ValidateByteCount(raw.GuessedTotalBytes, "guessed_total_bytes", maximum);
+        }
+
         var maximumDurationMilliseconds =
             TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond;
         if (raw.TotalTimeMilli < 0 ||
@@ -313,6 +338,15 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         {
             throw new InvalidDataException(
                 "entry.json 的 total_time_milli 超出可表示范围。");
+        }
+    }
+
+    private static void ValidateByteCount(long bytes, string fieldName, long maximum)
+    {
+        if (bytes > maximum)
+        {
+            throw new InvalidDataException(
+                $"entry.json 的 {fieldName} 超出允许的缓存字节数上限 ({maximum})。");
         }
     }
 
@@ -338,6 +372,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         public int InvalidEntries { get; set; }
         public int InaccessibleDirectories { get; set; }
         public List<CacheScanIssue> Issues { get; } = new();
+        public Dictionary<long, long> IncludedCacheBytes { get; } = new();
 
         public void AddIssue(CacheScanIssue issue)
         {

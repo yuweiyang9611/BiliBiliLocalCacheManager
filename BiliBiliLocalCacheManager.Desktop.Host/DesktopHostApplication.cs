@@ -22,6 +22,7 @@ internal sealed partial class DesktopHostApplication
     private const int MaximumPageSize = 200;
     private const int MaximumIndexTokenLength = 128;
     private const int MaximumWireTextLength = 4096;
+    private const long MaximumWireBytes = 9_007_199_254_740_991;
     private const int MaximumSessionProtectedArtifactCount = 64;
     private static readonly TimeSpan MaximumSessionProtectionAge = TimeSpan.FromHours(6);
 
@@ -252,7 +253,8 @@ internal sealed partial class DesktopHostApplication
         var options = new CacheIndexBuildOptions
         {
             IncludeIncompleteEntries = includeIncomplete,
-            MaxReportedIssues = maxReportedIssues
+            MaxReportedIssues = maxReportedIssues,
+            MaximumCacheBytes = MaximumWireBytes
         };
         var progress = new InlineProgress<CacheScanProgress>(value =>
             ReportProgress(new HostProgressEvent(
@@ -563,8 +565,19 @@ internal sealed partial class DesktopHostApplication
                 foreach (var avid in avids)
                 {
                     if (cancellationToken.IsCancellationRequested) break;
-                    var item = _trashService.MoveToTrash(root, avid);
                     var avidText = avid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    CacheTrashOperationResult item;
+                    try
+                    {
+                        item = _trashService.MoveToTrash(root, avid);
+                    }
+                    catch (Exception exception) when (IsTrashItemFailure(exception))
+                    {
+                        failed.Add(avidText);
+                        _eventRecorder.Record("Trash", "Warning", $"Failed to move {avidText}: {exception.Message}", exception);
+                        continue;
+                    }
+
                     if (item.Succeeded)
                     {
                         moved.Add(avidText);
@@ -625,7 +638,18 @@ internal sealed partial class DesktopHostApplication
                         continue;
                     }
 
-                    var operation = _trashService.Restore(root, entry.Avid, entry.TrashPath);
+                    CacheTrashOperationResult operation;
+                    try
+                    {
+                        operation = _trashService.Restore(root, entry.Avid, entry.TrashPath);
+                    }
+                    catch (Exception exception) when (IsTrashItemFailure(exception))
+                    {
+                        failed.Add(entryId);
+                        _eventRecorder.Record("Trash", "Warning", $"Failed to restore {entryId}: {exception.Message}", exception);
+                        continue;
+                    }
+
                     if (operation.Succeeded)
                     {
                         restored.Add(entryId);
@@ -648,6 +672,11 @@ internal sealed partial class DesktopHostApplication
             _mutationGate.Release();
         }
     }
+
+    private static bool IsTrashItemFailure(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException or TimeoutException or System.Security.SecurityException ||
+        // The trash service uses InvalidOperationException to reject unsafe filesystem identities.
+        exception.GetType() == typeof(InvalidOperationException);
 
     private async Task<object> PurgeTrashAsync(
         JsonElement parameters,
@@ -932,7 +961,8 @@ internal sealed partial class DesktopHostApplication
                 }, Phase: "scan")));
         var options = new CacheIndexBuildOptions
         {
-            IncludeIncompleteEntries = includeIncomplete
+            IncludeIncompleteEntries = includeIncomplete,
+            MaximumCacheBytes = MaximumWireBytes
         };
         var report = await Task.Run(
             () => _cacheManager.BuildIndexWithReport(

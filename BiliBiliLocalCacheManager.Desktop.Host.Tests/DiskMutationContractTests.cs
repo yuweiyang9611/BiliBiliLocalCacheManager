@@ -9,6 +9,128 @@ namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 public sealed partial class DesktopHostContractTests
 {
     [Theory]
+    [InlineData(false, "timeout")]
+    [InlineData(false, "io")]
+    [InlineData(false, "access")]
+    [InlineData(false, "security")]
+    [InlineData(false, "safety")]
+    [InlineData(true, "timeout")]
+    [InlineData(true, "io")]
+    [InlineData(true, "access")]
+    [InlineData(true, "security")]
+    [InlineData(true, "safety")]
+    public async Task TrashMutation_ItemExceptionPreservesCommittedItemsAndContinues(
+        bool restore, string failure)
+    {
+        using var workspace = new HostTestWorkspace();
+        foreach (var avid in new[] { 101L, 202L, 303L }) workspace.CreateCache(avid, avid.ToString());
+        var service = new ObservedTrashService();
+        var application = new DesktopHostApplication(trashService: service);
+        var requested = PrepareTrashMutation(service, workspace.CacheRoot, restore);
+        var scan = await DispatchAsync(application, "scan", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        var attempts = 0;
+        service.BeforeMutation = () =>
+        {
+            if (++attempts != 2) return;
+            throw failure switch
+            {
+                "timeout" => new TimeoutException("The transaction lock is busy."),
+                "access" => new UnauthorizedAccessException("The directory is not accessible."),
+                "security" => new System.Security.SecurityException("Filesystem access is restricted."),
+                "safety" => new InvalidOperationException("The trash entry is no longer a physical directory."),
+                _ => new IOException("The disk is unavailable.")
+            };
+        };
+
+        var parameters = restore
+            ? JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, entryIds = requested })
+            : JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, avids = requested });
+        var result = await DispatchAsync(application, restore ? "trash.restore" : "trash.move", parameters);
+
+        Assert.Equal(new[] { requested[0], requested[2] },
+            result.GetProperty(restore ? "restored" : "moved").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(new[] { requested[1] }, result.GetProperty("failed").EnumerateArray().Select(item => item.GetString()));
+        Assert.Empty(result.GetProperty("unprocessed").EnumerateArray());
+        Assert.False(result.GetProperty("cancelled").GetBoolean());
+        Assert.Equal(3, attempts);
+        var stale = await Assert.ThrowsAsync<RpcException>(() => DispatchAsync(application, "search",
+            JsonSerializer.Serialize(new { indexToken = scan.GetProperty("indexToken").GetString(), keyword = "" })));
+        Assert.Equal("stale_index", stale.Code);
+    }
+
+    [Theory]
+    [InlineData(false, 2)]
+    [InlineData(false, 3)]
+    [InlineData(true, 2)]
+    [InlineData(true, 3)]
+    public async Task TrashMutation_CancellationAfterItemExceptionPreservesProcessedAndRemainingItems(
+        bool restore, int failAfter)
+    {
+        using var workspace = new HostTestWorkspace();
+        foreach (var avid in new[] { 101L, 202L, 303L }) workspace.CreateCache(avid, avid.ToString());
+        using var cancellation = new CancellationTokenSource();
+        var service = new ObservedTrashService();
+        var requested = PrepareTrashMutation(service, workspace.CacheRoot, restore);
+        var attempts = 0;
+        service.BeforeMutation = () =>
+        {
+            if (++attempts != failAfter) return;
+            cancellation.Cancel();
+            throw new IOException("The disk became unavailable.");
+        };
+        var parameters = restore
+            ? JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, entryIds = requested })
+            : JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, avids = requested });
+
+        var result = await DispatchAsync(new DesktopHostApplication(trashService: service),
+            restore ? "trash.restore" : "trash.move", parameters, cancellation.Token);
+
+        Assert.Equal(requested.Take(failAfter - 1),
+            result.GetProperty(restore ? "restored" : "moved").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(new[] { requested[failAfter - 1] },
+            result.GetProperty("failed").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(requested.Skip(failAfter),
+            result.GetProperty("unprocessed").EnumerateArray().Select(item => item.GetString()));
+        Assert.Equal(failAfter < requested.Length, result.GetProperty("cancelled").GetBoolean());
+        Assert.Equal(failAfter, attempts);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TrashMutation_UnexpectedProgrammingExceptionIsNotAnItemFailure(bool restore)
+    {
+        using var workspace = new HostTestWorkspace();
+        foreach (var avid in new[] { 101L, 202L, 303L }) workspace.CreateCache(avid, avid.ToString());
+        var service = new ObservedTrashService();
+        var requested = PrepareTrashMutation(service, workspace.CacheRoot, restore);
+        var parameters = restore
+            ? JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, entryIds = requested })
+            : JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, avids = requested });
+        var application = new DesktopHostApplication(trashService: service);
+        foreach (var exception in new Exception[]
+                 {
+                     new NullReferenceException("A required service is missing."),
+                     new ArgumentException("An internal argument is invalid."),
+                     new ObjectDisposedException("trashService")
+                 })
+        {
+            service.BeforeMutation = () => throw exception;
+            var actual = await Record.ExceptionAsync(() => DispatchAsync(application,
+                restore ? "trash.restore" : "trash.move", parameters));
+            Assert.Same(exception, actual);
+        }
+    }
+
+    private static string[] PrepareTrashMutation(ObservedTrashService service, string root, bool restore)
+    {
+        var requested = new[] { "101", "202", "303" };
+        if (!restore) return requested;
+        foreach (var avid in requested) service.MoveToTrash(root, long.Parse(avid));
+        return service.ListEntries(root).OrderBy(entry => entry.Avid).Select(entry => entry.TrashPath).ToArray();
+    }
+
+    [Theory]
     [InlineData(false, 1)]
     [InlineData(false, 2)]
     [InlineData(true, 1)]
@@ -88,6 +210,7 @@ public sealed partial class DesktopHostContractTests
     private sealed class ObservedTrashService : ICacheTrashService
     {
         private readonly FileSystemCacheTrashService _inner = new();
+        public Action? BeforeMutation { get; set; }
         public Action? AfterMutation { get; set; }
         public string GetTrashDirectory(string rootDirectory) => _inner.GetTrashDirectory(rootDirectory);
         public CacheTrashStatistics GetStatistics(string rootDirectory, CancellationToken cancellationToken = default) =>
@@ -96,12 +219,14 @@ public sealed partial class DesktopHostContractTests
             _inner.ListEntries(rootDirectory, cancellationToken);
         public CacheTrashOperationResult MoveToTrash(string rootDirectory, long avid)
         {
+            BeforeMutation?.Invoke();
             var result = _inner.MoveToTrash(rootDirectory, avid);
             AfterMutation?.Invoke();
             return result;
         }
         public CacheTrashOperationResult Restore(string rootDirectory, long avid, string trashPath)
         {
+            BeforeMutation?.Invoke();
             var result = _inner.Restore(rootDirectory, avid, trashPath);
             AfterMutation?.Invoke();
             return result;

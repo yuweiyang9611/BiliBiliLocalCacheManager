@@ -94,6 +94,90 @@ describe('paged Host responses', () => {
   });
 });
 
+describe('cache byte-size wire boundaries', () => {
+  const responses = [
+    {
+      name: 'scan',
+      validate: validateScanResult,
+      create: (sizeBytes: number) => ({
+        ...validCachePage(),
+        items: [{ ...validCacheEntry('100'), sizeBytes }, validCacheEntry('200')],
+        issues: [],
+        issuesTruncated: false,
+      }),
+    },
+    {
+      name: 'search',
+      validate: validateCachePage,
+      create: (sizeBytes: number) => ({
+        ...validCachePage(),
+        items: [{ ...validCacheEntry('100'), sizeBytes }, validCacheEntry('200')],
+      }),
+    },
+    {
+      name: 'details',
+      validate: validateCacheDetails,
+      create: (sizeBytes: number) => ({
+        ...validCacheDetails(),
+        item: { ...validCacheEntry('100'), sizeBytes },
+      }),
+    },
+  ];
+
+  it.each(responses)('preserves the exact safe-integer byte boundary in $name', ({ validate, create }) => {
+    const value = JSON.parse(JSON.stringify(create(Number.MAX_SAFE_INTEGER)));
+    expect(validate(value)).toEqual(value);
+  });
+
+  it.each(responses)('rejects unsafe summary bytes in $name without rounding', ({ validate, create }) => {
+    const value = JSON.parse(JSON.stringify(create(Number.MAX_SAFE_INTEGER + 1)));
+    expect(() => validate(value)).toThrow(/sizeBytes/);
+  });
+
+  it('preserves exact safe segment bytes and rejects unsafe segment bytes', () => {
+    const details = validCacheDetails();
+    const withSegmentSize = (sizeBytes: number) => ({
+      ...details,
+      item: { ...details.item, sizeBytes: Number.MAX_SAFE_INTEGER },
+      segments: [{ ...details.segments[0], sizeBytes }],
+    });
+    const safe = JSON.parse(JSON.stringify(withSegmentSize(Number.MAX_SAFE_INTEGER)));
+    expect(validateCacheDetails(safe)).toEqual(safe);
+    const unsafe = JSON.parse(JSON.stringify(withSegmentSize(Number.MAX_SAFE_INTEGER + 1)));
+    expect(() => validateCacheDetails(unsafe)).toThrow(/segments\[0\]\.sizeBytes/);
+  });
+
+  it('keeps healthy scan entries and subsequent pages valid alongside an invalid byte-metadata issue', () => {
+    const scan = {
+      ...validCachePage(),
+      totalItems: 3,
+      hasMore: true,
+      items: [{ ...validCacheEntry('100'), sizeBytes: Number.MAX_SAFE_INTEGER }, validCacheEntry('200')],
+      issues: [{
+        id: 0,
+        kind: 'InvalidEntry',
+        path: 'D:\\Bilibili\\download\\400\\1\\entry.json',
+        message: 'total_bytes exceeds the supported byte-size range.',
+      }],
+      issuesTruncated: false,
+      includedEntries: 3,
+      invalidEntries: 1,
+      hasWarnings: true,
+    };
+    const nextPage = {
+      indexToken: scan.indexToken,
+      offset: 2,
+      pageSize: scan.pageSize,
+      totalItems: scan.totalItems,
+      hasMore: false,
+      items: [validCacheEntry('300')],
+    };
+
+    expect(validateScanResult(JSON.parse(JSON.stringify(scan)))).toEqual(scan);
+    expect(validateCachePage(JSON.parse(JSON.stringify(nextPage)))).toEqual(nextPage);
+  });
+});
+
 describe('disk mutation outcomes', () => {
   const trashValidators = [
     { operation: 'move', key: 'moved', validate: validateTrashMoveResult, limit: 1_000 },
@@ -193,6 +277,29 @@ function validCachePage() {
     totalItems: 2,
     hasMore: false,
     items: [validCacheEntry('100'), validCacheEntry('200')],
+  };
+}
+
+function validCacheDetails() {
+  return {
+    indexToken: 'index-token',
+    avid: '100',
+    item: validCacheEntry('100'),
+    offset: 0,
+    pageSize: 2,
+    totalItems: 1,
+    hasMore: false,
+    segments: [{
+      id: '100-1',
+      segmentKey: '1',
+      pageIndex: 1,
+      partName: 'Part 1',
+      structureKind: 'Dash',
+      materialKind: 'AudioVideo',
+      sizeBytes: 1024,
+      durationSeconds: 125,
+      isPlayable: true,
+    }],
   };
 }
 
