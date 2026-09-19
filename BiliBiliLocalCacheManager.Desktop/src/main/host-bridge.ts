@@ -14,7 +14,8 @@ interface HostContext {
   decoder: JsonLineDecoder;
   stderrTail: string;
   ended: boolean;
-  exited: Promise<void>;
+  draining: boolean;
+  closed: Promise<void>;
   detach(): void;
 }
 interface PendingRequest {
@@ -42,6 +43,7 @@ export function hostTimeoutPolicy(method: string): { milliseconds: number; idle:
 }
 
 const MAX_HOST_REQUEST_BYTES = 1024 * 1024;
+const HOST_OUTPUT_DRAIN_TIMEOUT_MS = 5_000;
 
 const unsafePackagedHostEnvironmentVariables = new Set([
   'CACHE_MANAGER_HOST_PATH',
@@ -162,7 +164,7 @@ export class DesktopHostBridge extends EventEmitter {
       const context = await this.#start();
       if (cancelRequested) throw new DesktopHostError('操作已取消。', 'CANCELLED');
       this.#assertCanCall(method);
-      if (context.ended) throw new DesktopHostError('Desktop Host 已退出。', 'HOST_EXITED');
+      if (context.ended || context.draining) throw new DesktopHostError('Desktop Host 已退出。', 'HOST_EXITED');
       const policy = hostTimeoutPolicy(method);
       const duration = timeoutMs ?? policy.milliseconds;
       return new Promise<T>((resolve, reject) => {
@@ -179,14 +181,14 @@ export class DesktopHostBridge extends EventEmitter {
           resolve: value => resolve(value as T), reject,
           timer: setTimeout(expire, duration),
           renew: policy.idle && timeoutMs === undefined ? () => {
-            if (pending.cancelRequested) return;
+            if (pending.cancelRequested || context.draining) return;
             clearTimeout(pending.timer);
             pending.timer = setTimeout(expire, duration);
           } : undefined,
         };
         this.#pending.set(id, pending);
         context.child.stdin.write(request + '\n', 'utf8', error => {
-          if (!error || context.ended) return;
+          if (!error || context.ended || context.draining) return;
           this.#endContext(context, new DesktopHostError('无法向 Desktop Host 写入请求：' + error.message, 'HOST_WRITE_FAILED'), true);
         });
       });
@@ -228,9 +230,9 @@ export class DesktopHostBridge extends EventEmitter {
     await this.#starting?.catch(() => undefined);
     await Promise.all([...this.#contexts].map(async context => {
       this.#endContext(context, new DesktopHostError('桌面应用正在关闭。', 'APP_CLOSING'));
-      const force = setTimeout(() => context.child.kill(), 1_500);
-      context.child.stdin.end();
-      try { await context.exited; }
+      const force = setTimeout(() => { if (!context.draining) context.child.kill(); }, 1_500);
+      if (!context.draining) context.child.stdin.end();
+      try { await context.closed; }
       finally { clearTimeout(force); context.detach(); }
     }));
     this.#states.clear();
@@ -238,7 +240,10 @@ export class DesktopHostBridge extends EventEmitter {
 
   #start(): Promise<HostContext> {
     if (this.#stopping) return Promise.reject(new DesktopHostError('桌面应用正在关闭。', 'APP_CLOSING'));
-    if (this.#context && !this.#context.ended) return Promise.resolve(this.#context);
+    if (this.#context && !this.#context.ended) {
+      if (this.#context.draining) return this.#context.closed.then(() => this.#start());
+      return Promise.resolve(this.#context);
+    }
     if (this.#starting) return this.#starting;
     this.#starting = Promise.resolve().then(() => {
       if (this.#stopping) throw new DesktopHostError('桌面应用正在关闭。', 'APP_CLOSING');
@@ -264,10 +269,12 @@ export class DesktopHostBridge extends EventEmitter {
       },
       shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     });
-    let exited!: () => void;
+    let closed!: () => void;
+    let outputClosed = false;
+    let drainTimer: NodeJS.Timeout | undefined;
     const context: HostContext = {
-      child, decoder: new JsonLineDecoder(), stderrTail: '', ended: false,
-      exited: new Promise<void>(resolve => { exited = resolve; }), detach: () => {},
+      child, decoder: new JsonLineDecoder(), stderrTail: '', ended: false, draining: false,
+      closed: new Promise<void>(resolve => { closed = resolve; }), detach: () => {},
     };
     this.#context = context;
     this.#contexts.add(context);
@@ -283,16 +290,35 @@ export class DesktopHostBridge extends EventEmitter {
       if (!context.ended) context.stderrTail = (context.stderrTail + chunk).slice(-4_096);
     };
     const error = (value: Error) => {
+      if (context.draining || outputClosed) return;
       this.#endContext(context, new DesktopHostError('Desktop Host 进程错误：' + value.message, 'HOST_START_FAILED'), true);
     };
-    const exit = (code: number | null, signal: string | null) => {
-      exited();
+    const close = (code: number | null, signal: string | null, outputComplete = true) => {
+      if (outputClosed) return;
+      outputClosed = true;
+      if (!context.ended && outputComplete) {
+        try {
+          for (const message of context.decoder.finish()) this.#handleMessage(context, message);
+        } catch (error) {
+          this.#endContext(context, new DesktopHostError(error instanceof Error ? error.message : String(error), 'HOST_PROTOCOL_ERROR'));
+        }
+      }
       this.#endContext(context, new DesktopHostError(
         'Desktop Host 意外退出（code=' + code + ', signal=' + signal + '）。' + context.stderrTail.trim(), 'HOST_EXITED'));
       context.detach();
+      closed();
     };
-    const close = () => exit(null, null);
+    const exit = (code: number | null, signal: string | null) => {
+      if (outputClosed || context.draining) return;
+      context.draining = true;
+      // exit can precede the last stdout data. Keep this instance attached
+      // until close, but bound the wait for inherited or stalled pipes.
+      for (const pending of this.#pending.values())
+        if (pending.context === context) clearTimeout(pending.timer);
+      drainTimer = setTimeout(() => close(code, signal, false), HOST_OUTPUT_DRAIN_TIMEOUT_MS);
+    };
     context.detach = () => {
+      clearTimeout(drainTimer);
       child.stdout.removeListener('data', data);
       child.stderr.removeListener('data', stderr);
       child.removeListener('exit', exit);
@@ -337,10 +363,10 @@ export class DesktopHostBridge extends EventEmitter {
   }
 
   #sendCancellation(context: HostContext, requestId: string): void {
-    if (context.ended) return;
+    if (context.ended || context.draining) return;
     const request = JSON.stringify({ id: randomUUID(), method: 'cancel', params: { requestId } });
     context.child.stdin.write(request + '\n', 'utf8', error => {
-      if (error && !context.ended)
+      if (error && !context.ended && !context.draining)
         this.#endContext(context, new DesktopHostError('无法发送取消请求：' + error.message, 'HOST_WRITE_FAILED'), true);
     });
   }

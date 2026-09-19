@@ -210,9 +210,13 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
+    let restoringStates = true;
+    const stateUpdates = new Map<string, OperationState>();
     const unsubscribeProgress = window.cacheManager.onProgress((value) => setProgress(value));
     const unsubscribeState = window.cacheManager.onOperationState((value) => {
+      if (disposed) return;
       if (value.operation === 'search' || value.operation === 'cache.details') return;
+      if (restoringStates) stateUpdates.set(value.requestId, value);
       setOperationStates(current => {
         const next = { ...current };
         if (value.state === 'settled') delete next[value.requestId];
@@ -228,6 +232,20 @@ export function App() {
     });
     void (async () => {
       try {
+        const snapshot = await window.cacheManager.getOperationStates();
+        if (disposed) return;
+        // Events received while the snapshot was in flight take precedence,
+        // including settled events that must not resurrect an old restriction.
+        const restored: Record<string, OperationState> = {};
+        for (const value of [...snapshot, ...stateUpdates.values()]) {
+          if (value.operation === 'search' || value.operation === 'cache.details') continue;
+          if (value.state === 'settled') delete restored[value.requestId];
+          else restored[value.requestId] = value;
+        }
+        restoringStates = false;
+        stateUpdates.clear();
+        blockedOperations.current = Object.values(restored).some(state => state.sideEffects);
+        setOperationStates(restored);
         const [initial, hostHealth, info] = await Promise.all([
           window.cacheManager.getInitialState(),
           window.cacheManager.health(),

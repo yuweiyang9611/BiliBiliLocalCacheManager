@@ -94,6 +94,7 @@ function createApi(): CacheManagerApi {
     cancelSearch: vi.fn().mockResolvedValue(true),
     acknowledgeUncertain: vi.fn().mockResolvedValue(true),
     onOperationState: vi.fn().mockReturnValue(() => undefined),
+    getOperationStates: vi.fn().mockResolvedValue([]),
     search: vi.fn().mockResolvedValue(createCachePage()),
     getCacheDetails: vi.fn().mockResolvedValue(createCacheDetails()),
     cancelCacheDetails: vi.fn().mockResolvedValue(false),
@@ -227,6 +228,45 @@ describe('desktop renderer', () => {
     expect(screen.getByRole('button', { name: '重试完整批次' })).toBeDisabled();
     await act(async () => state({ requestId: 'export-1', operation: 'export', state: 'settled', sideEffects: true }));
     expect(screen.getByRole('button', { name: '重试完整批次' })).not.toBeDisabled();
+  });
+
+  it('restores the acknowledgement entry and restrictions after a renderer remount', async () => {
+    const unknown = { requestId: 'old-export', operation: 'export', state: 'unknown' as const, sideEffects: true };
+    const first = render(<App />);
+    await screen.findByText('测试缓存');
+    first.unmount();
+    vi.mocked(api.getOperationStates).mockResolvedValue([unknown]);
+    render(<App />);
+    expect(await screen.findByText('结果无法确认')).toBeInTheDocument();
+    await screen.findByText('测试缓存');
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    expect(screen.getByRole('button', { name: '导出' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '已核对结果' }));
+    await waitFor(() => expect(api.acknowledgeUncertain).toHaveBeenCalledWith('old-export'));
+    expect(screen.getByRole('button', { name: '导出' })).toBeDisabled();
+    const listener = vi.mocked(api.onOperationState).mock.calls.at(-1)![0];
+    await act(async () => listener({ ...unknown, state: 'settled' }));
+    expect(screen.queryByText('结果无法确认')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '导出' })).not.toBeDisabled();
+  });
+
+  it.each(['settled', 'unconfirmed'] as const)('keeps a live %s event ahead of an older snapshot', async state => {
+    const pending = deferred<Awaited<ReturnType<CacheManagerApi['getOperationStates']>>>();
+    vi.mocked(api.getOperationStates).mockReturnValue(pending.promise);
+    render(<App />);
+    const value = { requestId: 'old-play', operation: 'play', sideEffects: true };
+    const listener = vi.mocked(api.onOperationState).mock.calls[0][0];
+    await act(async () => listener({ ...value, state }));
+    await act(async () => pending.resolve([{ ...value, state: 'cancelling' }]));
+    await screen.findByText('测试缓存');
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    if (state === 'settled') {
+      expect(screen.queryByText('结果待确认')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '播放' })).not.toBeDisabled();
+    } else {
+      expect(screen.getByText('结果待确认')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '播放' })).toBeDisabled();
+    }
   });
 
   it('loads settings and cache rows from Desktop Host', async () => {
