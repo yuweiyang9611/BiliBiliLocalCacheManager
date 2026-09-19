@@ -3,7 +3,6 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   AppSettings,
-  ArtifactCleanupResult,
   CacheDetails,
   CacheDetailsRequest,
   CachePage,
@@ -29,6 +28,10 @@ import {
   validateScanResult,
   validatePlaybackBatchResult,
   validateExportBatchResult,
+  validateArtifactCleanupResult,
+  validateTrashMoveResult,
+  validateTrashRestoreResult,
+  validateTrashPurgeResult,
 } from './host-contract-validation';
 import { packagedRendererUrl } from './renderer-protocol';
 
@@ -217,9 +220,9 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       rootPath === undefined || rootPath === '' ? {} : { rootPath: assertPath(rootPath, 'rootPath') },
     ));
   });
-  handle(channels.artifactsCleanup, (event) => {
+  handle(channels.artifactsCleanup, async (event) => {
     assertTrusted(event);
-    return track(event, host<ArtifactCleanupResult>('artifacts.cleanup'));
+    return validateArtifactCleanupResult(await track(event, host<unknown>('artifacts.cleanup')));
   });
   handle(channels.artifactsClear, async (event) => {
     assertTrusted(event);
@@ -238,7 +241,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       ? await dialog.showMessageBox(parent, options)
       : await dialog.showMessageBox(options);
     if (confirmation.response !== 0) return null;
-    return track(event, host<ArtifactCleanupResult>('artifacts.clear', { confirmed: true }));
+    return validateArtifactCleanupResult(await track(event, host<unknown>('artifacts.clear', { confirmed: true })));
   });
   handle(channels.artifactsOpen, async (event) => {
     assertTrusted(event);
@@ -253,23 +256,23 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     if (openError) throw new Error(`无法打开转码缓存目录：${openError}`);
     return true;
   });
-  handle(channels.trashMove, (event, rootPath, avids) => {
+  handle(channels.trashMove, async (event, rootPath, avids) => {
     assertTrusted(event);
-    return track(event, host<{ moved: string[]; failed: string[] }>('trash.move', {
+    return validateTrashMoveResult(await track(event, host<unknown>('trash.move', {
       rootPath: assertPath(rootPath, 'rootPath'),
       avids: validateNonEmptyStringArray(avids, 'avids'),
-    }));
+    })));
   });
   handle(channels.trashList, (event, rootPath) => {
     assertTrusted(event);
     return track(event, host<TrashEntry[]>('trash.list', { rootPath: assertPath(rootPath, 'rootPath') }));
   });
-  handle(channels.trashRestore, (event, rootPath, entryIds) => {
+  handle(channels.trashRestore, async (event, rootPath, entryIds) => {
     assertTrusted(event);
-    return track(event, host<{ restored: string[]; failed: string[] }>('trash.restore', {
+    return validateTrashRestoreResult(await track(event, host<unknown>('trash.restore', {
       rootPath: assertPath(rootPath, 'rootPath'),
       entryIds: validateNonEmptyStringArray(entryIds, 'entryIds'),
-    }));
+    })));
   });
   handle(channels.trashPurge, async (event, rootPath, entryIds) => {
     assertTrusted(event);
@@ -289,12 +292,12 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     const confirmation = parent
       ? await dialog.showMessageBox(parent, options)
       : await dialog.showMessageBox(options);
-    if (confirmation.response !== 0) return { purged: [], failed: [] };
-    return track(event, host<{ purged: string[]; failed: string[] }>('trash.purge', {
+    if (confirmation.response !== 0) return { purged: [], failed: [], cancelled: true, unprocessed: validatedIds };
+    return validateTrashPurgeResult(await track(event, host<unknown>('trash.purge', {
       rootPath: validatedRoot,
       entryIds: validatedIds,
       confirmed: true,
-    }));
+    })));
   });
   handle(channels.play, async (event, rootPath, targets, playerPreference, includeIncomplete) => {
     assertTrusted(event);

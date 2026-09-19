@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  ArtifactCleanupResult,
   CacheDetails,
   CacheEntry,
   CachePage,
@@ -12,6 +13,9 @@ import type {
   StorageArea,
   StorageSnapshot,
   TrashEntry,
+  TrashMoveResult,
+  TrashRestoreResult,
+  TrashPurgeResult,
   MediaFailure,
   PlaybackBatchResult,
   ExportBatchResult,
@@ -101,6 +105,50 @@ export function validateExportBatchResult(value: unknown): ExportBatchResult {
   if (published ? !outputPath || exportedCount === 0 || failures.length > 0 : exportedCount !== 0 || outputPath !== null)
     invalid('export result is inconsistent');
   return { published, outputPath, exportedCount, failures };
+}
+
+export function validateArtifactCleanupResult(value: unknown): ArtifactCleanupResult {
+  const source = record(value, 'artifacts');
+  return {
+    deletedFileCount: integer(source.deletedFileCount, 'artifacts.deletedFileCount'),
+    freedBytes: integer(source.freedBytes, 'artifacts.freedBytes', 0, Number.MAX_SAFE_INTEGER),
+    failedFileCount: integer(source.failedFileCount, 'artifacts.failedFileCount'),
+    remainingBytes: integer(source.remainingBytes, 'artifacts.remainingBytes', 0, Number.MAX_SAFE_INTEGER),
+    ...(source.cancelled === undefined ? {} : { cancelled: boolean(source.cancelled, 'artifacts.cancelled') }),
+    ...(source.unprocessedFileCount === undefined ? {} : { unprocessedFileCount: integer(source.unprocessedFileCount, 'artifacts.unprocessedFileCount') }),
+    ...(source.remainingBytesEstimated === undefined ? {} : { remainingBytesEstimated: boolean(source.remainingBytesEstimated, 'artifacts.remainingBytesEstimated') }),
+  };
+}
+
+export function validateTrashMoveResult(value: unknown): TrashMoveResult {
+  const source = record(value, 'trash.move');
+  return { moved: diskIds(source.moved, 'trash.move.moved', 1_000), ...trashOutcome(source, 'trash.move', 1_000) };
+}
+
+export function validateTrashRestoreResult(value: unknown): TrashRestoreResult {
+  const source = record(value, 'trash.restore');
+  return { restored: diskIds(source.restored, 'trash.restore.restored', 1_000), ...trashOutcome(source, 'trash.restore', 1_000) };
+}
+
+export function validateTrashPurgeResult(value: unknown): TrashPurgeResult {
+  const source = record(value, 'trash.purge');
+  return { purged: diskIds(source.purged, 'trash.purge.purged', 10_000), ...trashOutcome(source, 'trash.purge', 10_000) };
+}
+
+function trashOutcome(source: Record<string, unknown>, label: string, maximum: number) {
+  return {
+    failed: diskIds(source.failed, `${label}.failed`, maximum),
+    ...(source.cancelled === undefined ? {} : { cancelled: boolean(source.cancelled, `${label}.cancelled`) }),
+    ...(source.unprocessed === undefined ? {} : { unprocessed: diskIds(source.unprocessed, `${label}.unprocessed`, maximum) }),
+  };
+}
+
+function diskIds(value: unknown, label: string, maximum: number): string[] {
+  return array(value, label, maximum).map((value, index) => {
+    const id = string(value, `${label}[${index}]`, 32_768);
+    if (!id.trim() || id.includes('\0')) invalid(`${label}[${index}] must be a non-empty identifier`);
+    return id;
+  });
 }
 
 export function validateCachePage(value: unknown): CachePage {

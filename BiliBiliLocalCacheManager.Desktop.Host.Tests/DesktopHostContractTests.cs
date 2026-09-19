@@ -7,7 +7,7 @@ using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 
-public sealed class DesktopHostContractTests
+public sealed partial class DesktopHostContractTests
 {
     private static readonly JsonSerializerOptions WireOptions = new()
     {

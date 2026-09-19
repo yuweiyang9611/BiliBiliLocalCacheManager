@@ -4,7 +4,11 @@ import {
   DESKTOP_HOST_PROTOCOL_VERSION,
   emptyStorage,
 } from '../shared/contracts';
-import { validateCacheDetails, validateCachePage, validateInitialState, validatePlaybackBatchResult, validateExportBatchResult, validateScanResult } from './host-contract-validation';
+import {
+  validateCacheDetails, validateCachePage, validateInitialState, validatePlaybackBatchResult,
+  validateExportBatchResult, validateScanResult, validateArtifactCleanupResult,
+  validateTrashMoveResult, validateTrashRestoreResult, validateTrashPurgeResult,
+} from './host-contract-validation';
 
 describe('validateInitialState', () => {
   it('accepts and maps a complete protocol v3 initial state', () => {
@@ -87,6 +91,57 @@ describe('paged Host responses', () => {
       segments: [],
     };
     expect(() => validateCacheDetails(details)).toThrow(/项数/);
+  });
+});
+
+describe('disk mutation outcomes', () => {
+  const trashValidators = [
+    { operation: 'move', key: 'moved', validate: validateTrashMoveResult, limit: 1_000 },
+    { operation: 'restore', key: 'restored', validate: validateTrashRestoreResult, limit: 1_000 },
+    { operation: 'purge', key: 'purged', validate: validateTrashPurgeResult, limit: 10_000 },
+  ];
+
+  it.each(trashValidators)('preserves completed and unprocessed $operation items on cancellation', ({ key, validate }) => {
+    const value = { [key]: ['100'], failed: ['200'], cancelled: true, unprocessed: ['300'] };
+    expect(validate(value)).toEqual(value);
+  });
+
+  it.each(trashValidators)('accepts older v3 $operation results without cancellation fields', ({ key, validate }) => {
+    const value = { [key]: ['100'], failed: [] };
+    expect(validate(value)).toEqual(value);
+  });
+
+  it.each(trashValidators)('rejects malformed $operation cancellation flags and identifiers', ({ key, validate, limit }) => {
+    const value = { [key]: [], failed: [] };
+    expect(() => validate({ ...value, cancelled: 'true' })).toThrow(/cancelled/);
+    expect(() => validate({ ...value, unprocessed: '100' })).toThrow(/unprocessed/);
+    expect(() => validate({ ...value, unprocessed: [100] })).toThrow(/unprocessed/);
+    expect(() => validate({ ...value, unprocessed: [''] })).toThrow(/unprocessed/);
+    expect(() => validate({ ...value, unprocessed: ['bad\0id'] })).toThrow(/unprocessed/);
+    expect(() => validate({ ...value, unprocessed: Array(limit + 1).fill('100') })).toThrow(/unprocessed/);
+    expect(() => validate({ ...value, [key]: [false] })).toThrow();
+    expect(() => validate({ ...value, failed: [null] })).toThrow(/failed/);
+  });
+
+  it('preserves partial artifact cleanup results and accepts older v3 results', () => {
+    const legacy = { deletedFileCount: 2, freedBytes: 123, failedFileCount: 1, remainingBytes: 456 };
+    expect(validateArtifactCleanupResult(legacy)).toEqual(legacy);
+    const partial = { ...legacy, cancelled: true, unprocessedFileCount: 3, remainingBytesEstimated: true };
+    expect(validateArtifactCleanupResult(partial)).toEqual(partial);
+  });
+
+  it.each([
+    ['cancelled', 'true'],
+    ['remainingBytesEstimated', 1],
+    ['unprocessedFileCount', -1],
+    ['unprocessedFileCount', 1.5],
+    ['deletedFileCount', -1],
+    ['failedFileCount', NaN],
+    ['freedBytes', Number.MAX_SAFE_INTEGER + 1],
+    ['remainingBytes', Infinity],
+  ])('rejects an invalid artifact %s field: %s', (key, value) => {
+    const response = { deletedFileCount: 2, freedBytes: 123, failedFileCount: 1, remainingBytes: 456, [key as string]: value };
+    expect(() => validateArtifactCleanupResult(response)).toThrow();
   });
 });
 

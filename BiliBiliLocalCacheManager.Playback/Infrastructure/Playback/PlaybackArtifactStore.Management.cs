@@ -25,34 +25,51 @@ public sealed partial class PlaybackArtifactStore
         var deletedCount = 0;
         var failedCount = 0;
         var freedBytes = 0L;
-        foreach (var file in SnapshotAllManagedFiles())
+        var initialFiles = SnapshotAllManagedFiles();
+        var unprocessedCount = initialFiles.Count;
+        try
         {
-            if (IsManagedBuildFile(file.File))
+            foreach (var file in initialFiles)
             {
-                DeleteStaleBuildFileIfUnlocked(
-                    file.File,
-                    ref deletedCount,
-                    ref failedCount,
-                    ref freedBytes);
+                if (IsManagedBuildFile(file.File))
+                {
+                    DeleteStaleBuildFileIfUnlocked(
+                        file.File,
+                        ref deletedCount,
+                        ref failedCount,
+                        ref freedBytes);
+                }
+                else
+                {
+                    DeleteManagedFileIfUnlocked(
+                        file.File,
+                        ref deletedCount,
+                        ref failedCount,
+                        ref freedBytes);
+                }
+                unprocessedCount--;
             }
-            else
-            {
-                DeleteManagedFileIfUnlocked(
-                    file.File,
-                    ref deletedCount,
-                    ref failedCount,
-                    ref freedBytes);
-            }
-        }
 
-        DeleteEmptyDirectories();
-        var statistics = CreateCacheStatistics(SnapshotAllManagedFiles());
-        return new PlaybackArtifactCleanupResult(
-            deletedCount,
-            freedBytes,
-            failedCount,
-            statistics.TotalBytes,
-            statistics);
+            DeleteEmptyDirectories();
+            var statistics = CreateCacheStatistics(SnapshotAllManagedFiles());
+            return new PlaybackArtifactCleanupResult(
+                deletedCount,
+                freedBytes,
+                failedCount,
+                statistics.TotalBytes,
+                statistics);
+        }
+        catch (OperationCanceledException)
+        {
+            return new PlaybackArtifactCleanupResult(
+                deletedCount,
+                freedBytes,
+                failedCount,
+                SubtractFloor(SumLengths(initialFiles), freedBytes),
+                Cancelled: true,
+                UnprocessedFileCount: unprocessedCount,
+                RemainingBytesEstimated: true);
+        }
     }
 
     private PlaybackArtifactCacheStatistics CreateCacheStatistics(

@@ -32,43 +32,64 @@ public sealed partial class PlaybackArtifactStore
         }
 
         var nowUtc = DateTime.UtcNow;
-        var plan = CreateCleanupPlan(policy, nowUtc);
+        var initialFiles = SnapshotAllManagedFiles();
+        var initialBytes = SumLengths(initialFiles);
+        var plan = CreateCleanupPlan(policy, nowUtc, initialFiles);
         var deletedCount = 0;
         var failedCount = 0;
         var freedBytes = 0L;
+        var unprocessedCount = plan.Candidates.Count;
         var attemptedManagedPaths = new HashSet<string>(PlaybackFileSystem.PathComparer);
-        foreach (var candidate in plan.Candidates)
+        try
         {
-            if (!candidate.IsStaleBuild)
+            foreach (var candidate in plan.Candidates)
             {
-                attemptedManagedPaths.Add(candidate.File.FullName);
+                if (!candidate.IsStaleBuild)
+                {
+                    attemptedManagedPaths.Add(candidate.File.FullName);
+                }
+
+                DeleteCleanupCandidateIfEligible(
+                    candidate,
+                    ref deletedCount,
+                    ref failedCount,
+                    ref freedBytes);
+                unprocessedCount--;
             }
 
-            DeleteCleanupCandidateIfEligible(
-                candidate,
+            DeleteAdditionalCapacityCandidates(
+                policy,
+                nowUtc,
+                attemptedManagedPaths,
                 ref deletedCount,
                 ref failedCount,
-                ref freedBytes);
+                ref freedBytes,
+                ref unprocessedCount);
+            DeleteEmptyDirectories();
+            var remainingFiles = SnapshotAllManagedFiles();
+            var statistics = CreateCacheStatistics(remainingFiles);
+            var preview = CreateCleanupPreview(CreateCleanupPlan(policy, nowUtc, remainingFiles));
+            return new PlaybackArtifactCleanupResult(
+                deletedCount,
+                freedBytes,
+                failedCount,
+                statistics.TotalBytes,
+                statistics,
+                preview);
         }
-
-        DeleteAdditionalCapacityCandidates(
-            policy,
-            nowUtc,
-            attemptedManagedPaths,
-            ref deletedCount,
-            ref failedCount,
-            ref freedBytes);
-        DeleteEmptyDirectories();
-        var remainingFiles = SnapshotAllManagedFiles();
-        var statistics = CreateCacheStatistics(remainingFiles);
-        var preview = CreateCleanupPreview(CreateCleanupPlan(policy, nowUtc, remainingFiles));
-        return new PlaybackArtifactCleanupResult(
-            deletedCount,
-            freedBytes,
-            failedCount,
-            statistics.TotalBytes,
-            statistics,
-            preview);
+        catch (OperationCanceledException)
+        {
+            // Never discard committed deletions because a later candidate or
+            // statistics traversal was cancelled. Avoid another slow traversal.
+            return new PlaybackArtifactCleanupResult(
+                deletedCount,
+                freedBytes,
+                failedCount,
+                SubtractFloor(initialBytes, freedBytes),
+                Cancelled: true,
+                UnprocessedFileCount: unprocessedCount,
+                RemainingBytesEstimated: true);
+        }
     }
 
     private CleanupPolicy CreateCleanupPolicy(PlaybackArtifactCleanupOptions? options)
@@ -188,7 +209,8 @@ public sealed partial class PlaybackArtifactStore
         HashSet<string> attemptedPaths,
         ref int deletedCount,
         ref int failedCount,
-        ref long freedBytes)
+        ref long freedBytes,
+        ref int unprocessedCount)
     {
         var allManagedFiles = SnapshotAllManagedFiles();
         var managedFiles = allManagedFiles
@@ -201,13 +223,14 @@ public sealed partial class PlaybackArtifactStore
         }
 
         var capacityCutoff = nowUtc - policy.CapacityEvictionGracePeriod;
-        foreach (var file in managedFiles
-                     .Where(file =>
+        var candidates = managedFiles.Where(file =>
                          !attemptedPaths.Contains(file.File.FullName) &&
                          !policy.ProtectedPaths.Contains(file.File.FullName) &&
                          file.LastWriteTimeUtc < capacityCutoff)
                      .OrderBy(file => file.LastWriteTimeUtc)
-                     .ThenBy(file => file.File.FullName, PlaybackFileSystem.PathComparer))
+                     .ThenBy(file => file.File.FullName, PlaybackFileSystem.PathComparer).ToArray();
+        unprocessedCount = candidates.Length;
+        foreach (var file in candidates)
         {
             if (totalBytes <= policy.MaxTotalBytes)
             {
@@ -227,7 +250,9 @@ public sealed partial class PlaybackArtifactStore
             {
                 totalBytes = SubtractFloor(totalBytes, file.Length);
             }
+            unprocessedCount--;
         }
+        unprocessedCount = 0;
     }
 
     private bool DeleteCleanupCandidateIfEligible(
