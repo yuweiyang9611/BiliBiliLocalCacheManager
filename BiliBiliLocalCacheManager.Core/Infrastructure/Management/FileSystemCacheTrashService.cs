@@ -136,7 +136,7 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
 
             return new CacheTrashOperationResult(avid, true, true, originalPath, trashPath, null);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (IsPurgeFailure(ex))
         {
             return new CacheTrashOperationResult(
                 avid,
@@ -244,7 +244,7 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
                 normalizedTrashPath,
                 metadataCleanupWarning);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (IsPurgeFailure(ex))
         {
             return new CacheTrashOperationResult(avid, true, false, originalPath, normalizedTrashPath, ex.Message);
         }
@@ -291,47 +291,10 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
     private void WriteMetadataAtomically(string trashPath, TrashMetadata metadata)
     {
         BeforeTrashMetadataWriteForTesting?.Invoke(trashPath);
-        var metadataPath = Path.Combine(trashPath, MetadataFileName);
-        var temporaryPath = Path.Combine(
+        WriteStateFileAtomically(
             trashPath,
-            $"{MetadataFileName}.{Guid.NewGuid():N}.tmp");
-
-        try
-        {
-            if (File.Exists(metadataPath) || Directory.Exists(metadataPath))
-            {
-                throw new IOException(
-                    $"The reserved trash metadata path already exists: {metadataPath}");
-            }
-
-            using (var stream = new FileStream(
-                       temporaryPath,
-                       FileMode.CreateNew,
-                       FileAccess.Write,
-                       FileShare.None,
-                       4096,
-                       FileOptions.WriteThrough))
-            {
-                JsonSerializer.Serialize(stream, metadata, MetadataSerializerOptions);
-                stream.Flush(flushToDisk: true);
-            }
-
-            File.Move(temporaryPath, metadataPath, overwrite: false);
-        }
-        finally
-        {
-            try
-            {
-                if (File.Exists(temporaryPath))
-                {
-                    File.Delete(temporaryPath);
-                }
-            }
-            catch
-            {
-                // Preserve the original error. An untrusted entry is never purged automatically.
-            }
-        }
+            MetadataFileName,
+            stream => JsonSerializer.Serialize(stream, metadata, MetadataSerializerOptions));
     }
 
     private static void WriteRawMetadataAtomically(string directoryPath, string metadataJson) =>
@@ -341,6 +304,21 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
         string directoryPath,
         string fileName,
         string contents)
+        => WriteStateFileAtomically(directoryPath, fileName, stream =>
+        {
+            using var writer = new StreamWriter(
+                stream,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                bufferSize: 1024,
+                leaveOpen: true);
+            writer.Write(contents);
+            writer.Flush();
+        });
+
+    private static void WriteStateFileAtomically(
+        string directoryPath,
+        string fileName,
+        Action<Stream> write)
     {
         var targetPath = Path.Combine(directoryPath, fileName);
         var temporaryPath = Path.Combine(
@@ -363,16 +341,7 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
                        4096,
                        FileOptions.WriteThrough))
             {
-                using (var writer = new StreamWriter(
-                           stream,
-                           new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-                           bufferSize: 1024,
-                           leaveOpen: true))
-                {
-                    writer.Write(contents);
-                    writer.Flush();
-                }
-
+                write(stream);
                 stream.Flush(flushToDisk: true);
             }
 
@@ -409,6 +378,15 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
         }
 
         var purgeMarker = ReadPurgeMarker(trashPath, entryIdentity);
+        ValidateTrashIdentityMetadata(trashPath, entryIdentity, purgeMarker, allowPendingPurge);
+    }
+
+    private static void ValidateTrashIdentityMetadata(
+        string trashPath,
+        TrashEntryNameIdentity entryIdentity,
+        PurgeMarker? purgeMarker,
+        bool allowPendingPurge)
+    {
         if (purgeMarker is not null && !allowPendingPurge)
         {
             throw new InvalidOperationException(
@@ -440,7 +418,7 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
                 "回收站条目缺少元数据，无法证明它由本应用创建，已保留但拒绝自动处理。");
         }
 
-        ValidateTrashMetadataJson(metadataJson, entryIdentity, avid);
+        ValidateTrashMetadataJson(metadataJson, entryIdentity, entryIdentity.Avid);
     }
 
     private static void ValidateTrashMetadataJson(
@@ -486,8 +464,7 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
             TrashMetadata metadata;
             try
             {
-                metadata = JsonSerializer.Deserialize<TrashMetadata>(
-                               metadataJson,
+                metadata = document.RootElement.Deserialize<TrashMetadata>(
                                MetadataSerializerOptions) ??
                            throw new InvalidDataException("回收站元数据为空，已拒绝操作。");
             }

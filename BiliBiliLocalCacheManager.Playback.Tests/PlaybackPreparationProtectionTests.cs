@@ -95,6 +95,42 @@ public sealed class PlaybackPreparationProtectionTests : IDisposable
         Assert.Equal(0, clock.ActiveTimers);
     }
 
+    [Fact]
+    public async Task RenewalWaitingForFileLock_DoesNotBlockStateAndCanBeStopped()
+    {
+        var clock = new ManualClock();
+        var store = new PlaybackArtifactStore(_root, timeProvider: clock);
+        await using var protection = new PlaybackPreparationProtection(store, timeProvider: clock);
+        var path = Media(1);
+        protection.Register(path);
+        using var heldLock = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var renewal = Task.Run(() => clock.Advance(TimeSpan.FromMinutes(1)));
+        await Task.Delay(100);
+        Assert.Null(await Task.Run(() => protection.Failure).WaitAsync(TimeSpan.FromSeconds(2)));
+        await protection.StopAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        await renewal.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Null(protection.Failure);
+    }
+
+    [Fact]
+    public void CleanupAndArtifactTouch_UseInjectedClock()
+    {
+        var clock = new ManualClock();
+        var store = new PlaybackArtifactStore(_root, timeProvider: clock);
+        var source = Path.Combine(_root, "source.mp4");
+        Directory.CreateDirectory(_root);
+        File.WriteAllText(source, "source");
+        var plan = Models.CachePlaybackPlan.Playable(100, "title", 1, "part", "c_1", _root,
+            "NewDash", Models.CachePlaybackMaterialKind.SingleFile, [source]);
+        var artifact = store.GetOrCreate(plan, ".mp4", path => File.WriteAllText(path, "media"));
+        clock.Advance(TimeSpan.FromDays(40));
+        var options = new Models.PlaybackArtifactCleanupOptions { MaxAge = TimeSpan.FromDays(30) };
+        Assert.Equal(1, store.PreviewCleanup(options).CandidateFileCount);
+        store.GetOrCreate(plan, ".mp4", _ => throw new InvalidOperationException("Should reuse"));
+        Assert.Equal(clock.GetUtcNow().UtcDateTime, File.GetLastWriteTimeUtc(artifact.OutputPath));
+        Assert.Equal(0, store.Cleanup(options).DeletedFileCount);
+    }
+
     private string Media(int i)
     {
         var directory = Path.Combine(_root, i.ToString(), "Page_1");

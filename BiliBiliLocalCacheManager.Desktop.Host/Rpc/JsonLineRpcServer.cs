@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -8,7 +7,6 @@ namespace BiliBiliLocalCacheManager.Desktop.Host.Rpc;
 internal sealed class JsonLineRpcServer
 {
     private const int MaximumInputLineLength = 1024 * 1024;
-    private const int MaximumOutputLineByteCount = 64 * 1024 * 1024;
     private const int MaximumConcurrentRequests = 32;
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -20,6 +18,8 @@ internal sealed class JsonLineRpcServer
     private readonly DesktopHostApplication _application;
     private readonly TextReader _input;
     private readonly ProtocolWriter _writer;
+    private readonly CancellationTokenSource _transportCancellation = new();
+    private Exception? _transportFailure;
     private readonly ConcurrentDictionary<string, RunningRequest> _running =
         new(StringComparer.Ordinal);
 
@@ -27,10 +27,16 @@ internal sealed class JsonLineRpcServer
         DesktopHostApplication application,
         TextReader input,
         TextWriter output)
+        : this(application, input, new ProtocolWriter(output, SerializerOptions)) { }
+
+    public JsonLineRpcServer(DesktopHostApplication application, TextReader input, Stream output)
+        : this(application, input, new ProtocolWriter(output, SerializerOptions)) { }
+
+    private JsonLineRpcServer(DesktopHostApplication application, TextReader input, ProtocolWriter writer)
     {
         _application = application;
         _input = input;
-        _writer = new ProtocolWriter(output, SerializerOptions);
+        _writer = writer;
         _application.ProgressReported += OnProgressReported;
     }
 
@@ -42,7 +48,7 @@ internal sealed class JsonLineRpcServer
         {
             while (true)
             {
-                var read = await lineReader.ReadAsync();
+                var read = await lineReader.ReadAsync(_transportCancellation.Token);
                 if (read.EndOfStream)
                 {
                     break;
@@ -97,10 +103,12 @@ internal sealed class JsonLineRpcServer
                 }
 
                 var cancellation = new CancellationTokenSource();
-                var running = new RunningRequest(cancellation);
+                var running = new RunningRequest(cancellation, new RequestProgressBuffer(
+                    progress => _writer.WriteEventAsync("progress", progress), OnTransportFailure));
                 if (!_running.TryAdd(request.Id, running))
                 {
                     cancellation.Dispose();
+                    await running.Progress.DisposeAsync();
                     await _writer.WriteErrorAsync(
                         request.Id,
                         new RpcError(
@@ -110,17 +118,20 @@ internal sealed class JsonLineRpcServer
                 }
 
                 var task = ProcessRequestAsync(request, running);
-                running.Task = task;
                 tasks.Add(task);
                 tasks.RemoveAll(candidate => candidate.IsCompleted);
             }
+        }
+        catch (OperationCanceledException) when (_transportCancellation.IsCancellationRequested)
+        {
+            throw new IOException("The desktop protocol output closed unexpectedly.", _transportFailure);
         }
         finally
         {
             _application.ProgressReported -= OnProgressReported;
             foreach (var running in _running.Values)
             {
-                running.Cancellation.Cancel();
+                TryCancel(running.Cancellation);
             }
 
             try
@@ -138,44 +149,49 @@ internal sealed class JsonLineRpcServer
             }
 
             _running.Clear();
+            _transportCancellation.Dispose();
         }
     }
 
     private async Task ProcessRequestAsync(RpcRequest request, RunningRequest running)
     {
+        object? result = null;
+        RpcError? error = null;
         try
         {
-            var result = await _application.DispatchAsync(
+            result = await _application.DispatchAsync(
                 request.Id,
                 request.Method,
                 request.Parameters,
                 running.Cancellation.Token);
-            await _writer.WriteResultAsync(request.Id, result);
         }
         catch (OperationCanceledException) when (running.Cancellation.IsCancellationRequested)
         {
-            await _writer.WriteErrorAsync(
-                request.Id,
-                new RpcError("cancelled", "The operation was cancelled."));
+            error = new RpcError("cancelled", "The operation was cancelled.");
         }
         catch (RpcException exception)
         {
-            await _writer.WriteErrorAsync(
-                request.Id,
-                new RpcError(exception.Code, exception.Message, exception.Details));
+            error = new RpcError(exception.Code, exception.Message, exception.Details);
         }
         catch (Exception exception)
         {
-            await _writer.WriteErrorAsync(
-                request.Id,
-                new RpcError(
+            error = new RpcError(
                     "operation_failed",
                     exception.Message,
-                    new { exceptionType = exception.GetType().FullName }));
+                    new { exceptionType = exception.GetType().FullName });
         }
+        try
+        {
+            await running.Progress.CompleteAsync();
+            if (error is null) await _writer.WriteResultAsync(request.Id, result);
+            else await _writer.WriteErrorAsync(request.Id, error);
+        }
+        catch (Exception exception) { OnTransportFailure(exception); }
         finally
         {
             _running.TryRemove(request.Id, out _);
+            try { await running.Progress.DisposeAsync(); }
+            catch (Exception exception) { OnTransportFailure(exception); }
             running.Cancellation.Dispose();
         }
     }
@@ -207,7 +223,20 @@ internal sealed class JsonLineRpcServer
 
     private void OnProgressReported(object? sender, HostProgressEvent progress)
     {
-        _writer.WriteEventAsync("progress", progress).GetAwaiter().GetResult();
+        if (_running.TryGetValue(progress.RequestId, out var running)) running.Progress.Report(progress);
+    }
+
+    private void OnTransportFailure(Exception exception)
+    {
+        if (Interlocked.CompareExchange(ref _transportFailure, exception, null) is not null) return;
+        _transportCancellation.Cancel();
+        foreach (var running in _running.Values) TryCancel(running.Cancellation);
+    }
+
+    private static void TryCancel(CancellationTokenSource cancellation)
+    {
+        try { cancellation.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
 
     private static bool TryParseRequest(
@@ -280,11 +309,11 @@ internal sealed class JsonLineRpcServer
         }
     }
 
-    private sealed class RunningRequest(CancellationTokenSource cancellation)
+    private sealed class RunningRequest(CancellationTokenSource cancellation, RequestProgressBuffer progress)
     {
         public CancellationTokenSource Cancellation { get; } = cancellation;
 
-        public Task? Task { get; set; }
+        public RequestProgressBuffer Progress { get; } = progress;
     }
 
     private sealed class LimitedLineReader(TextReader input, int maximumLength)
@@ -294,7 +323,7 @@ internal sealed class JsonLineRpcServer
         private int _length;
         private bool _reachedEnd;
 
-        public async Task<LineReadResult> ReadAsync()
+        public async Task<LineReadResult> ReadAsync(CancellationToken cancellationToken)
         {
             if (_reachedEnd && _position >= _length)
             {
@@ -307,7 +336,7 @@ internal sealed class JsonLineRpcServer
             {
                 if (_position >= _length)
                 {
-                    _length = await input.ReadAsync(_buffer.AsMemory());
+                    _length = await input.ReadAsync(_buffer.AsMemory(), cancellationToken);
                     _position = 0;
                     if (_length == 0)
                     {
@@ -360,54 +389,4 @@ internal sealed class JsonLineRpcServer
 
     private sealed record LineReadResult(bool EndOfStream, bool TooLong, string? Line);
 
-    private sealed class ProtocolWriter(TextWriter output, JsonSerializerOptions serializerOptions)
-    {
-        private readonly SemaphoreSlim _gate = new(1, 1);
-
-        public async Task WriteResultAsync(string id, object? result)
-        {
-            var line = JsonSerializer.Serialize(new { id, result }, serializerOptions);
-            if (Encoding.UTF8.GetByteCount(line) > MaximumOutputLineByteCount)
-            {
-                await WriteErrorAsync(
-                    id,
-                    new RpcError(
-                        "response_too_large",
-                        "The response exceeds the 64 MiB desktop protocol limit. Narrow the search or scan a smaller cache root."));
-                return;
-            }
-
-            await WriteLineAsync(line);
-        }
-
-        public Task WriteErrorAsync(string id, RpcError error) =>
-            WriteAsync(new { id, error });
-
-        public Task WriteEventAsync(string eventName, object payload) =>
-            WriteAsync(new { @event = eventName, payload });
-
-        private async Task WriteAsync(object message)
-        {
-            var line = JsonSerializer.Serialize(message, serializerOptions);
-            await WriteLineAsync(line);
-        }
-
-        private async Task WriteLineAsync(string line)
-        {
-            await _gate.WaitAsync();
-            try
-            {
-                await output.WriteLineAsync(line);
-                await output.FlushAsync();
-            }
-            catch (IOException)
-            {
-                // The parent closed stdout. Stopping its process will terminate this host.
-            }
-            finally
-            {
-                _gate.Release();
-            }
-        }
-    }
 }

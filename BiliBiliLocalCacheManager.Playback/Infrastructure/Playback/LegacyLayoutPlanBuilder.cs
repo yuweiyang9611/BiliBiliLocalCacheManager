@@ -80,10 +80,6 @@ internal static class LegacyLayoutPlanBuilder
             ? CachePlaybackMaterialKind.SingleFile
             : CachePlaybackMaterialKind.OrderedPair;
 
-        var finalMessage = structureKind == "LegacyMixed"
-            ? message
-            : message;
-
         return CachePlaybackPlan.Playable(
             segment.Avid,
             segment.Title,
@@ -94,7 +90,7 @@ internal static class LegacyLayoutPlanBuilder
             structureKind,
             materialKind,
             files,
-            finalMessage,
+            message,
             segment.TotalDuration);
     }
 }

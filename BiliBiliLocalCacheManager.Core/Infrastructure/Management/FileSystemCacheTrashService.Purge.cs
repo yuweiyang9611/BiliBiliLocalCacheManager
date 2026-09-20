@@ -403,51 +403,7 @@ public sealed partial class FileSystemCacheTrashService
         string directoryPath,
         CancellationToken cancellationToken,
         Action? activity = null)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var attributes = File.GetAttributes(directoryPath);
-        if (!attributes.HasFlag(FileAttributes.Directory) ||
-            attributes.HasFlag(FileAttributes.ReparsePoint))
-        {
-            throw new InvalidOperationException(
-                "A managed trash entry contains a symbolic link or directory junction.");
-        }
-
-        var fileCount = 0;
-        var totalBytes = 0L;
-        foreach (var path in Directory.EnumerateFileSystemEntries(
-                     directoryPath,
-                     "*",
-                     SearchOption.TopDirectoryOnly))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            activity?.Invoke();
-            attributes = File.GetAttributes(path);
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                throw new InvalidOperationException(
-                    "A managed trash entry contains a symbolic link or directory junction.");
-            }
-
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                var childStatistics = InspectDirectoryTree(path, cancellationToken, activity);
-                fileCount = FileSystemCacheStorageStatisticsService.SaturatingAdd(
-                    fileCount,
-                    childStatistics.FileCount);
-                totalBytes = FileSystemCacheStorageStatisticsService.SaturatingAdd(
-                    totalBytes,
-                    childStatistics.TotalBytes);
-                continue;
-            }
-
-            fileCount = FileSystemCacheStorageStatisticsService.SaturatingAdd(fileCount, 1);
-            var length = new FileInfo(path).Length;
-            totalBytes = FileSystemCacheStorageStatisticsService.SaturatingAdd(totalBytes, length);
-        }
-
-        return new DirectoryTreeStatistics(fileCount, totalBytes);
-    }
+        => DirectoryTreeInspector.Inspect(directoryPath, cancellationToken, activity);
 
     private static bool TryFinalizeEmptyVersionedTrashEntry(
         string trashRoot,
@@ -754,12 +710,20 @@ public sealed partial class FileSystemCacheTrashService
 
     private void DeleteDirectoryTree(
         string directoryPath,
-        PurgeDeletionProgress progress)
+        PurgeDeletionProgress progress,
+        bool inspectBeforeDeletion = false)
     {
         using var directoryLease = OpenPhysicalDirectoryLease(
             directoryPath,
             "A managed trash payload directory",
             allowDelete: true);
+        if (inspectBeforeDeletion)
+        {
+            // Preserve direct deletion's preflight rejection of an already-invalid tree.
+            // The second traversal authorizes each mutation using a fresh physical handle.
+            _ = GetPhysicalDirectoryIdentity(directoryLease, "The avid cache directory");
+            InspectDirectoryTree(directoryPath, CancellationToken.None);
+        }
         BeforeTrashDirectoryEnumerationForTesting?.Invoke(directoryPath);
         foreach (var path in Directory.EnumerateFileSystemEntries(
                      directoryPath,
@@ -913,8 +877,6 @@ public sealed partial class FileSystemCacheTrashService
                 1);
         }
     }
-
-    private sealed record DirectoryTreeStatistics(int FileCount, long TotalBytes);
 
     private sealed record TrashEntryNameIdentity(
         int SchemaVersion,

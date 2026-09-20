@@ -12,6 +12,7 @@ public sealed class PlaybackPreparationProtection : IAsyncDisposable
     private readonly ITimer _timer;
     private Exception? _error;
     private bool _stopped;
+    private int _refreshing;
 
     public PlaybackPreparationProtection(PlaybackArtifactStore store, CancellationToken cancellationToken = default,
         TimeProvider? timeProvider = null)
@@ -34,7 +35,11 @@ public sealed class PlaybackPreparationProtection : IAsyncDisposable
             {
                 ObjectDisposedException.ThrowIf(_stopped, this);
                 Token.ThrowIfCancellationRequested();
-                _store.ProtectUntilIfManaged(path, _clock.GetUtcNow().AddHours(6), Token);
+            }
+            _store.ProtectUntilIfManaged(path, _clock.GetUtcNow().AddHours(6), _renewal.Token);
+            lock (_sync)
+            {
+                _renewal.Token.ThrowIfCancellationRequested();
                 _paths.Add(path);
             }
         }
@@ -47,17 +52,21 @@ public sealed class PlaybackPreparationProtection : IAsyncDisposable
 
     private void Refresh()
     {
+        if (Interlocked.Exchange(ref _refreshing, 1) != 0) return;
         try
         {
+            string[] paths;
             lock (_sync)
             {
                 if (_stopped || Token.IsCancellationRequested) return;
-                foreach (var path in _paths)
-                    _store.ProtectUntilIfManaged(path, _clock.GetUtcNow().AddHours(6), _renewal.Token);
+                paths = _paths.ToArray();
             }
+            foreach (var path in paths)
+                _store.ProtectUntilIfManaged(path, _clock.GetUtcNow().AddHours(6), _renewal.Token);
         }
         catch (OperationCanceledException) when (_renewal.IsCancellationRequested) { }
         catch (Exception exception) { Fail(exception); }
+        finally { Volatile.Write(ref _refreshing, 0); }
     }
 
     private void Fail(Exception exception)
@@ -69,6 +78,7 @@ public sealed class PlaybackPreparationProtection : IAsyncDisposable
     public async ValueTask StopAsync()
     {
         // Cancel lock waits before joining the timer callback.
+        lock (_sync) _stopped = true;
         _renewal.Cancel();
         await _timer.DisposeAsync();
         lock (_sync) { _stopped = true; _paths.Clear(); }

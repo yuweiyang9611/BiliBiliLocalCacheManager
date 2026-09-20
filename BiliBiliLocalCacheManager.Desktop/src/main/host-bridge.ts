@@ -31,7 +31,7 @@ interface PendingRequest {
 }
 
 export function hasSideEffects(method: string): boolean {
-  return ['play', 'export', 'diagnostics.export', 'trash.move', 'trash.restore', 'trash.purge',
+  return ['play', 'export', 'diagnostics.export', 'trash.move', 'trash.restore', 'trash.purge', 'trash.purgeSnapshot',
     'artifacts.cleanup', 'artifacts.clear'].includes(method);
 }
 

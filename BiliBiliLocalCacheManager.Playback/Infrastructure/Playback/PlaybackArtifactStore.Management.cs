@@ -99,7 +99,11 @@ public sealed partial class PlaybackArtifactStore
     private static FileStream AcquireCrossProcessLock(
         string outputPath,
         CancellationToken cancellationToken,
-        Action<string, double?>? reportProgress)
+        Action<string, double?>? reportProgress) =>
+        AcquireCrossProcessLockAsync(outputPath, cancellationToken, reportProgress).GetAwaiter().GetResult();
+
+    private static async Task<FileStream> AcquireCrossProcessLockAsync(
+        string outputPath, CancellationToken cancellationToken, Action<string, double?>? reportProgress)
     {
         var lockPath = outputPath + CrossProcessLockSuffix;
         var waitTimer = Stopwatch.StartNew();
@@ -132,10 +136,7 @@ public sealed partial class PlaybackArtifactStore
                         ex);
                 }
 
-                if (cancellationToken.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(100)))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                }
+                await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
             }
         }
     }

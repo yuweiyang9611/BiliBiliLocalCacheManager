@@ -75,6 +75,65 @@ public sealed class CacheSearchTests
         Assert.Equal(456, results.First().Avid);
     }
 
+    [Theory]
+    [InlineData(CacheSearchMatchMode.Contains, "lph", true)]
+    [InlineData(CacheSearchMatchMode.Equals, "alpha", true)]
+    [InlineData(CacheSearchMatchMode.StartsWith, "alp", true)]
+    [InlineData(CacheSearchMatchMode.EndsWith, "pha", true)]
+    [InlineData(CacheSearchMatchMode.Equals, "alp", false)]
+    [InlineData(CacheSearchMatchMode.StartsWith, "pha", false)]
+    [InlineData(CacheSearchMatchMode.EndsWith, "alp", false)]
+    public void Search_PreservesEveryMatchMode(CacheSearchMatchMode mode, string keyword, bool expected)
+    {
+        var index = new CacheIndex([CreateCache(1, "Alpha", "P1", null, null)]);
+        var results = index.Search(new CacheSearchOptions
+        {
+            Keyword = keyword, MatchMode = mode, Scope = CacheSearchScope.Title
+        });
+        Assert.Equal(expected, results.Count == 1);
+    }
+
+    [Theory]
+    [InlineData(true, 1)]
+    [InlineData(false, 3)]
+    public void Search_MatchesTokensAcrossFieldsAndPreservesIndexOrder(bool requireAll, int count)
+    {
+        var index = new CacheIndex([
+            CreateCache(30, "Alpha", "P1", null, null),
+            CreateCache(10, "Alpha", "Beta", null, null),
+            CreateCache(20, "Other", "Beta", null, null)]);
+        var results = index.Search(new CacheSearchOptions
+        {
+            Keyword = "alpha beta", SplitKeywords = true,
+            RequireAllKeywords = requireAll, Scope = CacheSearchScope.Title | CacheSearchScope.PartName
+        });
+        Assert.Equal(count, results.Count);
+        Assert.Equal(requireAll ? [10L] : new[] { 30L, 10L, 20L }, results.Select(cache => cache.Avid));
+    }
+
+    [Fact]
+    public void Search_CancelledEmptyIndexStillReportsCancellation()
+    {
+        using var source = new CancellationTokenSource();
+        source.Cancel();
+        Assert.Throws<OperationCanceledException>(() => new CacheIndex([]).Search(
+            new CacheSearchOptions { Keyword = "alpha" }, source.Token));
+    }
+
+    [Fact]
+    public void Search_CaseSensitiveAndEmptyTokenRulesArePreserved()
+    {
+        var index = new CacheIndex([CreateCache(1, "Alpha", "P1", null, null)]);
+        Assert.Empty(index.Search(new CacheSearchOptions
+        {
+            Keyword = "alpha", Scope = CacheSearchScope.Title, CaseSensitive = true
+        }));
+        Assert.Throws<ArgumentException>(() => index.Search(new CacheSearchOptions
+        {
+            Keyword = ",,,", SplitKeywords = true, KeywordSeparators = [',']
+        }));
+    }
+
     private static BiliVideoCache CreateCache(long avid, string title, string part, string? ownerName, string? bvid)
     {
         var segment = new BiliSegment(

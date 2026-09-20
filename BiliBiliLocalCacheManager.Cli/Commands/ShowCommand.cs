@@ -8,15 +8,7 @@ public sealed class ShowCommand : ICommand
     public int Execute(string[] args)
     {
         // 定义本命令允许的参数，未知参数会直接报错，避免“无效参数被忽略”的误解。
-        var specs = new Dictionary<string, OptionParser.OptionSpec>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["--root"] = OptionParser.ValueOption("root"),
-            ["-r"] = OptionParser.ValueOption("root"),
-            ["--all"] = OptionParser.FlagOption("include-incomplete"),
-            ["--include-incomplete"] = OptionParser.FlagOption("include-incomplete"),
-            ["--help"] = OptionParser.FlagOption("help"),
-            ["-h"] = OptionParser.FlagOption("help")
-        };
+        var specs = OptionParser.CreateCommonSpecs(includeIncomplete: true);
 
         OptionParser.ParsedArguments parsed;
         try
@@ -53,9 +45,9 @@ public sealed class ShowCommand : ICommand
         }
 
         var avidArg = parsed.Positionals[0];
-        if (!long.TryParse(avidArg, out var avid))
+        if (!AvidParser.TryParse(avidArg, out var avid))
         {
-            CliPrinter.WriteError("无效的 avid，请输入整数。");
+            CliPrinter.WriteError("无效的 avid，请输入正整数或 av 前缀编号。");
             CliPrinter.PrintShowUsage();
             return 1;
         }

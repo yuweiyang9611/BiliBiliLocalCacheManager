@@ -101,7 +101,8 @@ internal static class JsonElementExtensions
             throw InvalidProperty(propertyName, "an array");
         }
 
-        return property.EnumerateArray().Select(item => item.Clone()).ToArray();
+        // RPC params are detached as a whole before dispatch; child elements share that lifetime.
+        return property.EnumerateArray().ToArray();
     }
 
     public static bool TryGetPropertyIgnoreCase(

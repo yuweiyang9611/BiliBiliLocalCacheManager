@@ -77,9 +77,11 @@ public sealed class IndexSnapshotTests(ITestOutputHelper output)
     public async Task BenchmarkCancellationDuringUncachedSearch(int count)
     {
         var snapshot = Snapshot(count);
-        var options = new CacheSearchOptions {
+        var options = new CacheSearchOptions
+        {
             Keyword = string.Join(' ', Enumerable.Range(0, 60).Select(i => "absent" + i)),
-            SplitKeywords = true, RequireAllKeywords = false
+            SplitKeywords = true,
+            RequireAllKeywords = false
         };
         using var cancellation = new CancellationTokenSource();
         var timer = Stopwatch.StartNew();
@@ -107,5 +109,56 @@ public sealed class IndexSnapshotTests(ITestOutputHelper output)
                 true, 1, 1, TimeSpan.FromMinutes(1), 0, epoch, epoch, "", "", [], "", "owner", null)
         ])));
         return new DesktopHostApplication.CurrentIndexSnapshot(index, "test", Path.GetTempPath(), []);
+    }
+
+    [Fact]
+    public void DetailsPagesReusePlansAndSortingAndInvalidateWithTheIndex()
+    {
+        var snapshot = Snapshot(10);
+        var cache = snapshot.Index.VideoCaches.First();
+        var mapped = 0;
+        SegmentDto Map(BiliSegment segment)
+        {
+            mapped++;
+            return new("id", "1", segment.PageIndex, segment.PartName, "Unknown", "Unavailable", segment.TotalBytes,
+                segment.TotalDuration.TotalSeconds, false, segment.SegmentDirectory);
+        }
+        var first = snapshot.GetDetailsPage(cache, 0, 100, Map, default);
+        var second = snapshot.GetDetailsPage(cache, 0, 100, Map, default);
+        Assert.Same(first.Segments, second.Segments);
+        Assert.Same(snapshot.Summaries[cache.Avid], second.Item);
+        Assert.Equal(1, mapped);
+        Assert.Equal(1, snapshot.DetailSortExecutions);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        Assert.Throws<OperationCanceledException>(() => snapshot.GetDetailsPage(cache, 0, 100, Map, cancellation.Token));
+        snapshot.Invalidate();
+        Assert.Throws<Rpc.RpcException>(() => snapshot.GetDetailsPage(cache, 0, 100, Map, default));
+        Assert.Throws<Rpc.RpcException>(() => snapshot.Search(new CacheSearchOptions { Keyword = "" }, default));
+    }
+
+    [Fact]
+    public void DetailsPagesBoundThePerVideoCacheAndDoNotCacheCancelledWork()
+    {
+        var snapshot = Snapshot(1);
+        var cache = snapshot.Index.VideoCaches.Single();
+        using var cancellation = new CancellationTokenSource();
+        var attempts = 0;
+        SegmentDto Map(BiliSegment segment)
+        {
+            attempts++;
+            return new("id", "1", 1, "part", "Unknown", "Unavailable", 0, 0, false, "");
+        }
+        Assert.Throws<OperationCanceledException>(() => snapshot.GetDetailsPage(cache, 0, 100, segment =>
+        {
+            cancellation.Cancel();
+            return Map(segment);
+        }, cancellation.Token));
+        snapshot.GetDetailsPage(cache, 0, 100, Map, default);
+        Assert.Equal(2, attempts);
+        for (var offset = 1; offset <= 8; offset++) snapshot.GetDetailsPage(cache, offset, 100, Map, default);
+        snapshot.GetDetailsPage(cache, 0, 100, Map, default);
+        Assert.Equal(3, attempts);
+        Assert.Equal(1, snapshot.DetailSortExecutions);
     }
 }

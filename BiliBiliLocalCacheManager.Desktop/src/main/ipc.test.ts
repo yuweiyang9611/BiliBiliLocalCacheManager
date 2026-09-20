@@ -41,6 +41,7 @@ vi.mock('electron', () => ({
 }));
 
 import { registerIpc } from './ipc';
+import { IpcError, unwrapIpcResult } from '../shared/ipc-result';
 
 interface Deferred {
   promise: Promise<unknown>;
@@ -62,6 +63,44 @@ afterEach(() => {
 });
 
 describe('IPC cancellable request tracking', () => {
+  it('returns a plain error envelope instead of relying on Electron Error properties', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const raw = electronMocks.handlers.get(channels.health)!(trustedEvent(300));
+    fake.pending.get(fake.calls[0].id)!.reject(new IpcError('Different wording', 'OUTCOME_UNKNOWN'));
+    expect(structuredClone(await raw)).toEqual({ ipcFailure: { code: 'OUTCOME_UNKNOWN', message: 'Different wording' } });
+  });
+
+  it('preempts only details in the same window without a renderer cancel round trip', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const request = { indexToken: 'index-token-1', avid: '100' };
+    const old = invoke(channels.cacheDetails, trustedEvent(301), request);
+    const rejected = expect(old).rejects.toThrow();
+    const other = invoke(channels.cacheDetails, trustedEvent(302), request);
+    const next = invoke(channels.cacheDetails, trustedEvent(301), request);
+    await rejected;
+    expect(fake.cancelledIds).toEqual([fake.calls[0].id]);
+    fake.pending.get(fake.calls[1].id)!.resolve(validCacheDetails());
+    fake.pending.get(fake.calls[2].id)!.resolve(validCacheDetails());
+    await Promise.all([other, next]);
+  });
+
+  it('validates the complete trash snapshot before native confirmation and never accepts arbitrary ids', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
+    const result = invoke(channels.trashPurgeSnapshot, trustedEvent(303), path.resolve('cache'), 'snapshot-1');
+    expect(fake.calls[0].method).toBe('trash.page');
+    fake.pending.get(fake.calls[0].id)!.resolve({ snapshotToken: 'snapshot-1', offset: 0, pageSize: 1, totalItems: 11000, totalSizeBytes: 123, hasMore: true,
+      items: [{ id: 'entry-1', avid: '1', title: 'First', sizeBytes: 1, deletedAt: null }] });
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(2));
+    expect(electronMocks.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ detail: expect.stringContaining('11000') }));
+    expect(fake.calls[1]).toMatchObject({ method: 'trash.purgeSnapshot', params: { rootPath: path.resolve('cache'), snapshotToken: 'snapshot-1', confirmed: true } });
+    const ids = Array.from({ length: 11000 }, (_, index) => `entry-${index}`);
+    fake.pending.get(fake.calls[1].id)!.resolve({ purged: ids, failed: [], unprocessed: [], cancelled: false });
+    expect(await result).toEqual({ purged: ids, failed: [], unprocessed: [], cancelled: false });
+  });
   it('preempts only searches belonging to the same sender', async () => {
     const fake = createDeferredBridge();
     unregister = registerIpc(fake.bridge, () => null);
@@ -542,7 +581,8 @@ function trustedEvent(senderId: number): IpcMainInvokeEvent {
 function invoke(channel: string, event: IpcMainInvokeEvent, ...args: unknown[]): Promise<unknown> {
   const handler = electronMocks.handlers.get(channel);
   if (!handler) throw new Error(`Missing IPC handler for ${channel}`);
-  return Promise.resolve(handler(event, ...args));
+  const result = handler(event, ...args);
+  return result instanceof Promise ? result.then(unwrapIpcResult) : Promise.resolve(unwrapIpcResult(result));
 }
 
 function validSearchRequest(): JsonObject {

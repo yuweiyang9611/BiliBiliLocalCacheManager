@@ -56,8 +56,11 @@ public sealed class CliCommandTests
         Assert.Equal(1, exitCode);
     }
 
-    [Fact]
-    public void ShowCommand_ShouldSucceed_WhenCacheFound()
+    [Theory]
+    [InlineData("123")]
+    [InlineData("av123")]
+    [InlineData("AV123")]
+    public void ShowCommand_ShouldSucceed_WhenCacheFound(string avid)
     {
         var root = CreateTempRoot();
         try
@@ -67,7 +70,7 @@ public sealed class CliCommandTests
             var command = new ShowCommand();
             var exitCode = command.Execute(new[]
             {
-                "123",
+                avid,
                 "--root",
                 root
             });
@@ -245,8 +248,11 @@ public sealed class CliCommandTests
         }
     }
 
-    [Fact]
-    public void PlayCommand_ShouldSucceed_WhenSegmentSpecified()
+    [Theory]
+    [InlineData("911")]
+    [InlineData("av911")]
+    [InlineData("AV911")]
+    public void PlayCommand_ShouldSucceed_WhenSegmentSpecified(string avid)
     {
         var root = CreateTempRoot();
         try
@@ -259,7 +265,7 @@ public sealed class CliCommandTests
 
             var exitCode = command.Execute(new[]
             {
-                "911",
+                avid,
                 "--root",
                 root,
                 "--segment",
@@ -333,6 +339,28 @@ public sealed class CliCommandTests
         {
             SafeDeleteDirectory(root);
         }
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("av0")]
+    [InlineData("-1")]
+    [InlineData("av-1")]
+    [InlineData("+123")]
+    public void ShowAndPlay_RejectInvalidAvidBeforeScanning(string avid)
+    {
+        var missingRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Assert.Equal(1, new ShowCommand().Execute([avid, "--root", missingRoot]));
+        Assert.Equal(1, new PlayCommand(new CacheManager(), new FakePlaybackService())
+            .Execute([avid, "--root", missingRoot]));
+    }
+
+    [Fact]
+    public void HelpTrash_ShowsSpecificUsage()
+    {
+        AnsiConsole.Record();
+        Assert.Equal(0, new HelpCommand().Execute(["trash"]));
+        Assert.Contains("trash list", AnsiConsole.ExportText());
     }
 
     private static void CreateEntry(

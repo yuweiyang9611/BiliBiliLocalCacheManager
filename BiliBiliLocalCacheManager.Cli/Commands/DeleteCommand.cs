@@ -21,17 +21,11 @@ public sealed class DeleteCommand : ICommand
     public int Execute(string[] args)
     {
         // 定义本命令允许的参数，未知参数会直接报错，避免“无效参数被忽略”的误解。
-        var specs = new Dictionary<string, OptionParser.OptionSpec>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["--root"] = OptionParser.ValueOption("root"),
-            ["-r"] = OptionParser.ValueOption("root"),
-            ["--dry-run"] = OptionParser.FlagOption("dry-run"),
-            ["--permanent"] = OptionParser.FlagOption("permanent"),
-            ["--yes"] = OptionParser.FlagOption("yes"),
-            ["-y"] = OptionParser.FlagOption("yes"),
-            ["--help"] = OptionParser.FlagOption("help"),
-            ["-h"] = OptionParser.FlagOption("help")
-        };
+        var specs = OptionParser.CreateCommonSpecs();
+        specs["--dry-run"] = OptionParser.FlagOption("dry-run");
+        specs["--permanent"] = OptionParser.FlagOption("permanent");
+        specs["--yes"] = OptionParser.FlagOption("yes");
+        specs["-y"] = OptionParser.FlagOption("yes");
 
         OptionParser.ParsedArguments parsed;
         try

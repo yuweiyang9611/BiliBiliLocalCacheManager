@@ -17,7 +17,7 @@ public sealed partial class PlaybackArtifactStore
             return new PlaybackArtifactCleanupPreview(0, 0, 0);
         }
 
-        var plan = CreateCleanupPlan(policy, DateTime.UtcNow);
+        var plan = CreateCleanupPlan(policy, _timeProvider.GetUtcNow().UtcDateTime);
         return CreateCleanupPreview(plan);
     }
 
@@ -31,7 +31,7 @@ public sealed partial class PlaybackArtifactStore
             return new PlaybackArtifactCleanupResult(0, 0, 0, 0, emptyStatistics);
         }
 
-        var nowUtc = DateTime.UtcNow;
+        var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
         var initialFiles = SnapshotAllManagedFiles();
         var initialBytes = SumLengths(initialFiles);
         var plan = CreateCleanupPlan(policy, nowUtc, initialFiles);
@@ -57,16 +57,18 @@ public sealed partial class PlaybackArtifactStore
                 unprocessedCount--;
             }
 
-            DeleteAdditionalCapacityCandidates(
+            var afterInitialCleanup = SnapshotAllManagedFiles();
+            var attemptedAdditionalCandidates = DeleteAdditionalCapacityCandidates(
                 policy,
                 nowUtc,
+                afterInitialCleanup,
                 attemptedManagedPaths,
                 ref deletedCount,
                 ref failedCount,
                 ref freedBytes,
                 ref unprocessedCount);
             DeleteEmptyDirectories();
-            var remainingFiles = SnapshotAllManagedFiles();
+            var remainingFiles = attemptedAdditionalCandidates ? SnapshotAllManagedFiles() : afterInitialCleanup;
             var statistics = CreateCacheStatistics(remainingFiles);
             var preview = CreateCleanupPreview(CreateCleanupPlan(policy, nowUtc, remainingFiles));
             return new PlaybackArtifactCleanupResult(
@@ -203,23 +205,23 @@ public sealed partial class PlaybackArtifactStore
         return new CleanupPlan(candidates, projectedRemainingBytes);
     }
 
-    private void DeleteAdditionalCapacityCandidates(
+    private bool DeleteAdditionalCapacityCandidates(
         CleanupPolicy policy,
         DateTime nowUtc,
+        IReadOnlyList<ManagedFileSnapshot> allManagedFiles,
         HashSet<string> attemptedPaths,
         ref int deletedCount,
         ref int failedCount,
         ref long freedBytes,
         ref int unprocessedCount)
     {
-        var allManagedFiles = SnapshotAllManagedFiles();
         var managedFiles = allManagedFiles
             .Where(file => IsManagedArtifactFile(file.File))
             .ToList();
         var totalBytes = SumLengths(allManagedFiles);
         if (totalBytes <= policy.MaxTotalBytes)
         {
-            return;
+            return false;
         }
 
         var capacityCutoff = nowUtc - policy.CapacityEvictionGracePeriod;
@@ -253,6 +255,7 @@ public sealed partial class PlaybackArtifactStore
             unprocessedCount--;
         }
         unprocessedCount = 0;
+        return candidates.Length > 0;
     }
 
     private bool DeleteCleanupCandidateIfEligible(

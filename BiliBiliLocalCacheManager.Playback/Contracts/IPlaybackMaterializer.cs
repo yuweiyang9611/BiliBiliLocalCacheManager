@@ -8,6 +8,10 @@ public interface IPlaybackMaterializer
 
     PlaybackMaterializationResult Materialize(CachePlaybackPlan plan);
 
+    Task<PlaybackMaterializationResult> MaterializeAsync(CachePlaybackPlan plan,
+        IProgress<PlaybackPreparationProgress>? progress, CancellationToken cancellationToken) =>
+        Task.Run(() => Materialize(plan, progress, cancellationToken), cancellationToken);
+
     PlaybackMaterializationResult Materialize(
         CachePlaybackPlan plan,
         IProgress<PlaybackPreparationProgress>? progress,
