@@ -59,11 +59,17 @@ public sealed class CacheManager : ICacheManager
         string rootDirectory,
         CacheIndexBuildOptions? buildOptions,
         CacheSearchOptions searchOptions)
+        => Search(rootDirectory, buildOptions, searchOptions, CancellationToken.None);
+
+    public IReadOnlyCollection<BiliVideoCache> Search(
+        string rootDirectory,
+        CacheIndexBuildOptions? buildOptions,
+        CacheSearchOptions searchOptions,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(searchOptions);
-
-        var index = BuildIndex(rootDirectory, buildOptions);
-        return index.Search(searchOptions);
+        var result = BuildIndexWithReport(rootDirectory, buildOptions, cancellationToken);
+        return result.Index.Search(searchOptions, cancellationToken);
     }
 
     public IReadOnlyCollection<BiliVideoCache> Search(
@@ -78,9 +84,17 @@ public sealed class CacheManager : ICacheManager
     }
 
     public BiliVideoCache? FindByAvid(string rootDirectory, CacheIndexBuildOptions? buildOptions, long avid)
+        => FindByAvid(rootDirectory, buildOptions, avid, CancellationToken.None);
+
+    public BiliVideoCache? FindByAvid(
+        string rootDirectory,
+        CacheIndexBuildOptions? buildOptions,
+        long avid,
+        CancellationToken cancellationToken)
     {
-        var index = BuildIndex(rootDirectory, buildOptions);
-        return index.ByAvid.TryGetValue(avid, out var cache) ? cache : null;
+        var result = BuildIndexWithReport(rootDirectory, buildOptions, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result.Index.ByAvid.GetValueOrDefault(avid);
     }
 
     public BiliVideoCache? FindByAvid(string rootDirectory, bool includeIncomplete, long avid)
@@ -95,4 +109,24 @@ public sealed class CacheManager : ICacheManager
     {
         return _deletionService.DeleteByAvid(rootDirectory, avid, dryRun);
     }
+
+    public IReadOnlyCollection<BiliVideoCache> Search(
+        string rootDirectory,
+        bool includeIncomplete,
+        CacheSearchOptions searchOptions,
+        CancellationToken cancellationToken)
+        => Search(rootDirectory, new CacheIndexBuildOptions
+        {
+            IncludeIncompleteEntries = includeIncomplete
+        }, searchOptions, cancellationToken);
+
+    public BiliVideoCache? FindByAvid(
+        string rootDirectory,
+        bool includeIncomplete,
+        long avid,
+        CancellationToken cancellationToken)
+        => FindByAvid(rootDirectory, new CacheIndexBuildOptions
+        {
+            IncludeIncompleteEntries = includeIncomplete
+        }, avid, cancellationToken);
 }

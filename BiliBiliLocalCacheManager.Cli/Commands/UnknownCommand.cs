@@ -3,7 +3,7 @@ namespace BiliBiliLocalCacheManager.Cli.Commands;
 public sealed class UnknownCommand(string commandName) : ICommand
 {
     public static readonly string[] KnownCommands =
-        ["scan", "show", "play", "delete", "trash", "search", "help"];
+        CommandCatalog.Names.ToArray();
 
     public int Execute(string[] args)
     {

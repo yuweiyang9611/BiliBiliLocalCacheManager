@@ -25,6 +25,7 @@ import {
   MAXIMUM_CACHE_PAGE_SIZE,
 } from '../shared/contracts';
 import { isRecord } from './protocol';
+import { boundedString, booleanValue, boundedInteger } from './ipc-validation';
 
 const maximumWireTextLength = 4096;
 
@@ -312,6 +313,26 @@ function storageArea(value: unknown, label: string): StorageArea {
   };
 }
 
+export function validateTrashPage(value: unknown): import('../shared/contracts').TrashPage {
+  const source = record(value, 'trash.page');
+  const offset = integer(source.offset, 'trash.page.offset');
+  const pageSize = integer(source.pageSize, 'trash.page.pageSize', 1, 200);
+  const totalItems = integer(source.totalItems, 'trash.page.totalItems', 0, 200_000);
+  const items = array(source.items, 'trash.page.items', pageSize).map((item, index) => trashEntry(item, `trash.page.items[${index}]`));
+  const hasMore = boolean(source.hasMore, 'trash.page.hasMore');
+  if (items.length !== Math.min(pageSize, Math.max(0, totalItems - offset)) || hasMore !== (offset + items.length < totalItems))
+    invalid('trash.page pagination mismatch');
+  const snapshotToken = string(source.snapshotToken, 'trash.page.snapshotToken', 128);
+  if (!snapshotToken) invalid('trash.page.snapshotToken is empty');
+  return { snapshotToken, offset, pageSize, totalItems, hasMore, items,
+    totalSizeBytes: integer(source.totalSizeBytes, 'trash.page.totalSizeBytes', 0, Number.MAX_SAFE_INTEGER) };
+}
+
+export function validateTrashSnapshotPurgeResult(value: unknown): import('../shared/contracts').TrashPurgeResult {
+  const source = record(value, 'trash.purgeSnapshot');
+  return { purged: diskIds(source.purged, 'trash.purgeSnapshot.purged', 200_000), ...trashOutcome(source, 'trash.purgeSnapshot', 200_000) };
+}
+
 function trashEntry(value: unknown, label: string): TrashEntry {
   const source = record(value, label);
   return {
@@ -347,8 +368,7 @@ function stringArray(value: unknown, label: string, maximum: number): string[] {
 }
 
 function string(value: unknown, label: string, maximum = maximumWireTextLength): string {
-  if (typeof value !== 'string' || value.length > maximum) invalid(`${label} 必须是长度不超过 ${maximum} 的字符串`);
-  return value;
+  return boundedString(value, label, maximum, invalid);
 }
 
 function token(value: unknown, label: string): string {
@@ -362,8 +382,7 @@ function nullableString(value: unknown, label: string): string | null {
 }
 
 function boolean(value: unknown, label: string): boolean {
-  if (typeof value !== 'boolean') invalid(`${label} 必须是布尔值`);
-  return value;
+  return booleanValue(value, label, invalid);
 }
 
 function number(value: unknown, label: string): number {
@@ -372,10 +391,7 @@ function number(value: unknown, label: string): number {
 }
 
 function integer(value: unknown, label: string, minimum = 0, maximum = 2_147_483_647): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
-    invalid(`${label} 必须是 ${minimum}–${maximum} 之间的整数`);
-  }
-  return value as number;
+  return boundedInteger(value, label, minimum, maximum, invalid);
 }
 
 function invalid(message: string): never {

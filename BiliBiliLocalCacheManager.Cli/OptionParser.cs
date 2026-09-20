@@ -10,6 +10,23 @@ namespace BiliBiliLocalCacheManager.Cli;
 /// </summary>
 public static class OptionParser
 {
+    internal static Dictionary<string, OptionSpec> CreateCommonSpecs(bool includeIncomplete = false)
+    {
+        var specs = new Dictionary<string, OptionSpec>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["--root"] = ValueOption("root"),
+            ["-r"] = ValueOption("root"),
+            ["--help"] = FlagOption("help"),
+            ["-h"] = FlagOption("help")
+        };
+        if (includeIncomplete)
+        {
+            specs["--all"] = FlagOption("include-incomplete");
+            specs["--include-incomplete"] = FlagOption("include-incomplete");
+        }
+        return specs;
+    }
+
     /// <summary>
     /// 单个选项的定义。
     /// </summary>

@@ -1,6 +1,6 @@
 import type { JsonValue } from '../shared/contracts';
 
-const phases = new Set(['scan', 'copy', 'measure', 'prepare', 'probe', 'concat', 'mux', 'fallback']);
+const phases = new Set(['scan', 'copy', 'measure', 'prepare', 'probe', 'concat', 'mux', 'fallback', 'download', 'verify', 'extract']);
 
 export class HostProgressTracker {
   #item = 0;
@@ -16,7 +16,7 @@ export class HostProgressTracker {
     const current = value.current;
     if (current != null && (typeof current !== 'number' || !Number.isSafeInteger(current) || current < 0)) return false;
     const counters = phase
-      ? [value.percentage, details.processedSegmentDirectories, details.processedAvidDirectories, details.bytesCopied, details.processedSeconds]
+      ? [value.percentage, details.processedSegmentDirectories, details.processedAvidDirectories, details.bytesCopied, details.processedSeconds, details.bytesProcessed]
       : [details.processedSegmentDirectories, details.processedAvidDirectories];
     if (counters.some(n => n != null && (typeof n !== 'number' || !Number.isFinite(n) || n < 0))) return false;
     if (typeof value.percentage === 'number' && value.percentage > 100) return false;

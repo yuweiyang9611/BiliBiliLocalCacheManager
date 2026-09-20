@@ -31,16 +31,7 @@ public sealed partial class FfmpegCoreTranscoder
                 .WithAudioBitrate(AudioQuality.Good)
                 .UsingShortest(false));
 
-        if (duration > TimeSpan.Zero)
-        {
-            processor.NotifyOnProgress(
-                percentage => tracker.Report(fallbackStage, percentage, "fallback"),
-                duration);
-        }
-        else
-        {
-            processor.NotifyOnProgress(time => tracker.ReportTime(fallbackStage, time, "fallback"));
-        }
+        processor.NotifyOnProgress(time => tracker.ReportTime(fallbackStage, time, "fallback", duration));
 
         var succeeded = await processor
             .CancellableThrough(cancellationToken)

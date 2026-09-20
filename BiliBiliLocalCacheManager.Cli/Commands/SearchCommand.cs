@@ -9,28 +9,20 @@ public sealed class SearchCommand : ICommand
     public int Execute(string[] args)
     {
         // 定义本命令允许的参数，未知参数会直接报错，避免“无效参数被忽略”的误解。
-        var specs = new Dictionary<string, OptionParser.OptionSpec>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["--root"] = OptionParser.ValueOption("root"),
-            ["-r"] = OptionParser.ValueOption("root"),
-            ["--all"] = OptionParser.FlagOption("include-incomplete"),
-            ["--include-incomplete"] = OptionParser.FlagOption("include-incomplete"),
-            ["--scope"] = OptionParser.ValueOption("scope"),
-            ["--mode"] = OptionParser.ValueOption("mode"),
-            ["--case-sensitive"] = OptionParser.FlagOption("case-sensitive"),
-            ["--split"] = OptionParser.FlagOption("split"),
-            ["--no-split"] = OptionParser.FlagOption("no-split"),
-            ["--separators"] = OptionParser.ValueOption("separators"),
-            ["--any"] = OptionParser.FlagOption("any"),
-            ["--match-all"] = OptionParser.FlagOption("match-all"),
-            ["--include-part-name"] = OptionParser.FlagOption("include-part-name"),
-            ["--no-part-name"] = OptionParser.FlagOption("no-part-name"),
-            ["--include-owner-name"] = OptionParser.FlagOption("include-owner-name"),
-            ["--include-bvid"] = OptionParser.FlagOption("include-bvid"),
-            ["--include-avid"] = OptionParser.FlagOption("include-avid"),
-            ["--help"] = OptionParser.FlagOption("help"),
-            ["-h"] = OptionParser.FlagOption("help")
-        };
+        var specs = OptionParser.CreateCommonSpecs(includeIncomplete: true);
+        specs["--scope"] = OptionParser.ValueOption("scope");
+        specs["--mode"] = OptionParser.ValueOption("mode");
+        specs["--case-sensitive"] = OptionParser.FlagOption("case-sensitive");
+        specs["--split"] = OptionParser.FlagOption("split");
+        specs["--no-split"] = OptionParser.FlagOption("no-split");
+        specs["--separators"] = OptionParser.ValueOption("separators");
+        specs["--any"] = OptionParser.FlagOption("any");
+        specs["--match-all"] = OptionParser.FlagOption("match-all");
+        specs["--include-part-name"] = OptionParser.FlagOption("include-part-name");
+        specs["--no-part-name"] = OptionParser.FlagOption("no-part-name");
+        specs["--include-owner-name"] = OptionParser.FlagOption("include-owner-name");
+        specs["--include-bvid"] = OptionParser.FlagOption("include-bvid");
+        specs["--include-avid"] = OptionParser.FlagOption("include-avid");
 
         OptionParser.ParsedArguments parsed;
         try

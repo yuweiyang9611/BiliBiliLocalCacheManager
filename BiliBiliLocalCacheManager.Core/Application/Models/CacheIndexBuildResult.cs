@@ -14,7 +14,8 @@ public sealed class CacheIndexBuildResult
         int skippedIncompleteEntries,
         int invalidEntries,
         int inaccessibleDirectories,
-        IEnumerable<CacheScanIssue>? issues = null)
+        IEnumerable<CacheScanIssue>? issues = null,
+        bool issuesCollected = true)
     {
         Index = index ?? throw new ArgumentNullException(nameof(index));
         ScannedAvidDirectories = scannedAvidDirectories;
@@ -23,6 +24,7 @@ public sealed class CacheIndexBuildResult
         SkippedIncompleteEntries = skippedIncompleteEntries;
         InvalidEntries = invalidEntries;
         InaccessibleDirectories = inaccessibleDirectories;
+        IssuesCollected = issuesCollected;
         _issues = new ReadOnlyCollection<CacheScanIssue>((issues ?? Array.Empty<CacheScanIssue>()).ToList());
     }
 
@@ -42,6 +44,9 @@ public sealed class CacheIndexBuildResult
 
     public IReadOnlyList<CacheScanIssue> Issues => _issues;
 
+    /// <summary>False when a legacy builder supplied only an index, not scan diagnostics.</summary>
+    public bool IssuesCollected { get; }
+
     public bool HasWarnings => SkippedIncompleteEntries > 0 || InvalidEntries > 0 || InaccessibleDirectories > 0;
 
     public static CacheIndexBuildResult FromIndex(CacheIndex index)
@@ -54,6 +59,7 @@ public sealed class CacheIndexBuildResult
             includedEntries: index.VideoCaches.Sum(cache => cache.Segments.Count),
             skippedIncompleteEntries: 0,
             invalidEntries: 0,
-            inaccessibleDirectories: 0);
+            inaccessibleDirectories: 0,
+            issuesCollected: false);
     }
 }

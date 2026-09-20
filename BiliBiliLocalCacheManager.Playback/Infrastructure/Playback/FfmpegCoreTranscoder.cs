@@ -7,6 +7,60 @@ namespace BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 
 public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
 {
+    private static readonly TranscodeConcurrencyGate TranscodeGate = new(ReadConcurrencyLimit());
+
+    private static int ReadConcurrencyLimit() => ParseConcurrencyLimit(
+        Environment.GetEnvironmentVariable("BILIBILI_LOCAL_CACHE_MANAGER_MAX_TRANSCODES"));
+
+    internal static int ParseConcurrencyLimit(string? value) => int.TryParse(value, out var limit) && limit is >= 1 and <= 16
+        ? limit : 2;
+
+    public Task ConcatToMp4Async(IReadOnlyList<string> inputFiles, string outputPath, TimeSpan expectedDuration,
+        IProgress<PlaybackPreparationProgress>? progress, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(inputFiles);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        if (inputFiles.Count == 0) throw new ArgumentException("At least one input file is required.", nameof(inputFiles));
+        return RunAsync((reporter, token) => ConcatCoreAsync(inputFiles, outputPath, expectedDuration, reporter, token), progress, cancellationToken);
+    }
+
+    public Task MuxDashPairToMp4Async(string videoPath, string audioPath, string outputPath, TimeSpan expectedDuration,
+        IProgress<PlaybackPreparationProgress>? progress, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(videoPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(audioPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        return RunAsync((reporter, token) => MuxDashPairCoreAsync(videoPath, audioPath, outputPath, expectedDuration, reporter, token), progress, cancellationToken);
+    }
+
+    private static async Task RunAsync(Func<IProgress<PlaybackPreparationProgress>, CancellationToken, Task> run,
+        IProgress<PlaybackPreparationProgress>? progress, CancellationToken cancellationToken)
+    {
+        // The named initialization mutex is thread-affine; keep that bounded setup on a worker.
+        await Task.Run(() => BundledFfmpegBootstrapper.EnsureConfiguredWithByteProgress(cancellationToken,
+            (stage, percentage) => progress?.Report(new PlaybackPreparationProgress(stage, percentage, TimeSpan.Zero, null, Phase: "prepare")),
+            (phase, bytes) => progress?.Report(new PlaybackPreparationProgress("Preparing FFmpeg", null, TimeSpan.Zero, null,
+                Phase: phase, ProcessedBytes: bytes))),
+            cancellationToken).ConfigureAwait(false);
+        progress?.Report(new PlaybackPreparationProgress("Waiting for a transcoding slot", null, TimeSpan.Zero, null, Phase: "wait"));
+        using (await TranscodeGate.EnterAsync(cancellationToken).ConfigureAwait(false))
+        {
+            using var deadline = new TranscodeProgressDeadline(cancellationToken, TimeSpan.FromMinutes(10));
+            try
+            {
+                await run(new InlineProgress(value => { deadline.Observe(value); progress?.Report(value); }), deadline.Token).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (deadline.TimedOut && !cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("FFmpeg made no measurable progress for 10 minutes and was stopped.", exception);
+            }
+        }
+    }
+
+    private sealed class InlineProgress(Action<PlaybackPreparationProgress> report) : IProgress<PlaybackPreparationProgress>
+    {
+        public void Report(PlaybackPreparationProgress value) => report(value);
+    }
     public void ConcatToMp4(IReadOnlyList<string> inputFiles, string outputPath)
     {
         ConcatToMp4(
@@ -76,7 +130,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
             .GetResult();
     }
 
-    private static async Task ConcatToMp4Async(
+    private static async Task ConcatCoreAsync(
         IReadOnlyList<string> inputFiles,
         string outputPath,
         TimeSpan expectedDuration,
@@ -86,11 +140,6 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         cancellationToken.ThrowIfCancellationRequested();
         var tracker = new ProgressTracker(progress);
         tracker.Report("\u6b63\u5728\u51c6\u5907 FFmpeg", percentage: null);
-
-        BundledFfmpegBootstrapper.EnsureConfigured(
-            cancellationToken,
-            tracker.Report);
-        cancellationToken.ThrowIfCancellationRequested();
 
         var temporaryRoot = Path.Combine(
             GlobalFFOptions.Current.TemporaryFilesFolder,
@@ -120,6 +169,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
                             inputPath,
                             cancellationToken: cancellationToken)
                         .ConfigureAwait(false);
+                    tracker.Report("Media part analysed", (index + 1) * 100d / inputFiles.Count, "probe");
                     if (analysis.Duration > TimeSpan.Zero)
                     {
                         analysedDuration += analysis.Duration;
@@ -155,17 +205,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
                     .WithCustomArgument("-safe 0"))
                 .OutputToFile(outputPath, true, options => options.CopyChannel());
 
-            if (totalDuration > TimeSpan.Zero)
-            {
-                processor.NotifyOnProgress(
-                    percentage => tracker.Report(concatStage, percentage, "concat"),
-                    totalDuration);
-            }
-            else
-            {
-                tracker.Report(concatStage, percentage: null);
-                processor.NotifyOnProgress(time => tracker.ReportTime(concatStage, time, "concat"));
-            }
+            processor.NotifyOnProgress(time => tracker.ReportTime(concatStage, time, "concat", totalDuration));
 
             var succeeded = await processor
                 .CancellableThrough(cancellationToken)
@@ -185,7 +225,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         }
     }
 
-    private static async Task MuxDashPairToMp4Async(
+    private static async Task MuxDashPairCoreAsync(
         string videoPath,
         string audioPath,
         string outputPath,
@@ -197,11 +237,6 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         var tracker = new ProgressTracker(progress);
         tracker.Report("\u6b63\u5728\u51c6\u5907 FFmpeg", percentage: null);
 
-        BundledFfmpegBootstrapper.EnsureConfigured(
-            cancellationToken,
-            tracker.Report);
-        cancellationToken.ThrowIfCancellationRequested();
-
         tracker.Report(
             "\u6b63\u5728\u68c0\u67e5\u97f3\u9891\u517c\u5bb9\u6027",
             percentage: null);
@@ -209,6 +244,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
                 audioPath,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+        tracker.Report("Audio analysed", 50d, "probe");
         var duration = expectedDuration > TimeSpan.Zero
             ? expectedDuration
             : audioAnalysis.Duration;
@@ -220,6 +256,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             duration = videoAnalysis.Duration;
+            tracker.Report("Video analysed", 100d, "probe");
         }
 
         if (!string.Equals(
@@ -248,17 +285,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
                 .WithCustomArgument("-map 0:v:0 -map 1:a:0")
                 .UsingShortest(false));
 
-        if (duration > TimeSpan.Zero)
-        {
-            processor.NotifyOnProgress(
-                percentage => tracker.Report(muxStage, percentage, "mux"),
-                duration);
-        }
-        else
-        {
-            tracker.Report(muxStage, percentage: null);
-            processor.NotifyOnProgress(time => tracker.ReportTime(muxStage, time, "mux"));
-        }
+        processor.NotifyOnProgress(time => tracker.ReportTime(muxStage, time, "mux", duration));
 
         try
         {
@@ -312,7 +339,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         }
     }
 
-    private sealed class ProgressTracker(IProgress<PlaybackPreparationProgress>? progress)
+    internal sealed class ProgressTracker(IProgress<PlaybackPreparationProgress>? progress)
     {
         private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
         private readonly Stopwatch _stageStopwatch = Stopwatch.StartNew();
@@ -320,14 +347,17 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         private string? _stage;
         private double _lastPercentage;
 
-        public void ReportTime(string stage, TimeSpan processed, string phase)
+        public void ReportTime(string stage, TimeSpan processed, string phase, TimeSpan expectedDuration = default)
         {
-            progress?.Report(new PlaybackPreparationProgress(stage, null, _stopwatch.Elapsed, null, processed.TotalSeconds, phase));
+            var seconds = Math.Max(0d, processed.TotalSeconds);
+            double? percentage = expectedDuration > TimeSpan.Zero
+                ? seconds * 100d / expectedDuration.TotalSeconds : null;
+            Report(stage, percentage, phase, seconds);
         }
 
         public void Report(string stage, double? percentage) => Report(stage, percentage, "prepare");
 
-        public void Report(string stage, double? percentage, string phase)
+        public void Report(string stage, double? percentage, string phase, double? processedSeconds = null)
         {
             if (progress is null)
             {
@@ -371,7 +401,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
                     stage,
                     normalized,
                     elapsed,
-                    remaining, Phase: phase));
+                    remaining, ProcessedSeconds: processedSeconds, Phase: phase));
             }
         }
     }

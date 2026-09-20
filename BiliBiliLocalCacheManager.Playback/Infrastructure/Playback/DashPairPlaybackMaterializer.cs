@@ -40,7 +40,10 @@ public sealed class DashPairPlaybackMaterializer : IPlaybackMaterializer
     public PlaybackMaterializationResult Materialize(
         CachePlaybackPlan plan,
         IProgress<PlaybackPreparationProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) => MaterializeAsync(plan, progress, cancellationToken).GetAwaiter().GetResult();
+
+    public async Task<PlaybackMaterializationResult> MaterializeAsync(CachePlaybackPlan plan,
+        IProgress<PlaybackPreparationProgress>? progress, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(plan);
         cancellationToken.ThrowIfCancellationRequested();
@@ -52,10 +55,10 @@ public sealed class DashPairPlaybackMaterializer : IPlaybackMaterializer
 
         try
         {
-            var artifact = _artifactStore.GetOrCreate(
+            var artifact = await _artifactStore.GetOrCreateAsync(
                 plan,
                 ".mp4",
-                outputPath => _transcoder.MuxDashPairToMp4(
+                outputPath => _transcoder.MuxDashPairToMp4Async(
                     plan.MediaFiles[0],
                     plan.MediaFiles[1],
                     outputPath,
@@ -63,7 +66,7 @@ public sealed class DashPairPlaybackMaterializer : IPlaybackMaterializer
                     progress,
                     cancellationToken),
                 cancellationToken,
-                PlaybackArtifactWaitProgress.Create(progress));
+                PlaybackArtifactWaitProgress.Create(progress)).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             return PlaybackMaterializationResult.Success(
                 artifact.OutputPath,

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   CacheDetails,
@@ -12,6 +12,7 @@ import type {
 } from '../shared/contracts';
 import { defaultSettings, emptyStorage } from '../shared/contracts';
 import { App } from './App';
+import { IpcError } from '../shared/ipc-result';
 
 const indexToken = 'index-token';
 const initialSegments: CacheSegment[] = [{
@@ -82,10 +83,16 @@ function createCacheDetails(
 }
 
 function createApi(): CacheManagerApi {
-  return {
+  const api: CacheManagerApi = {
+    getTrashPage: vi.fn().mockImplementation(async (rootPath, options) => {
+      const items = await api.listTrash(rootPath);
+      const offset = options?.offset ?? 0;
+      const pageSize = options?.pageSize ?? 100;
+      return { snapshotToken: 'trash-snapshot', offset, pageSize, totalItems: items.length, totalSizeBytes: items.reduce((n, x) => n + x.sizeBytes, 0), hasMore: offset + pageSize < items.length, items: items.slice(offset, offset + pageSize) };
+    }),
+    purgeTrashSnapshot: vi.fn().mockImplementation(async (rootPath) => api.purgeTrash(rootPath, (await api.listTrash(rootPath)).map(x => x.id))),
     health: vi.fn().mockResolvedValue({ protocolVersion: 3, status: 'ok', version: '1.0.0' }),
     getInitialState: vi.fn().mockResolvedValue(initial),
-    getSettings: vi.fn().mockResolvedValue(initial.settings),
     updateSettings: vi.fn().mockImplementation(async (patch) => ({ ...initial.settings, ...patch })),
     chooseRootDirectory: vi.fn().mockResolvedValue(null),
     scan: vi.fn().mockResolvedValue(createCachePage()),
@@ -121,6 +128,7 @@ function createApi(): CacheManagerApi {
     onProgress: vi.fn().mockReturnValue(() => undefined),
     onHostUnavailable: vi.fn().mockReturnValue(() => undefined),
   };
+  return api;
 }
 
 function deferred<T>() {
@@ -134,6 +142,43 @@ function deferred<T>() {
 }
 
 describe('desktop renderer', () => {
+  it('keeps bootstrap usable when advisory health times out', async () => {
+    vi.mocked(api.health).mockRejectedValue(new IpcError('slow health', 'HOST_TIMEOUT'));
+    const { container } = render(<App />);
+    await waitFor(() => expect(container.querySelector('[data-renderer-bootstrap]')).toHaveAttribute('data-renderer-bootstrap', 'ready'));
+    expect(screen.queryByText('桌面端初始化失败')).not.toBeInTheDocument();
+    expect(screen.getByText('运行环境检查暂不可用：slow health')).toBeInTheDocument();
+  });
+
+  it('does not wait for a pending health reply before allowing scans', async () => {
+    const health = deferred<Awaited<ReturnType<CacheManagerApi['health']>>>();
+    vi.mocked(api.health).mockReturnValue(health.promise);
+    const { container } = render(<App />);
+    await waitFor(() => expect(container.querySelector('[data-renderer-bootstrap]')).toHaveAttribute('data-renderer-bootstrap', 'ready'));
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    await act(async () => health.resolve({ protocolVersion: 3, status: 'ok', version: 'test' }));
+  });
+
+  it('pages trash by snapshot and confirms the full snapshot from a later page', async () => {
+    const entries = Array.from({ length: 205 }, (_, n) => ({ id: `trash-${n}`, avid: String(n + 1), title: `Trash ${n}`, sizeBytes: 1, deletedAt: null }));
+    vi.mocked(api.listTrash).mockResolvedValue(entries);
+    vi.mocked(api.getInitialState).mockResolvedValue({ ...initial, capabilities: { ...initial.capabilities, trashPurge: true } });
+    vi.mocked(api.purgeTrashSnapshot).mockResolvedValue(null);
+    render(<App />);
+    await screen.findByText('服务正常');
+    fireEvent.click(screen.getByRole('button', { name: '回收站' }));
+    await screen.findByText('Trash 0');
+    expect(screen.queryByText('Trash 100')).not.toBeInTheDocument();
+    fireEvent.click(within(screen.getByLabelText('回收站分页')).getByRole('button', { name: '下一页' }));
+    await screen.findByText('Trash 100');
+    expect(api.getTrashPage).toHaveBeenLastCalledWith(initial.settings.rootPath, { offset: 100, pageSize: 100, snapshotToken: 'trash-snapshot' });
+    fireEvent.click(screen.getByRole('button', { name: '清空回收站' }));
+    expect(screen.getByText('彻底清空回收站（205 项）')).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '确认' }));
+    await waitFor(() => expect(api.purgeTrashSnapshot).toHaveBeenCalledWith(initial.settings.rootPath, 'trash-snapshot'));
+    expect(api.purgeTrash).not.toHaveBeenCalled();
+  });
   let api: CacheManagerApi;
   let hostUnavailableListener: ((message: string) => void) | null;
 
@@ -235,7 +280,7 @@ describe('desktop renderer', () => {
     const state = vi.mocked(api.onOperationState).mock.calls[0][0];
     await act(async () => {
       state({ requestId: 'export-1', operation: 'export', state: 'unknown', sideEffects: true });
-      pending.reject(new Error('OUTCOME_UNKNOWN: 操作结果无法确认'));
+      pending.reject(new IpcError('操作结果无法确认', 'OUTCOME_UNKNOWN'));
     });
     expect(await screen.findByText('导出结果：结果无法确认')).toBeInTheDocument();
     expect(screen.queryByText(/本批导出未发布/)).not.toBeInTheDocument();
@@ -298,7 +343,7 @@ describe('desktop renderer', () => {
     const listener = vi.mocked(api.onOperationState).mock.calls[0][0];
     await act(async () => {
       listener({ requestId: 'export-inspect', operation: 'export', state, sideEffects: true });
-      if (state === 'unknown') pending.reject(new Error('OUTCOME_UNKNOWN'));
+      if (state === 'unknown') pending.reject(new IpcError('结果尚未返回', 'OUTCOME_UNKNOWN'));
     });
     fireEvent.click(screen.getByRole('button', { name: '存储概览' }));
     await waitFor(() => expect(screen.getByRole('button', { name: '刷新统计' })).not.toBeDisabled());
@@ -453,7 +498,7 @@ describe('desktop renderer', () => {
     expect(screen.getByText('Startup progress')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
     await waitFor(() => expect(api.cancel).toHaveBeenCalledOnce());
-    await act(async () => pending.reject(new Error('cancelled')));
+    await act(async () => pending.reject(new IpcError('cancelled', 'cancelled')));
     expect(screen.getByText('启动扫描已取消。')).toBeInTheDocument();
     const shell = container.querySelector('[data-renderer-bootstrap]');
     expect(shell).toHaveAttribute('data-renderer-bootstrap', 'ready');
@@ -938,10 +983,10 @@ describe('desktop renderer', () => {
   });
 
   it('keeps partially restored results and does not start a new scan after cancellation', async () => {
-    vi.mocked(api.listTrash).mockResolvedValue([
+    vi.mocked(api.listTrash).mockResolvedValueOnce([
       { id: 'trash-100', avid: '100', title: '已恢复条目', sizeBytes: 1, deletedAt: null },
       { id: 'trash-101', avid: '101', title: '未恢复条目', sizeBytes: 1, deletedAt: null },
-    ]);
+    ]).mockResolvedValue([{ id: 'trash-101', avid: '101', title: '未恢复条目', sizeBytes: 1, deletedAt: null }]);
     vi.mocked(api.restoreTrash).mockResolvedValue({ restored: ['trash-100'], failed: [], cancelled: true, unprocessed: ['trash-101'] });
     render(<App />);
     await screen.findByText('测试缓存');
@@ -950,8 +995,10 @@ describe('desktop renderer', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: '选择全部回收站条目' }));
     fireEvent.click(screen.getByRole('button', { name: '恢复所选' }));
     expect(await screen.findByText(/已恢复 1 项，失败 0 项，未执行 1 项/)).toBeInTheDocument();
+    expect(await screen.findByText('未恢复条目')).toBeInTheDocument();
     expect(screen.queryByText('已恢复条目')).not.toBeInTheDocument();
-    expect(screen.getByText('未恢复条目')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 未恢复条目' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '恢复所选' })).not.toBeDisabled());
     expect(api.scan).not.toHaveBeenCalled();
   });
 
@@ -973,10 +1020,10 @@ describe('desktop renderer', () => {
   });
 
   it('keeps partial restore results and reports damage from the follow-up scan', async () => {
-    vi.mocked(api.listTrash).mockResolvedValue([
+    vi.mocked(api.listTrash).mockResolvedValueOnce([
       { id: 'trash-100', avid: '100', title: 'Restored entry', sizeBytes: 1, deletedAt: null },
       { id: 'trash-101', avid: '101', title: 'Failed restore', sizeBytes: 1, deletedAt: null },
-    ]);
+    ]).mockResolvedValue([{ id: 'trash-101', avid: '101', title: 'Failed restore', sizeBytes: 1, deletedAt: null }]);
     vi.mocked(api.restoreTrash).mockResolvedValue({ restored: ['trash-100'], failed: ['trash-101'], cancelled: false, unprocessed: [] });
     vi.mocked(api.scan).mockResolvedValue({ ...createCachePage(), invalidEntries: 1, hasWarnings: true,
       issues: [{ id: 0, kind: 'InvalidEntry', path: 'damaged/entry.json', message: 'Restore scan damage' }] });
@@ -987,8 +1034,8 @@ describe('desktop renderer', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: '选择全部回收站条目' }));
     fireEvent.click(screen.getByRole('button', { name: '恢复所选' }));
     expect(await screen.findByText(/已恢复 1 项，失败 1 项/)).toBeInTheDocument();
+    expect(await screen.findByText('Failed restore')).toBeInTheDocument();
     expect(screen.queryByText('Restored entry')).not.toBeInTheDocument();
-    expect(screen.getByText('Failed restore')).toBeInTheDocument();
     expect(screen.getByText(/扫描完成.*损坏 1 条/).closest('.toast')).toHaveClass('error');
     fireEvent.click(screen.getByRole('button', { name: '缓存库' }));
     expect(screen.getByLabelText('扫描结果')).toHaveTextContent('Restore scan damage');
@@ -1113,7 +1160,7 @@ describe('desktop renderer', () => {
     fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
     await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
-    vi.mocked(api.search).mockRejectedValueOnce(new Error('The cache index token is missing or no longer current. Run scan again.'));
+    vi.mocked(api.search).mockRejectedValueOnce(new IpcError('The cache index token is missing or no longer current. Run scan again.', 'stale_index'));
 
     fireEvent.change(screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号'), { target: { value: '触发过期索引' } });
     await waitFor(() => expect(api.search).toHaveBeenCalledOnce());
@@ -1148,7 +1195,7 @@ describe('desktop renderer', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
     await waitFor(() => expect(api.cancel).toHaveBeenCalledOnce());
-    await act(async () => { pendingScan.reject(new Error('The operation was cancelled.')); });
+    await act(async () => { pendingScan.reject(new IpcError('The operation was cancelled.', 'cancelled')); });
 
     expect(await screen.findByText('操作已取消。')).toBeInTheDocument();
     expect(screen.getByText('服务正常')).toBeInTheDocument();

@@ -54,7 +54,7 @@ public sealed class FileSystemCacheStorageStatisticsService : ICacheStorageStati
                 }
 
                 managedEntryCount = SaturatingAdd(managedEntryCount, 1);
-                var inspection = InspectDirectoryTree(path, cancellationToken, activity);
+                var inspection = DirectoryTreeInspector.Inspect(path, cancellationToken, activity);
                 fileCount = SaturatingAdd(fileCount, inspection.FileCount);
                 totalBytes = SaturatingAdd(totalBytes, inspection.TotalBytes);
             }
@@ -83,51 +83,6 @@ public sealed class FileSystemCacheStorageStatisticsService : ICacheStorageStati
                    CultureInfo.InvariantCulture,
                    out var avid) &&
                avid > 0;
-    }
-
-    private static DirectoryInspection InspectDirectoryTree(
-        string directoryPath,
-        CancellationToken cancellationToken,
-        Action? activity = null)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var attributes = File.GetAttributes(directoryPath);
-        if (!attributes.HasFlag(FileAttributes.Directory) ||
-            attributes.HasFlag(FileAttributes.ReparsePoint))
-        {
-            throw new InvalidOperationException(
-                "A managed cache entry contains a symbolic link or directory junction.");
-        }
-
-        var fileCount = 0;
-        var totalBytes = 0L;
-        foreach (var path in Directory.EnumerateFileSystemEntries(
-                     directoryPath,
-                     "*",
-                     SearchOption.TopDirectoryOnly))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            activity?.Invoke();
-            attributes = File.GetAttributes(path);
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                throw new InvalidOperationException(
-                    "A managed cache entry contains a symbolic link or directory junction.");
-            }
-
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                var child = InspectDirectoryTree(path, cancellationToken, activity);
-                fileCount = SaturatingAdd(fileCount, child.FileCount);
-                totalBytes = SaturatingAdd(totalBytes, child.TotalBytes);
-                continue;
-            }
-
-            fileCount = SaturatingAdd(fileCount, 1);
-            totalBytes = SaturatingAdd(totalBytes, new FileInfo(path).Length);
-        }
-
-        return new DirectoryInspection(fileCount, totalBytes);
     }
 
     internal static long SaturatingAdd(long left, long right)
@@ -168,5 +123,4 @@ public sealed class FileSystemCacheStorageStatisticsService : ICacheStorageStati
             System.Security.SecurityException;
     }
 
-    private sealed record DirectoryInspection(int FileCount, long TotalBytes);
 }

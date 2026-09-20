@@ -47,6 +47,15 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
         CancellationToken cancellationToken,
         Action<string, double?>? reportProgress)
     {
+        ArgumentNullException.ThrowIfNull(producer);
+        return GetOrCreateAsync(plan, extension, path => { producer(path); return Task.CompletedTask; },
+            cancellationToken, reportProgress).GetAwaiter().GetResult();
+    }
+
+    public async Task<PlaybackArtifactMaterialization> GetOrCreateAsync(
+        CachePlaybackPlan plan, string extension, Func<string, Task> producer,
+        CancellationToken cancellationToken = default, Action<string, double?>? reportProgress = null)
+    {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(producer);
 
@@ -57,13 +66,14 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
         var pathLock = AcquirePathLock(outputPath);
         try
         {
-            using (new SemaphoreReleaser(pathLock.SyncRoot, cancellationToken))
+            await pathLock.SyncRoot.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-                using var crossProcessLock = AcquireCrossProcessLock(
+                using var crossProcessLock = await AcquireCrossProcessLockAsync(
                     outputPath,
                     cancellationToken,
-                    reportProgress);
+                    reportProgress).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
 
                 if (IsReusable(outputPath))
@@ -72,7 +82,6 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
                     return new PlaybackArtifactMaterialization(outputPath, WasReused: true);
                 }
 
-                Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
                 var buildPath = Path.Combine(
                     Path.GetDirectoryName(outputPath)!,
                     $"{Path.GetFileNameWithoutExtension(outputPath)}.building-{Guid.NewGuid():N}{normalizedExtension}");
@@ -80,7 +89,7 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
                 EnsurePathIsInsideRoot(buildPath);
                 try
                 {
-                    producer(buildPath);
+                    await producer(buildPath).ConfigureAwait(false);
                     if (!IsReusable(buildPath))
                     {
                         throw new InvalidDataException("播放产物生成器没有创建有效的输出文件。");
@@ -102,6 +111,7 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
                     TryDeleteFile(buildPath);
                 }
             }
+            finally { pathLock.SyncRoot.Release(); }
         }
         finally
         {
@@ -325,11 +335,11 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
         }
     }
 
-    private static void Touch(string path)
+    private void Touch(string path)
     {
         try
         {
-            File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+            File.SetLastWriteTimeUtc(path, _timeProvider.GetUtcNow().UtcDateTime);
         }
         catch
         {

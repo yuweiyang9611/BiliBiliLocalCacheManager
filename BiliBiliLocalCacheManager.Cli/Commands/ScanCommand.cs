@@ -8,15 +8,7 @@ public sealed class ScanCommand : ICommand
     public int Execute(string[] args)
     {
         // 定义本命令允许的参数，未知参数会直接报错，避免“无效参数被忽略”的误解。
-        var specs = new Dictionary<string, OptionParser.OptionSpec>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["--root"] = OptionParser.ValueOption("root"),
-            ["-r"] = OptionParser.ValueOption("root"),
-            ["--all"] = OptionParser.FlagOption("include-incomplete"),
-            ["--include-incomplete"] = OptionParser.FlagOption("include-incomplete"),
-            ["--help"] = OptionParser.FlagOption("help"),
-            ["-h"] = OptionParser.FlagOption("help")
-        };
+        var specs = OptionParser.CreateCommonSpecs(includeIncomplete: true);
 
         OptionParser.ParsedArguments parsed;
         try

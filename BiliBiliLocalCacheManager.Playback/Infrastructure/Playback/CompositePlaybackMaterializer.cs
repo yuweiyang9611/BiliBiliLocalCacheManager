@@ -47,4 +47,15 @@ public sealed class CompositePlaybackMaterializer : IPlaybackMaterializer
 
         return materializer.Materialize(plan, progress, cancellationToken);
     }
+
+    public Task<PlaybackMaterializationResult> MaterializeAsync(CachePlaybackPlan plan,
+        IProgress<PlaybackPreparationProgress>? progress, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        cancellationToken.ThrowIfCancellationRequested();
+        var materializer = _materializers.FirstOrDefault(candidate => candidate.CanHandle(plan));
+        return materializer is null
+            ? Task.FromResult(PlaybackMaterializationResult.Failure($"No materializer for {plan.MaterialKind}.", nameof(CompositePlaybackMaterializer)))
+            : materializer.MaterializeAsync(plan, progress, cancellationToken);
+    }
 }

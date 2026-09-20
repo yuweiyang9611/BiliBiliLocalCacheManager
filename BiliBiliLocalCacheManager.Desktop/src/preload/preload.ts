@@ -3,9 +3,10 @@ import type { AppSettings, CacheDetailsRequest, CacheManagerApi, HostProgress, P
 import { channels } from '../shared/channels';
 
 const api: CacheManagerApi = {
+  getTrashPage: (rootPath, options) => ipcRenderer.invoke(channels.trashPage, rootPath, options),
+  purgeTrashSnapshot: (rootPath, token) => ipcRenderer.invoke(channels.trashPurgeSnapshot, rootPath, token),
   health: () => ipcRenderer.invoke(channels.health),
   getInitialState: () => ipcRenderer.invoke(channels.initialState),
-  getSettings: () => ipcRenderer.invoke(channels.settingsGet),
   updateSettings: (patch: Partial<AppSettings>) => ipcRenderer.invoke(channels.settingsUpdate, patch),
   chooseRootDirectory: (defaultPath?: string) => ipcRenderer.invoke(channels.chooseRoot, defaultPath),
   scan: (options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; offset?: number; pageSize?: number }) => ipcRenderer.invoke(channels.scan, options),

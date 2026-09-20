@@ -91,6 +91,37 @@ public sealed class CacheManagerTests
         Assert.Same(deletionService.Result, result);
     }
 
+    [Fact]
+    public void Search_WithCancellation_DoesNotInvokeLegacyBuilderWhenAlreadyCancelled()
+    {
+        var builder = new RecordingIndexBuilder(new CacheIndex([]));
+        var manager = new CacheManager(builder, new RecordingDeletionService());
+        using var source = new CancellationTokenSource();
+        source.Cancel();
+        Assert.Throws<OperationCanceledException>(() => manager.Search(
+            "root", null, new CacheSearchOptions { Keyword = "Alpha" }, source.Token));
+        Assert.Null(builder.RootDirectory);
+    }
+
+    [Fact]
+    public void LegacyBuilder_ReportDoesNotClaimItCollectedDiagnostics()
+    {
+        var builder = new RecordingIndexBuilder(new CacheIndex([CreateCache(1, "Alpha")]));
+        var manager = new CacheManager(builder, new RecordingDeletionService());
+        Assert.False(manager.BuildIndexWithReport("root").IssuesCollected);
+    }
+
+    [Fact]
+    public void FindByAvid_WithCancellation_DoesNotInvokeLegacyBuilderWhenAlreadyCancelled()
+    {
+        var builder = new RecordingIndexBuilder(new CacheIndex([]));
+        var manager = new CacheManager(builder, new RecordingDeletionService());
+        using var source = new CancellationTokenSource();
+        source.Cancel();
+        Assert.Throws<OperationCanceledException>(() => manager.FindByAvid("root", false, 1, source.Token));
+        Assert.Null(builder.RootDirectory);
+    }
+
     private static BiliVideoCache CreateCache(long avid, string title)
     {
         var segment = new BiliSegment(

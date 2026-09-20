@@ -1,4 +1,3 @@
-using BiliBiliLocalCacheManager.Cli.Commands;
 using Spectre.Console;
 
 namespace BiliBiliLocalCacheManager.Cli;
@@ -18,19 +17,7 @@ public static class Program
 
         try
         {
-            ICommand command = commandName switch
-            {
-                "scan" => new ScanCommand(),
-                "show" => new ShowCommand(),
-                "play" => new PlayCommand(),
-                "delete" => new DeleteCommand(),
-                "trash" => new TrashCommand(),
-                "search" => new SearchCommand(),
-                "help" or "--help" or "-h" => new HelpCommand(),
-                _ => new UnknownCommand(commandName)
-            };
-
-            return command.Execute(rest);
+            return CommandCatalog.Create(commandName).Execute(rest);
         }
         catch (Exception ex)
         {

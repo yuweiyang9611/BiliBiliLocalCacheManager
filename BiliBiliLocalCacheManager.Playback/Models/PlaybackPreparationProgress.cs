@@ -6,4 +6,5 @@ public sealed record PlaybackPreparationProgress(
     TimeSpan Elapsed,
     TimeSpan? EstimatedRemaining,
     double? ProcessedSeconds = null,
-    string? Phase = null);
+    string? Phase = null,
+    long? ProcessedBytes = null);

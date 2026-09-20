@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { HostProgressTracker } from './host-progress';
 
 describe('monotonic request progress', () => {
+  it('tracks unknown-length bootstrap bytes independently for fixed phases', () => {
+    const tracker = new HostProgressTracker();
+    const progress = (phase: string, bytesProcessed: number) => ({ operation: 'play', stage: phase, phase, current: 1, details: { bytesProcessed } });
+    expect(tracker.advance(progress('download', 100), 'play')).toBe(true);
+    expect(tracker.advance(progress('download', 100), 'play')).toBe(false);
+    expect(tracker.advance(progress('verify', 0), 'play')).toBe(false);
+    expect(tracker.advance(progress('verify', 10), 'play')).toBe(true);
+    expect(tracker.advance(progress('extract', 20), 'play')).toBe(true);
+    expect(tracker.advance(progress('download', 50), 'play')).toBe(false);
+    expect(tracker.advance(progress('download', 101), 'play')).toBe(true);
+  });
   it('ignores duplicates, regressions, old work items, unrelated requests and invalid values', () => {
     const tracker = new HostProgressTracker();
     const p = (current: number, bytesCopied: number, operation = 'export') => ({

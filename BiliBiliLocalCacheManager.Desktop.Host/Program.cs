@@ -16,14 +16,7 @@ public static class Program
             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             detectEncodingFromByteOrderMarks: true,
             leaveOpen: false);
-        using var output = new StreamWriter(
-            Console.OpenStandardOutput(),
-            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-            leaveOpen: false)
-        {
-            AutoFlush = true,
-            NewLine = "\n"
-        };
+        using var output = Console.OpenStandardOutput();
 
         var server = new JsonLineRpcServer(application, input, output);
         await server.RunAsync();

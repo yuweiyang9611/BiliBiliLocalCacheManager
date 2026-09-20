@@ -1,11 +1,12 @@
 export const channels = Object.freeze({
+  trashPage: 'cache-manager:trash:page',
+  trashPurgeSnapshot: 'cache-manager:trash:purge-snapshot',
   searchCancel: 'cache-manager:search-cancel',
   operationState: 'cache-manager:operation-state',
   operationStates: 'cache-manager:operation-states',
   acknowledgeUncertain: 'cache-manager:acknowledge-uncertain',
   health: 'cache-manager:health',
   initialState: 'cache-manager:initial-state',
-  settingsGet: 'cache-manager:settings:get',
   settingsUpdate: 'cache-manager:settings:update',
   chooseRoot: 'cache-manager:dialog:root',
   scan: 'cache-manager:scan',

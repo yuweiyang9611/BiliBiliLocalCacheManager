@@ -26,6 +26,26 @@ internal static class BundledFfmpegBootstrapper
     private static readonly SemaphoreSlim SyncRoot = new(1, 1);
     private static readonly HttpClient HttpClient = CreateHttpClient();
     private static volatile bool _initialized;
+    private static readonly AsyncLocal<Action<string, long>?> ByteProgress = new();
+
+    internal static void EnsureConfiguredWithByteProgress(CancellationToken cancellationToken,
+        Action<string, double?> reportProgress, Action<string, long> reportBytes)
+    {
+        var previous = ByteProgress.Value;
+        var lastPhase = string.Empty;
+        var timer = Stopwatch.StartNew();
+        ByteProgress.Value = (phase, bytes) =>
+        {
+            if (phase != lastPhase || timer.Elapsed >= TimeSpan.FromMilliseconds(200))
+            {
+                lastPhase = phase;
+                timer.Restart();
+                reportBytes(phase, bytes);
+            }
+        };
+        try { EnsureConfigured(cancellationToken, reportProgress); }
+        finally { ByteProgress.Value = previous; }
+    }
 
     internal static FfmpegDiagnosticState DiagnosticState { get; } = new();
 
@@ -194,6 +214,12 @@ internal static class BundledFfmpegBootstrapper
         CancellationToken cancellationToken,
         Action<string, double?>? reportProgress)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        var installedRoot = GetExtractionRoot(BundleManifest.Sha256);
+        if (!IsArchiveOverrideConfigured() && IsExtractionComplete(installedRoot, BundleManifest.Sha256))
+        {
+            return new BinaryFolderResolution(Path.Combine(installedRoot, "bin"), FfmpegResolutionSource.DownloadedBundle);
+        }
         var bundle = EnsureBundleAvailable(cancellationToken, reportProgress);
         var extractionRoot = EnsureExtracted(bundle, cancellationToken, reportProgress);
         return new BinaryFolderResolution(
@@ -446,12 +472,7 @@ internal static class BundledFfmpegBootstrapper
         CancellationToken cancellationToken,
         Action<string, double?>? reportProgress)
     {
-        var root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "BiliBiliLocalCacheManager",
-            "ffmpeg",
-            "win-x64",
-            bundle.Sha256);
+        var root = GetExtractionRoot(bundle.Sha256);
         if (IsExtractionComplete(root, bundle.Sha256))
         {
             return root;
@@ -493,6 +514,7 @@ internal static class BundledFfmpegBootstrapper
                 copied =>
                 {
                     copiedBytes += copied;
+                    ByteProgress.Value?.Invoke("extract", copiedBytes);
                     double? percentage = totalBytes > 0
                         ? copiedBytes * 100d / totalBytes
                         : null;
@@ -583,6 +605,10 @@ internal static class BundledFfmpegBootstrapper
             return false;
         }
     }
+
+    private static string GetExtractionRoot(string bundleHash) => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "BiliBiliLocalCacheManager", "ffmpeg", "win-x64", bundleHash);
 
     internal static void ExtractEntry(
         ZipArchiveEntry entry,
@@ -678,45 +704,94 @@ internal static class BundledFfmpegBootstrapper
             .GetResult();
     }
 
-    private static async Task DownloadFileAsync(
+    internal static async Task DownloadFileAsync(
         string url,
         string destinationPath,
         CancellationToken cancellationToken,
-        Action<double?>? reportProgress)
+        Action<double?>? reportProgress,
+        HttpClient? client = null,
+        TimeSpan? retryDelay = null,
+        TimeProvider? clock = null)
     {
-        using var request = CreateRequest(HttpMethod.Get, url);
-        using var response = await HttpClient.SendAsync(
+        const int maximumAttempts = 3;
+        for (var attempt = 0; ; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var offset = File.Exists(destinationPath) ? new FileInfo(destinationPath).Length : 0;
+                using var idle = new TranscodeProgressDeadline(cancellationToken, TimeSpan.FromMinutes(10), clock);
+                using var request = CreateRequest(HttpMethod.Get, url);
+                if (offset > 0) request.Headers.Range = new RangeHeaderValue(offset, null);
+                using var response = await (client ?? HttpClient).SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken)
+                idle.Token)
             .ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+                if (response.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable && offset > 0)
+                {
+                    TryDeleteFile(destinationPath);
+                    throw new IOException("The server rejected the partial FFmpeg archive; restarting the download.");
+                }
+                response.EnsureSuccessStatusCode();
+                var partial = response.StatusCode == System.Net.HttpStatusCode.PartialContent;
+                if (partial && response.Content.Headers.ContentRange?.From != offset)
+                    throw new InvalidDataException("The FFmpeg server returned an unexpected byte range.");
+                if (!partial) offset = 0;
 
-        await using var responseStream = await response.Content
-            .ReadAsStreamAsync(cancellationToken)
-            .ConfigureAwait(false);
-        await using var outputStream = new FileStream(
-            destinationPath,
-            FileMode.Create,
-            FileAccess.Write,
-            FileShare.None,
-            bufferSize: 128 * 1024,
-            useAsync: true);
-        await CopyStreamAsync(
-                responseStream,
-                outputStream,
-                response.Content.Headers.ContentLength,
-                cancellationToken,
-                reportProgress)
-            .ConfigureAwait(false);
+                await using var responseStream = await response.Content
+                    .ReadAsStreamAsync(idle.Token)
+                    .ConfigureAwait(false);
+                await using var outputStream = new FileStream(
+                    destinationPath,
+                    offset > 0 ? FileMode.Append : FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 128 * 1024,
+                    useAsync: true);
+                await CopyStreamAsync(
+                        responseStream,
+                        outputStream,
+                        response.Content.Headers.ContentLength is { } length ? length + offset : null,
+                        idle.Token,
+                        reportProgress,
+                        bytes =>
+                        {
+                            idle.Observe(new PlaybackPreparationProgress("Downloading FFmpeg", null, TimeSpan.Zero, null,
+                                Phase: "download", ProcessedBytes: bytes));
+                            ByteProgress.Value?.Invoke("download", bytes);
+                        },
+                        offset)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested && attempt + 1 < maximumAttempts && IsRetryableDownloadFailure(exception))
+            {
+                await Task.Delay((retryDelay ?? TimeSpan.FromSeconds(1)) * (1 << attempt), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("The FFmpeg download made no progress for 10 minutes.", exception);
+            }
+        }
     }
+
+    private static bool IsRetryableDownloadFailure(Exception exception) => exception switch
+    {
+        HttpRequestException http => http.StatusCode is null or System.Net.HttpStatusCode.RequestTimeout || (int)http.StatusCode >= 500,
+        IOException => true,
+        OperationCanceledException => true,
+        _ => false
+    };
 
     internal static async Task CopyStreamAsync(
         Stream input,
         Stream output,
         long? totalLength,
         CancellationToken cancellationToken,
-        Action<double?>? reportProgress = null)
+        Action<double?>? reportProgress = null,
+        Action<long>? reportBytes = null,
+        long initialBytes = 0)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
@@ -724,7 +799,8 @@ internal static class BundledFfmpegBootstrapper
         reportProgress?.Invoke(totalLength > 0 ? 0d : null);
 
         var buffer = new byte[128 * 1024];
-        var copiedBytes = 0L;
+        var copiedBytes = initialBytes;
+        var progressTimer = Stopwatch.StartNew();
         while (true)
         {
             var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
@@ -735,15 +811,21 @@ internal static class BundledFfmpegBootstrapper
 
             await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
             copiedBytes += read;
-            reportProgress?.Invoke(totalLength > 0
-                ? Math.Min(100d, copiedBytes * 100d / totalLength.Value)
-                : null);
+            reportBytes?.Invoke(copiedBytes);
+            if (progressTimer.Elapsed >= TimeSpan.FromMilliseconds(200))
+            {
+                reportProgress?.Invoke(totalLength > 0 ? Math.Min(100d, copiedBytes * 100d / totalLength.Value) : null);
+                progressTimer.Restart();
+            }
             cancellationToken.ThrowIfCancellationRequested();
         }
 
         await output.FlushAsync(cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
+        if (totalLength is { } expected && copiedBytes != expected)
+            throw new IOException("The FFmpeg download ended before its declared content length.");
         reportProgress?.Invoke(100d);
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     private static HttpRequestMessage CreateRequest(HttpMethod method, string url)
@@ -755,7 +837,7 @@ internal static class BundledFfmpegBootstrapper
     {
         var client = new HttpClient
         {
-            Timeout = TimeSpan.FromMinutes(10)
+            Timeout = Timeout.InfiniteTimeSpan
         };
         client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("BiliBiliLocalCacheManager", "1.0"));
         return client;
@@ -833,6 +915,7 @@ internal static class BundledFfmpegBootstrapper
 
             hash.AppendData(buffer, 0, read);
             processedBytes += read;
+            ByteProgress.Value?.Invoke("verify", processedBytes);
             reportProgress?.Invoke(totalLength > 0
                 ? Math.Min(100d, processedBytes * 100d / totalLength)
                 : null);
@@ -884,7 +967,7 @@ internal static class BundledFfmpegBootstrapper
     {
         if (!OperatingSystem.IsWindows())
         {
-            using var process = Process.Start(new ProcessStartInfo
+            return ReadProcessVersionAsync(new ProcessStartInfo
             {
                 FileName = executablePath,
                 Arguments = "-version",
@@ -892,31 +975,39 @@ internal static class BundledFfmpegBootstrapper
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
-            });
-            if (process is null)
-            {
-                return null;
-            }
-
-            var firstLine = process.StandardOutput.ReadLine();
-            if (!process.WaitForExit((int)TimeSpan.FromSeconds(3).TotalMilliseconds))
-            {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch
-                {
-                }
-            }
-
-            return firstLine;
+            }, TimeSpan.FromSeconds(3)).GetAwaiter().GetResult();
         }
 
         var versionInfo = FileVersionInfo.GetVersionInfo(executablePath);
         return string.IsNullOrWhiteSpace(versionInfo.ProductVersion)
             ? versionInfo.FileVersion
             : versionInfo.ProductVersion;
+    }
+
+    internal static async Task<string?> ReadProcessVersionAsync(ProcessStartInfo startInfo, TimeSpan timeout)
+    {
+        using var process = Process.Start(startInfo);
+        if (process is null) return null;
+        using var deadline = new CancellationTokenSource(timeout);
+        var firstLine = process.StandardOutput.ReadLineAsync(deadline.Token).AsTask();
+        var stderr = process.StandardError.BaseStream.CopyToAsync(Stream.Null, deadline.Token);
+        try
+        {
+            var line = await firstLine.ConfigureAwait(false);
+            var stdout = process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, deadline.Token);
+            await Task.WhenAll(stdout, stderr, process.WaitForExitAsync(deadline.Token)).ConfigureAwait(false);
+            return line;
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+            try { await Task.WhenAll(firstLine, stderr).ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            catch (IOException) { }
+            return null;
+        }
     }
 
     private static bool IsFatalException(Exception exception)

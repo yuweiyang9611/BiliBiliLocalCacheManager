@@ -32,8 +32,12 @@ import {
   validateTrashMoveResult,
   validateTrashRestoreResult,
   validateTrashPurgeResult,
+  validateTrashPage,
+  validateTrashSnapshotPurgeResult,
 } from './host-contract-validation';
 import { packagedRendererUrl } from './renderer-protocol';
+import { ipcFailure } from '../shared/ipc-result';
+import { boundedString as assertString, booleanValue as assertBoolean, boundedInteger as assertInteger } from './ipc-validation';
 
 const allowedSettingKeys = new Set<keyof AppSettings>([
   'rootPath', 'rememberRootPath', 'scanOnStartup', 'includeIncomplete', 'keyword', 'splitKeywords', 'anyKeywords',
@@ -56,7 +60,12 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   const handlers: Array<[string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown]> = [];
   const handle = (channel: string, listener: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) => {
     handlers.push([channel, listener]);
-    ipcMain.handle(channel, listener);
+    ipcMain.handle(channel, (event, ...args) => {
+      try {
+        const result = listener(event, ...args);
+        return result instanceof Promise ? result.catch(ipcFailure) : result;
+      } catch (error) { return ipcFailure(error); }
+    });
   };
   const host = <T>(method: string, params: JsonObject = {}, timeoutMs?: number) => bridge.call<T>(method, params, timeoutMs);
   const track = async <T>(event: IpcMainInvokeEvent, call: HostCall<T>, kind?: 'cache-details' | 'search'): Promise<T> => {
@@ -103,10 +112,6 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   handle(channels.initialState, async (event) => {
     assertTrusted(event);
     return validateInitialState(await track(event, host<unknown>('initialState')));
-  });
-  handle(channels.settingsGet, (event) => {
-    assertTrusted(event);
-    return track(event, host<AppSettings>('settings.get'));
   });
   handle(channels.settingsUpdate, (event, patch) => {
     assertTrusted(event);
@@ -194,6 +199,8 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   handle(channels.cacheDetails, async (event, request) => {
     assertTrusted(event);
     const validatedRequest = validateCacheDetailsRequest(request);
+    const state = activeRequests.get(event.sender.id);
+    for (const id of state?.detailCallIds ?? []) state?.calls.get(id)?.cancel();
     const result = validateCacheDetails(await track(
       event,
       host<unknown>('cache.details', validatedRequest as unknown as JsonObject),
@@ -299,11 +306,36 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       confirmed: true,
     })));
   });
+  handle(channels.trashPage, async (event, rootPath, options = {}) => {
+    assertTrusted(event);
+    if (!isRecord(options)) throw new TypeError('Invalid trash page options.');
+    const request = { rootPath: assertPath(rootPath, 'rootPath'),
+      offset: options.offset === undefined ? 0 : assertInteger(options.offset, 'offset', 0, 2_147_483_647),
+      pageSize: options.pageSize === undefined ? 100 : assertInteger(options.pageSize, 'pageSize', 1, 200),
+      ...(options.snapshotToken === undefined ? {} : { snapshotToken: assertNonEmptyString(options.snapshotToken, 'snapshotToken', 128) }) };
+    const result = validateTrashPage(await track(event, host<unknown>('trash.page', request)));
+    if (result.offset !== request.offset || result.pageSize !== request.pageSize ||
+      (request.snapshotToken !== undefined && result.snapshotToken !== request.snapshotToken)) throw new TypeError('Trash page does not match request.');
+    return result;
+  });
+  handle(channels.trashPurgeSnapshot, async (event, rootPath, token) => {
+    assertTrusted(event);
+    const request = { rootPath: assertPath(rootPath, 'rootPath'), snapshotToken: assertNonEmptyString(token, 'snapshotToken', 128) };
+    const snapshot = validateTrashPage(await track(event, host<unknown>('trash.page', { ...request, offset: 0, pageSize: 1 })));
+    if (snapshot.snapshotToken !== request.snapshotToken || snapshot.offset !== 0 || snapshot.pageSize !== 1) throw new TypeError('Trash snapshot mismatch.');
+    const parent = BrowserWindow.fromWebContents(event.sender) ?? getWindow() ?? undefined;
+    const options = { type: 'warning' as const, title: '永久清空应用回收站', message: '确定要永久删除整个回收站快照吗？',
+      detail: `${request.rootPath}：${snapshot.totalItems} 项，${snapshot.totalSizeBytes} 字节。此操作无法撤销，Host 将重新核对完整集合。`,
+      buttons: ['永久删除', '取消'], defaultId: 1, cancelId: 1, noLink: true };
+    const confirmation = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+    if (confirmation.response !== 0) return null;
+    return validateTrashSnapshotPurgeResult(await track(event, host<unknown>('trash.purgeSnapshot', { ...request, confirmed: true })));
+  });
   handle(channels.play, async (event, rootPath, targets, playerPreference, includeIncomplete) => {
     assertTrusted(event);
     const call = host<unknown>('play', {
       rootPath: assertPath(rootPath, 'rootPath'),
-      targets: validateTargets(targets) as never,
+      targets: validateTargets(targets).map(target => ({ avid: target.avid, ...(target.pageIndexes ? { pageIndexes: target.pageIndexes } : {}) })),
       playerPreference: validatePlayer(playerPreference),
       includeIncomplete: assertBoolean(includeIncomplete, 'includeIncomplete'),
     });
@@ -322,7 +354,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     if (!outputPath) return null;
     const call = host<unknown>('export', {
       rootPath: validatedRoot,
-      targets: validatedTargets as never,
+      targets: validatedTargets.map(target => ({ avid: target.avid, ...(target.pageIndexes ? { pageIndexes: target.pageIndexes } : {}) })),
       outputPath,
       includeIncomplete: assertBoolean(includeIncomplete, 'includeIncomplete'),
     });
@@ -546,25 +578,10 @@ function assertPath(value: unknown, name: string): string {
   return result;
 }
 
-function assertString(value: unknown, name: string, max: number): string {
-  if (typeof value !== 'string' || value.length > max) throw new TypeError(`${name} 必须是长度不超过 ${max} 的字符串。`);
-  return value;
-}
-
 function assertNonEmptyString(value: unknown, name: string, max: number): string {
   const result = assertString(value, name, max).trim();
   if (!result) throw new TypeError(`${name} 不能为空。`);
   return result;
-}
-
-function assertBoolean(value: unknown, name: string): boolean {
-  if (typeof value !== 'boolean') throw new TypeError(`${name} 必须是布尔值。`);
-  return value;
-}
-
-function assertInteger(value: unknown, name: string, min: number, max: number): number {
-  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) throw new TypeError(`${name} 必须在 ${min}–${max} 之间。`);
-  return value as number;
 }
 
 function safeFileName(value: string): string {

@@ -9,6 +9,11 @@ public interface IPlaybackArtifactStore
 {
     string RootDirectory { get; }
 
+    Task<PlaybackArtifactMaterialization> GetOrCreateAsync(CachePlaybackPlan plan, string extension,
+        Func<string, Task> producer, CancellationToken cancellationToken = default,
+        Action<string, double?>? reportProgress = null) => Task.Run(() => GetOrCreate(plan, extension,
+            path => producer(path).GetAwaiter().GetResult(), cancellationToken, reportProgress), cancellationToken);
+
     PlaybackArtifactMaterialization GetOrCreate(
         CachePlaybackPlan plan,
         string extension,

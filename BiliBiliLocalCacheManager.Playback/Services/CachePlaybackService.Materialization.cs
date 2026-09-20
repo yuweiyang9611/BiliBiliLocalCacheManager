@@ -19,9 +19,7 @@ public sealed partial class CachePlaybackService : ICachePlaybackMaterialization
                 plan.Message ?? "当前分段无法生成可播放文件。");
         }
 
-        return await Task.Run(
-                () => _materializer.Materialize(plan, progress, cancellationToken),
-                cancellationToken)
+        return await _materializer.MaterializeAsync(plan, progress, cancellationToken)
             .ConfigureAwait(false);
     }
 }

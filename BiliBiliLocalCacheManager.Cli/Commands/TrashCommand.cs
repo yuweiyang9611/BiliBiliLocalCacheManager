@@ -354,14 +354,9 @@ public sealed class TrashCommand : ICommand
 
     private static Dictionary<string, OptionParser.OptionSpec> BuildSpecs()
     {
-        return new Dictionary<string, OptionParser.OptionSpec>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["--root"] = OptionParser.ValueOption("root"),
-            ["-r"] = OptionParser.ValueOption("root"),
-            ["--yes"] = OptionParser.FlagOption("yes"),
-            ["-y"] = OptionParser.FlagOption("yes"),
-            ["--help"] = OptionParser.FlagOption("help"),
-            ["-h"] = OptionParser.FlagOption("help")
-        };
+        var specs = OptionParser.CreateCommonSpecs();
+        specs["--yes"] = OptionParser.FlagOption("yes");
+        specs["-y"] = OptionParser.FlagOption("yes");
+        return specs;
     }
 }

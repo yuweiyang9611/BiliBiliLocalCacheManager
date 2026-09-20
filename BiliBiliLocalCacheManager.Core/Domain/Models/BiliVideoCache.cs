@@ -23,62 +23,14 @@ public sealed class BiliVideoCache
 
     public IReadOnlyCollection<BiliSegment> Segments => _segments;
 
-    public long TotalSize
-    {
-        get
-        {
-            var total = 0L;
-            foreach (var segment in _segments)
-            {
-                var bytes = segment.TotalBytes;
-                if (bytes <= 0)
-                {
-                    continue;
-                }
+    public long TotalSize { get; }
 
-                if (total > long.MaxValue - bytes)
-                {
-                    return long.MaxValue;
-                }
+    public TimeSpan TotalDuration { get; }
 
-                total += bytes;
-            }
-
-            return total;
-        }
-    }
-
-    public TimeSpan TotalDuration
-    {
-        get
-        {
-            var totalTicks = 0L;
-            foreach (var segment in _segments)
-            {
-                var ticks = segment.TotalDuration.Ticks;
-                if (ticks <= 0)
-                {
-                    continue;
-                }
-
-                if (totalTicks > TimeSpan.MaxValue.Ticks - ticks)
-                {
-                    return TimeSpan.MaxValue;
-                }
-
-                totalTicks += ticks;
-            }
-
-            return TimeSpan.FromTicks(totalTicks);
-        }
-    }
-
-    public bool IsAllCompleted => _segments.All(s => s.IsCompleted);
+    public bool IsAllCompleted { get; }
 
     public BiliVideoCache(long avid, IEnumerable<BiliSegment> segments)
     {
-        // if (segments is null) throw new ArgumentNullException(nameof(segments));
-        // 这个是新写法
         ArgumentNullException.ThrowIfNull(segments);
 
         var list = segments.ToList();
@@ -89,6 +41,18 @@ public sealed class BiliVideoCache
 
         Avid = avid;
         _segments = new ReadOnlyCollection<BiliSegment>(list);
+        var totalBytes = 0L;
+        var totalTicks = 0L;
+        var allCompleted = true;
+        foreach (var segment in list)
+        {
+            totalBytes = AddPositiveSaturating(totalBytes, segment.TotalBytes);
+            totalTicks = AddPositiveSaturating(totalTicks, segment.TotalDuration.Ticks);
+            allCompleted &= segment.IsCompleted;
+        }
+        TotalSize = totalBytes;
+        TotalDuration = TimeSpan.FromTicks(totalTicks);
+        IsAllCompleted = allCompleted;
 
         var first = list[0];
         Title = first.Title;
@@ -97,4 +61,7 @@ public sealed class BiliVideoCache
         OwnerName = first.OwnerName;
         OwnerId = first.OwnerId;
     }
+
+    private static long AddPositiveSaturating(long total, long value)
+        => value <= 0 ? total : value > long.MaxValue - total ? long.MaxValue : total + value;
 }

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using BiliBiliLocalCacheManager.Core.Domain.Models;
 
 namespace BiliBiliLocalCacheManager.Core.Application.Models;
@@ -66,6 +67,7 @@ public sealed class CacheIndex
     public IReadOnlyCollection<BiliVideoCache> Search(CacheSearchOptions options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
+        cancellationToken.ThrowIfCancellationRequested();
 
         // Validate and normalize keyword input early to avoid silent "match everything" bugs.
         if (string.IsNullOrWhiteSpace(options.Keyword))
@@ -102,7 +104,7 @@ public sealed class CacheIndex
         }
 
         // Local helper that checks a single token against a single cache.
-        bool MatchesToken(BiliVideoCache cache, string token)
+        bool MatchesToken(BiliVideoCache cache, string token, ref string? avidText)
         {
             cancellationToken.ThrowIfCancellationRequested();
             // Title matching: the primary video title.
@@ -113,13 +115,16 @@ public sealed class CacheIndex
             }
 
             // Part name matching: any segment part name in the cache.
-            if (options.Scope.HasFlag(CacheSearchScope.PartName) &&
-                cache.Segments.Any(seg => {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return Matches(seg.PartName, token, options.MatchMode, comparison);
-                }))
+            if (options.Scope.HasFlag(CacheSearchScope.PartName))
             {
-                return true;
+                foreach (var segment in cache.Segments)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (Matches(segment.PartName, token, options.MatchMode, comparison))
+                    {
+                        return true;
+                    }
+                }
             }
 
             // Owner name matching: optional field, skip if null.
@@ -141,7 +146,7 @@ public sealed class CacheIndex
             // Avid matching: numeric field, compared as invariant string for consistency.
             if (options.Scope.HasFlag(CacheSearchScope.Avid))
             {
-                var avidText = cache.Avid.ToString();
+                avidText ??= cache.Avid.ToString(CultureInfo.InvariantCulture);
                 if (Matches(avidText, token, options.MatchMode, comparison))
                 {
                     return true;
@@ -152,18 +157,26 @@ public sealed class CacheIndex
         }
 
         // Evaluate tokens with AND/OR semantics.
-        var matched = _videoCaches.Where(cache =>
+        var matched = new List<BiliVideoCache>();
+        foreach (var cache in _videoCaches)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (options.RequireAllKeywords)
+            string? avidText = null;
+            var isMatch = options.RequireAllKeywords;
+            foreach (var token in tokens)
             {
-                // Every token must match at least one field in the cache.
-                return tokens.All(token => MatchesToken(cache, token));
+                var tokenMatches = MatchesToken(cache, token, ref avidText);
+                if (tokenMatches != options.RequireAllKeywords)
+                {
+                    isMatch = tokenMatches;
+                    break;
+                }
             }
-
-            // At least one token must match.
-            return tokens.Any(token => MatchesToken(cache, token));
-        }).ToList();
+            if (isMatch)
+            {
+                matched.Add(cache);
+            }
+        }
 
         return new ReadOnlyCollection<BiliVideoCache>(matched);
     }

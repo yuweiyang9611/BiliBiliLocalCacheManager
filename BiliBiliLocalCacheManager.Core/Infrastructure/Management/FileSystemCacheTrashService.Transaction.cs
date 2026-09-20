@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -9,14 +8,21 @@ internal enum CacheTrashMutationOperation
     Move = 0,
     Restore = 1,
     Purge = 2,
-    Statistics = 3
+    Statistics = 3,
+    Delete = 4
 }
 
 public sealed partial class FileSystemCacheTrashService
 {
     private static readonly TimeSpan MutationLockTimeout = TimeSpan.FromMinutes(2);
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> MutationGates =
+    private static readonly object MutationGatesSync = new();
+    private static readonly Dictionary<string, MutationGate> MutationGates =
         new(StringComparer.Ordinal);
+
+    internal static bool HasMutationGateForTesting(string root)
+    {
+        lock (MutationGatesSync) { return MutationGates.ContainsKey(NormalizeRootKey(root)); }
+    }
 
     internal Action<CacheTrashMutationOperation, string>? AfterMutationLockAcquiredForTesting
     {
@@ -29,17 +35,29 @@ public sealed partial class FileSystemCacheTrashService
         CacheTrashMutationOperation operation)
     {
         var rootKey = NormalizeRootKey(normalizedRoot);
-        var gate = MutationGates.GetOrAdd(rootKey, static _ => new SemaphoreSlim(1, 1));
-        if (!gate.Wait(MutationLockTimeout))
+        MutationGate gate;
+        lock (MutationGatesSync)
         {
-            throw new TimeoutException(
-                "Timed out waiting for another cache-trash operation on the same root.");
+            if (!MutationGates.TryGetValue(rootKey, out gate!))
+            {
+                gate = new MutationGate();
+                MutationGates.Add(rootKey, gate);
+            }
+            gate.ReferenceCount++;
         }
 
         Mutex? processMutex = null;
         var mutexAcquired = false;
+        var gateAcquired = false;
         try
         {
+            gateAcquired = gate.Semaphore.Wait(MutationLockTimeout);
+            if (!gateAcquired)
+            {
+                throw new TimeoutException(
+                    "Timed out waiting for another cache-trash operation on the same root.");
+            }
+
             processMutex = new Mutex(
                 initiallyOwned: false,
                 GetMutationMutexName(rootKey));
@@ -59,7 +77,7 @@ public sealed partial class FileSystemCacheTrashService
             }
 
             AfterMutationLockAcquiredForTesting?.Invoke(operation, normalizedRoot);
-            return new MutationTransactionLease(gate, processMutex, mutexAcquired);
+            return new MutationTransactionLease(rootKey, gate, processMutex, mutexAcquired);
         }
         catch
         {
@@ -69,7 +87,7 @@ public sealed partial class FileSystemCacheTrashService
             }
 
             processMutex?.Dispose();
-            gate.Release();
+            ReleaseMutationGate(rootKey, gate, gateAcquired);
             throw;
         }
     }
@@ -97,8 +115,31 @@ public sealed partial class FileSystemCacheTrashService
         return $"{prefix}{Convert.ToHexString(hash)}";
     }
 
+    private static void ReleaseMutationGate(string rootKey, MutationGate gate, bool acquired)
+    {
+        if (acquired)
+        {
+            gate.Semaphore.Release();
+        }
+        lock (MutationGatesSync)
+        {
+            if (--gate.ReferenceCount == 0)
+            {
+                MutationGates.Remove(rootKey);
+                gate.Semaphore.Dispose();
+            }
+        }
+    }
+
+    private sealed class MutationGate
+    {
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+        public int ReferenceCount { get; set; }
+    }
+
     private sealed class MutationTransactionLease(
-        SemaphoreSlim gate,
+        string rootKey,
+        MutationGate gate,
         Mutex? processMutex,
         bool mutexAcquired) : IDisposable
     {
@@ -121,7 +162,7 @@ public sealed partial class FileSystemCacheTrashService
             finally
             {
                 processMutex?.Dispose();
-                gate.Release();
+                ReleaseMutationGate(rootKey, gate, acquired: true);
             }
         }
     }

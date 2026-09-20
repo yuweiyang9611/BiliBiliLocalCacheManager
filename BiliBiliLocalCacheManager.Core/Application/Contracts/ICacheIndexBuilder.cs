@@ -24,6 +24,11 @@ public interface ICacheIndexBuilder
         string rootDirectory,
         CacheIndexBuildOptions? options,
         CancellationToken cancellationToken,
-        IProgress<CacheScanProgress>? progress = null) =>
-        CacheIndexBuildResult.FromIndex(BuildIndex(rootDirectory, options));
+        IProgress<CacheScanProgress>? progress = null)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var index = BuildIndex(rootDirectory, options);
+        cancellationToken.ThrowIfCancellationRequested();
+        return CacheIndexBuildResult.FromIndex(index);
+    }
 }

@@ -22,15 +22,17 @@ public sealed class FfmpegCoreTranscoderIntegrationTests(
 
         using var cancellationSource =
             new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var progress = new List<PlaybackPreparationProgress>();
         new FfmpegCoreTranscoder().MuxDashPairToMp4(
             workspace.VideoPath,
             workspace.AacAudioPath,
             outputPath,
-            TimeSpan.FromSeconds(2),
-            progress: null,
+            TimeSpan.FromMilliseconds(50),
+            new InlineProgress<PlaybackPreparationProgress>(progress.Add),
             cancellationSource.Token);
 
         Assert.True(File.Exists(outputPath));
+        Assert.Contains(progress, report => report.Phase == "mux" && report.Percentage == 100 && report.ProcessedSeconds > 0.05);
         Assert.Equal("mpeg4", fixture.GetCodecName(outputPath, "v:0"));
         Assert.Equal("aac", fixture.GetCodecName(outputPath, "a:0"));
         Assert.NotEmpty(inputAudioHashes);
@@ -203,6 +205,21 @@ public sealed class FfmpegCoreTranscoderIntegrationTests(
         Assert.NotEqual(first.OutputPath, refreshed.OutputPath);
         Assert.NotEmpty(refreshedProgress);
         Assert.Equal(2, store.GetStatistics().FileCount);
+    }
+
+    [FfmpegIntegrationFact]
+    [Trait("Category", "FFmpegIntegration")]
+    public async Task ConcatAsync_PreservesPacketsAndEscapesSpecialPaths()
+    {
+        using var workspace = fixture.CreateWorkspace();
+        var specialPath = Path.Combine(workspace.RootDirectory, "part 'one'.mp4");
+        File.Copy(workspace.VideoPath, specialPath);
+        var outputPath = Path.Combine(workspace.RootDirectory, "concat.mp4");
+        var input = fixture.GetPacketHashes(workspace.VideoPath, "v:0");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await new FfmpegCoreTranscoder().ConcatToMp4Async([specialPath, workspace.VideoPath], outputPath,
+            TimeSpan.Zero, null, cancellation.Token);
+        Assert.Equal(input.Concat(input).ToArray(), fixture.GetPacketHashes(outputPath, "v:0").ToArray());
     }
 
     private static CachePlaybackPlan CreateDashPlan(

@@ -43,27 +43,30 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
 
         var state = new ScanAccumulator(effectiveOptions.MaxReportedIssues);
         var segments = new List<BiliSegment>();
-        var avidDirectories = EnumerateDirectories(root, state, cancellationToken)
-            .Where(path => !string.Equals(
-                Path.GetFileName(path),
-                CacheStorageLayout.TrashDirectoryName,
-                StringComparison.OrdinalIgnoreCase))
-            .Where(path => TryGetDirectoryAvid(path, out _))
-            .ToList();
+        var avidDirectories = new List<(string Path, long Avid)>();
+        foreach (var path in EnumerateDirectories(root, state, cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryGetDirectoryAvid(path, out var avid))
+            {
+                avidDirectories.Add((path, avid));
+            }
+        }
         state.ScannedAvidDirectories = avidDirectories.Count;
 
         foreach (var avidDirectory in avidDirectories)
         {
             cancellationToken.ThrowIfCancellationRequested();
             ScanAvidDirectory(
-                avidDirectory,
+                avidDirectory.Path,
+                avidDirectory.Avid,
                 effectiveOptions,
                 segments,
                 state,
                 cancellationToken,
                 progress);
             state.ProcessedAvidDirectories++;
-            ReportProgress(state, avidDirectory, progress);
+            ReportProgress(state, avidDirectory.Path, progress);
         }
 
         var caches = segments
@@ -84,6 +87,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
 
     private static void ScanAvidDirectory(
         string avidDirectory,
+        long directoryAvid,
         CacheIndexBuildOptions options,
         IList<BiliSegment> accumulator,
         ScanAccumulator state,
@@ -91,11 +95,6 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         IProgress<CacheScanProgress>? progress)
     {
         if (!TryValidatePhysicalDirectory(avidDirectory, state))
-        {
-            return;
-        }
-
-        if (!TryGetDirectoryAvid(avidDirectory, out var directoryAvid))
         {
             return;
         }
@@ -112,12 +111,15 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                     continue;
                 }
 
-                if (!File.Exists(entryPath))
+                string json;
+                try
+                {
+                    json = File.ReadAllText(entryPath);
+                }
+                catch (FileNotFoundException)
                 {
                     continue;
                 }
-
-                var json = File.ReadAllText(entryPath);
                 cancellationToken.ThrowIfCancellationRequested();
                 var raw = CacheEntryRaw.FromJson(json);
                 ValidateRawEntry(raw, directoryAvid, options.MaximumCacheBytes);

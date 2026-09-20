@@ -214,13 +214,14 @@ export interface DesktopInfo {
 }
 
 export interface CacheManagerApi {
+  getTrashPage(rootPath: string, options?: { snapshotToken?: string; offset?: number; pageSize?: number }): Promise<TrashPage>;
+  purgeTrashSnapshot(rootPath: string, snapshotToken: string): Promise<TrashPurgeResult | null>;
   cancelSearch(): Promise<boolean>;
   acknowledgeUncertain(requestId: string): Promise<boolean>;
   onOperationState(listener: (state: OperationState) => void): () => void;
   getOperationStates(): Promise<OperationState[]>;
   health(): Promise<HostHealth>;
   getInitialState(): Promise<InitialState>;
-  getSettings(): Promise<AppSettings>;
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
   chooseRootDirectory(defaultPath?: string): Promise<string | null>;
   scan(options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; offset?: number; pageSize?: number }): Promise<ScanResult>;
@@ -250,6 +251,16 @@ export interface OperationState {
   operation: string;
   state: 'cancelling' | 'unconfirmed' | 'unknown' | 'settled';
   sideEffects: boolean;
+}
+
+export interface TrashPage {
+  snapshotToken: string;
+  offset: number;
+  pageSize: number;
+  totalItems: number;
+  hasMore: boolean;
+  totalSizeBytes: number;
+  items: TrashEntry[];
 }
 
 export const defaultSettings: AppSettings = {

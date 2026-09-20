@@ -6,6 +6,18 @@ namespace BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 
 public sealed class SystemPlaybackLauncher : IPlaybackLauncher
 {
+    private readonly Action<ProcessStartInfo> _start;
+    private readonly Func<string, IEnumerable<string>, string?> _findExecutable;
+
+    public SystemPlaybackLauncher() : this(info => { using var process = Process.Start(info); }, FindExecutable) { }
+
+    internal SystemPlaybackLauncher(Action<ProcessStartInfo> start,
+        Func<string, IEnumerable<string>, string?> findExecutable)
+    {
+        _start = start;
+        _findExecutable = findExecutable;
+    }
+
     public PlaybackLaunchResult Launch(PlaybackMaterializationResult materializationResult, PlaybackLaunchOptions? launchOptions = null)
     {
         ArgumentNullException.ThrowIfNull(materializationResult);
@@ -48,7 +60,7 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
         return PlaybackLaunchResult.Failure("未找到可用播放器。当前策略为系统默认优先，其次 mpv、VLC。");
     }
 
-    private static PlaybackLaunchResult LaunchWithKnownPlayer(DiscoveredPlayer player, string filePath)
+    private PlaybackLaunchResult LaunchWithKnownPlayer(DiscoveredPlayer player, string filePath)
     {
         try
         {
@@ -58,7 +70,7 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
                 UseShellExecute = false
             };
             startInfo.ArgumentList.Add(filePath);
-            Process.Start(startInfo);
+            _start(startInfo);
 
             return PlaybackLaunchResult.Success(
                 $"已使用 {player.DisplayName} 启动播放：{Path.GetFileName(filePath)}",
@@ -70,7 +82,7 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
         }
     }
 
-    private static PlaybackLaunchResult LaunchWithShell(string filePath)
+    private PlaybackLaunchResult LaunchWithShell(string filePath)
     {
         try
         {
@@ -104,7 +116,7 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
                 };
             }
 
-            Process.Start(startInfo);
+            _start(startInfo);
             return PlaybackLaunchResult.Success($"已尝试使用系统默认程序打开：{filePath}", "SystemDefault");
         }
         catch (Exception ex)
@@ -136,7 +148,7 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
         }
     }
 
-    private static DiscoveredPlayer? DiscoverPlayer(PlayerKind kind)
+    private DiscoveredPlayer? DiscoverPlayer(PlayerKind kind)
     {
         var mpvExecutable = OperatingSystem.IsWindows() ? "mpv.exe" : "mpv";
         var vlcExecutable = OperatingSystem.IsWindows() ? "vlc.exe" : "vlc";
@@ -160,11 +172,11 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
             new DiscoveredPlayer(
                 PlayerKind.Mpv,
                 "mpv",
-                FindExecutable(mpvExecutable, mpvFallbacks)),
+                _findExecutable(mpvExecutable, mpvFallbacks)),
             new DiscoveredPlayer(
                 PlayerKind.Vlc,
                 "VLC",
-                FindExecutable(vlcExecutable, vlcFallbacks))
+                _findExecutable(vlcExecutable, vlcFallbacks))
         };
 
         foreach (var candidate in candidates)

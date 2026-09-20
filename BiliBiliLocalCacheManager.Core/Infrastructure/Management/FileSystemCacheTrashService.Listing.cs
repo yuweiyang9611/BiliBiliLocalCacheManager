@@ -76,14 +76,15 @@ public sealed partial class FileSystemCacheTrashService
                         allowDelete: false)
                     : null;
 
-                var pendingPurge = ReadPurgeJournalState(trashRoot, path) is not null ||
-                    HasPurgeMarker(path);
+                var journal = ReadPurgeJournalState(trashRoot, path);
+                var marker = journal is null ? ReadPurgeMarker(path, entryIdentity) : null;
+                var pendingPurge = journal is not null || marker is not null;
                 if (!pendingPurge)
                 {
-                    EnsureTrashIdentity(
+                    ValidateTrashIdentityMetadata(
                         path,
-                        entryIdentity.Avid,
-                        originalPath,
+                        entryIdentity,
+                        marker,
                         allowPendingPurge: true);
                 }
 

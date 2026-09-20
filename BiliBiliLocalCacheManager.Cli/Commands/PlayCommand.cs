@@ -1,4 +1,3 @@
-using System.Globalization;
 using BiliBiliLocalCacheManager.Core.Application.Services;
 using BiliBiliLocalCacheManager.Playback.Models;
 using BiliBiliLocalCacheManager.Playback.Services;
@@ -10,34 +9,28 @@ namespace BiliBiliLocalCacheManager.Cli.Commands;
 public sealed partial class PlayCommand : ICommand
 {
     private readonly CoreContracts.ICacheManager _cacheManager;
-    private readonly PlaybackContracts.ICachePlaybackService _playbackService;
+    private readonly Lazy<PlaybackContracts.ICachePlaybackService> _playbackService;
 
     public PlayCommand()
-        : this(new CacheManager(), CreatePlaybackService())
     {
+        _cacheManager = new CacheManager();
+        _playbackService = new Lazy<PlaybackContracts.ICachePlaybackService>(CreatePlaybackService);
     }
 
     public PlayCommand(CoreContracts.ICacheManager cacheManager, PlaybackContracts.ICachePlaybackService playbackService)
     {
         _cacheManager = cacheManager ?? throw new ArgumentNullException(nameof(cacheManager));
-        _playbackService = playbackService ?? throw new ArgumentNullException(nameof(playbackService));
+        ArgumentNullException.ThrowIfNull(playbackService);
+        _playbackService = new Lazy<PlaybackContracts.ICachePlaybackService>(() => playbackService);
     }
 
     public int Execute(string[] args)
     {
-        var specs = new Dictionary<string, OptionParser.OptionSpec>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["--root"] = OptionParser.ValueOption("root"),
-            ["-r"] = OptionParser.ValueOption("root"),
-            ["--all"] = OptionParser.FlagOption("include-incomplete"),
-            ["--include-incomplete"] = OptionParser.FlagOption("include-incomplete"),
-            ["--segment"] = OptionParser.ValueOption("segment"),
-            ["-s"] = OptionParser.ValueOption("segment"),
-            ["--player"] = OptionParser.ValueOption("player"),
-            ["-p"] = OptionParser.ValueOption("player"),
-            ["--help"] = OptionParser.FlagOption("help"),
-            ["-h"] = OptionParser.FlagOption("help")
-        };
+        var specs = OptionParser.CreateCommonSpecs(includeIncomplete: true);
+        specs["--segment"] = OptionParser.ValueOption("segment");
+        specs["-s"] = OptionParser.ValueOption("segment");
+        specs["--player"] = OptionParser.ValueOption("player");
+        specs["-p"] = OptionParser.ValueOption("player");
 
         OptionParser.ParsedArguments parsed;
         try
@@ -71,9 +64,9 @@ public sealed partial class PlayCommand : ICommand
             return 1;
         }
 
-        if (!long.TryParse(parsed.Positionals[0], NumberStyles.None, CultureInfo.InvariantCulture, out var avid))
+        if (!AvidParser.TryParse(parsed.Positionals[0], out var avid))
         {
-            CliPrinter.WriteError("无效的 avid，请输入整数。");
+            CliPrinter.WriteError("无效的 avid，请输入正整数或 av 前缀编号。");
             CliPrinter.PrintPlayUsage();
             return 1;
         }
@@ -108,7 +101,8 @@ public sealed partial class PlayCommand : ICommand
 
         try
         {
-            var pagePlan = _playbackService.CreatePagePlan(cache, segmentKey);
+            var playbackService = _playbackService.Value;
+            var pagePlan = playbackService.CreatePagePlan(cache, segmentKey);
             if (!pagePlan.IsPlayable)
             {
                 CliPrinter.WriteError(pagePlan.SelectedPlan.Message ?? pagePlan.Message ?? "当前页面不可播放。");
@@ -120,7 +114,7 @@ public sealed partial class PlayCommand : ICommand
                 PreferredPlayer = ParsePlayerPreference(parsed.GetValue("player"))
             };
 
-            var result = _playbackService.Play(cache, segmentKey, launchOptions);
+            var result = playbackService.Play(cache, segmentKey, launchOptions);
             if (!result.Succeeded)
             {
                 CliPrinter.WriteError(result.Message);
