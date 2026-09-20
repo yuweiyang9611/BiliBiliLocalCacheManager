@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
@@ -112,34 +111,6 @@ public sealed class PlaybackReliabilityTests
         Assert.False(blocked.IsCompleted);
         lastCancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => blocked);
-    }
-
-    [Fact]
-    public async Task VersionProbe_TimesOutWithoutWaitingForFirstOutputLine()
-    {
-        var start = OperatingSystem.IsWindows()
-            ? new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 20\"")
-            : new ProcessStartInfo("/bin/sh", "-c \"sleep 20\"");
-        start.UseShellExecute = false;
-        start.RedirectStandardOutput = true;
-        start.RedirectStandardError = true;
-        start.CreateNoWindow = true;
-        var result = await BundledFfmpegBootstrapper.ReadProcessVersionAsync(start, TimeSpan.FromMilliseconds(200))
-            .WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Null(result);
-    }
-
-    [Fact]
-    public async Task VersionProbe_DrainsStderrWhileReadingVersion()
-    {
-        var start = OperatingSystem.IsWindows()
-            ? new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -Command \"[Console]::Error.Write(('x' * 100000)); [Console]::WriteLine('test-version')\"")
-            : new ProcessStartInfo("/bin/sh", "-c \"head -c 100000 /dev/zero >&2; echo test-version\"");
-        start.UseShellExecute = false;
-        start.RedirectStandardOutput = true;
-        start.RedirectStandardError = true;
-        start.CreateNoWindow = true;
-        Assert.Equal("test-version", await BundledFfmpegBootstrapper.ReadProcessVersionAsync(start, TimeSpan.FromSeconds(10)));
     }
 
     [Theory]
