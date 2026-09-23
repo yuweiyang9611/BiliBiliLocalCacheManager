@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-24
+
+This release is initially a public preview. Automated checks do not replace the real desktop acceptance matrix required before promotion.
+
 ### Reliability
 
 - Isolate Host process callbacks and requests across restarts and shutdown.
@@ -13,16 +17,27 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Preserve selections across pages and allow selecting parts across videos, with mutually exclusive video/part modes and a complete selection list.
+- Move individual parts to the application trash, restore non-conflicting parts, and undo using the exact returned trash identities.
+- Require source-bound consent before export audio transcoding, including cached artifacts and newly discovered fallback requirements.
+- Verify actual staged export bytes and physical destination identities before publishing a complete batch.
+- Add a real Electron/Host 10,000-video, 20,000-part verification fixture and documented local performance observations.
 - Add Host protocol v3 scan issue details, root-bound location actions, structured playback/export outcomes and targeted retries.
 - Add UTF-8 local playback playlists with persistent protection for every queue artifact, including queues larger than 64 items.
 - Add release acceptance validation and a default-branch promotion workflow that checks the existing preview assets against recorded desktop results before promoting without a rebuild.
 
-- Add independent desktop settings for remembering the cache root and scanning it on startup; startup scanning is opt-in, and schema-v1 users with a saved root must explicitly choose whether to forget it, remember it without scanning, or enable startup scans.
-- Add Desktop Host protocol v2 with opaque index tokens, bounded cache-summary pages, and lazily paged segment details; the renderer virtualizes cache rows and never materializes every segment during a scan.
+- Keep remembering the cache root and scanning on startup independently configurable; new configurations enable startup scanning, while existing settings retain their choices and legacy defaults. Schema-v1 users with a saved root still explicitly choose their migration behavior.
+- Use opaque index tokens, bounded cache-summary pages, and lazily paged segment details in Host protocol v3; the renderer virtualizes cache rows and never materializes every segment during a scan.
 - Add a stable `ci-required` summary job that fails unless privacy checks, the full build/test/package matrix, and Debian/Fedora installed-package smoke tests all succeed.
 
 ### Changed
 
+- Remove the standalone CLI and CLI-only tests, documentation entry points, and release archives; retain the internal Desktop Host and shared processing/safety code.
+- Publish four desktop packages: Windows NSIS and ZIP, Linux DEB and RPM. Acceptance schema v2 validates these assets separately from historical six-package schema v1 records.
+- Export every selection, including one part, into a new batch/video/part directory hierarchy without overwriting earlier batches.
+- Keep the selected system/mpv/VLC player instead of silently switching after a launch failure, and order playback by library order and part number.
+- Allow read-only browsing and search during media preparation/export while preserving the submitted selection snapshot and guarding side effects.
+- Require typed confirmation for Windows permanent trash cleanup; keep irreversible deletion disabled on Linux.
 - Cache sorted index summaries and the eight most recently used search results; run cancellable searches outside the RPC reader.
 - Use progress-based idle deadlines for media and disk work, with copy-byte and unknown-duration FFmpeg progress; keep short absolute deadlines for queries.
 - Initially publish all release tags as previews, including stable-version tags.
@@ -37,9 +52,8 @@ All notable changes to this project are documented in this file.
 - Prevent a persisted search keyword or an unbound process-local index from bypassing the startup-scan choice or exposing another root's cache rows after a renderer reload.
 - Strip development, test, Host-path, FFmpeg, and .NET runtime injection variables before launching a packaged Desktop Host, while preserving only explicitly trusted smoke-test data paths.
 - Require a locally overridden Windows FFmpeg archive to match the SHA-256 pinned in the bundled manifest before it can be extracted or executed.
-- Bind CLI `trash purge` confirmation to the complete pre-confirmation trash snapshot, include legacy-entry capacity in `--include-untrusted` prompts, and fail with zero deletions when the snapshot changes.
 - Make desktop search strictly latest-write-wins, keep domain and cancellation errors distinct from Host transport failure, and propagate cancellation for timeouts, renderer destruction, and every long-running Host IPC operation.
-- Reject malformed or mismatched Host v2 initialization data, expose an explicit renderer bootstrap failure state, and make source/packaged smoke tests prove settings loading, startup scanning of a real fixture, and Host IPC end to end.
+- Reject malformed or mismatched Host v3 initialization data, expose an explicit renderer bootstrap failure state, and make source/packaged smoke tests prove settings loading, startup scanning of a real fixture, and Host IPC end to end.
 - Make Electron smoke tests fail closed on premature window shutdown, and exercise installed Debian/Fedora packages as an unprivileged user with a verified Chromium SUID or user-namespace sandbox.
 
 ## [0.4.0-rc.1] - 2026-08-27
