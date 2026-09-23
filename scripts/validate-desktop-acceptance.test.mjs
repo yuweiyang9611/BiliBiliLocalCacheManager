@@ -6,12 +6,22 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expectedAssets, validateAcceptance } from './validate-desktop-acceptance.mjs';
 
-async function fixture(t) {
+async function fixture(t, schemaVersion = 2) {
   const assetsDirectory = await mkdtemp(path.join(tmpdir(), 'blcm-acceptance-'));
   t.after(() => rm(assetsDirectory, { recursive: true, force: true }));
   const tag = 'v0.4.0', commit = 'a'.repeat(40);
   const assets = [];
-  for (const name of expectedAssets('0.4.0')) {
+  const names = [
+    'BiliBiliLocalCacheManager-0.4.0-linux-x64.deb',
+    'BiliBiliLocalCacheManager-0.4.0-linux-x64.rpm',
+    'BiliBiliLocalCacheManager-0.4.0-windows-x64.exe',
+    'BiliBiliLocalCacheManager-0.4.0-windows-x64.zip',
+    ...(schemaVersion === 1 ? [
+      'BiliBiliLocalCacheManager-cli-v0.4.0-linux-x64.tar.gz',
+      'BiliBiliLocalCacheManager-cli-v0.4.0-win-x64.zip',
+    ] : []),
+  ];
+  for (const name of names) {
     const bytes = Buffer.from(name);
     await writeFile(path.join(assetsDirectory, name), bytes);
     assets.push({ name, sha256: createHash('sha256').update(bytes).digest('hex') });
@@ -26,11 +36,39 @@ async function fixture(t) {
           asset: asset.name, checks: Array.from({ length: 9 }, (_, index) => ({ id: index + 1, status: 'passed', defectUrl: null })),
         })),
   }));
-  return { assetsDirectory, tag, commit, record: { schemaVersion: 1, tag, commit, assets, environments } };
+  return { assetsDirectory, tag, commit, record: { schemaVersion, tag, commit, assets, environments } };
 }
 
-test('accepts the complete desktop matrix and both Windows packages', async t => {
-  assert.equal((await validateAcceptance(await fixture(t))).environments, 6);
+test('accepts the historical six-package schema with the complete desktop matrix', async t => {
+  const result = await validateAcceptance(await fixture(t, 1));
+  assert.equal(result.environments, 6);
+  assert.equal(result.assets, 6);
+});
+test('accepts the desktop-only four-package schema with both Windows packages', async t => {
+  assert.deepEqual(await validateAcceptance(await fixture(t, 2)), {
+    tag: 'v0.4.0', commit: 'a'.repeat(40), assets: 4, environments: 6,
+  });
+});
+test('defaults to the four desktop release assets', () => {
+  assert.deepEqual(expectedAssets('0.4.0'), [
+    'BiliBiliLocalCacheManager-0.4.0-linux-x64.deb',
+    'BiliBiliLocalCacheManager-0.4.0-linux-x64.rpm',
+    'BiliBiliLocalCacheManager-0.4.0-windows-x64.exe',
+    'BiliBiliLocalCacheManager-0.4.0-windows-x64.zip',
+  ]);
+});
+for (const [schemaVersion, mismatchedSchema] of [[1, 2], [2, 1]]) {
+  test(`rejects schema ${schemaVersion} assets recorded as schema ${mismatchedSchema}`, async t => {
+    const options = await fixture(t, schemaVersion);
+    options.record.schemaVersion = mismatchedSchema;
+    await assert.rejects(validateAcceptance(options), /asset set/);
+  });
+}
+test('rejects unsupported acceptance schemas instead of guessing an asset profile', async t => {
+  const options = await fixture(t);
+  options.record.schemaVersion = 3;
+  await assert.rejects(validateAcceptance(options), /schema/);
+  assert.throws(() => expectedAssets('0.4.0', 3), /schema/);
 });
 for (const [name, mutate] of [
   ['missing desktop', record => record.environments.pop()],

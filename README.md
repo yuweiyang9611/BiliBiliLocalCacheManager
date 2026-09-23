@@ -1,17 +1,22 @@
 # BiliBiliLocalCacheManager
 
-用于扫描、搜索、播放、导出和安全管理本地哔哩哔哩缓存的工具集。项目提供 .NET 10 CLI，以及基于 Electron 44、内置 Chromium 和 React/TypeScript 的桌面应用；桌面界面通过受限的 IPC 与独立 .NET Host 通信，不在渲染进程中开放 Node.js。
+用于扫描、搜索、播放、导出和安全管理本地哔哩哔哩缓存的桌面应用。项目基于 Electron 44、内置 Chromium 和 React/TypeScript；桌面界面通过受限的 IPC 与独立 .NET 10 Host 通信，不在渲染进程中开放 Node.js。不再提供或维护独立 CLI，历史已发布产物保留。
+
+## 需求与规划
+
+[2026-09-22 桌面需求基线](docs/requirements/2026-09-22-desktop-baseline.md) 已经用户确认，配套有 [验收清单](docs/requirements/2026-09-22-desktop-acceptance.md)、[实施计划](docs/requirements/2026-09-22-desktop-implementation-plan.md) 和 [统一术语](CONTEXT.md)。CLI 退出、跨页/跨视频选择、分 P 回收站及转码确认已实现；实际自动验证、性能记录与仍待完成的真实桌面验收见 [实施记录](docs/requirements/2026-09-23-implementation-status.md)。实现不等于已经正式发布。
 
 ## 主要能力
 
 - 从 `根目录/avid/分段目录/entry.json` 建立缓存索引，识别新版 DASH、中期 DASH、旧版 Lua 和混合结构
-- 按标题、分段名、UP 主、Bvid 或 Avid 搜索，并报告损坏条目、未完成分段和不可访问目录
+- 默认按标题、UP 主、Bvid 或 Avid 搜索，分 P 名称可选开启，并报告损坏条目、未完成分段和不可访问目录
 - 对大缓存库使用带会话索引令牌的分页摘要；只有聚焦某条缓存时才分页解析分段和播放结构，列表采用有界虚拟渲染
-- 使用系统默认播放器、mpv 或 VLC 播放；批量媒体准备后生成本地 UTF-8 M3U8 播放列表，只启动一次播放器。系统默认播放要求已关联支持 M3U8 的程序
-- 将单条或多选缓存导出为普通 MP4，并复用已有转码产物
+- 视频与分 P 选择互斥；同一查询中跨页保留选择，分 P 可跨视频选择，并可查看完整已选清单
+- 使用选定的系统默认播放器、mpv 或 VLC 播放，失败不自动更换；按列表和 P 序号准备，多项生成本地 UTF-8 M3U8，只启动一次播放器。系统默认播放要求已关联支持 M3U8 的程序
+- 所有 MP4 导出统一为新批次/视频/分 P 目录，整批成功才发布且不覆盖旧内容；优先转封装，转码前需明确确认，可复用本次 Host 会话中有可信处理来源的导出产物
 - 统计原始缓存、转码缓存、应用回收站、总占用和预计可释放空间
-- 默认把删除内容移动到应用回收站，支持列表、恢复、撤销和受保护的永久清理
-- 分别控制是否记住缓存目录、是否在启动时自动扫描；自动扫描默认关闭，存储统计与回收站按页面懒加载
+- 整视频或所选分 P 可移入应用回收站、恢复和精确撤销；分 P 恢复不覆盖冲突位置，Windows 永久清空需输入确认文字并复核完整集合
+- 只记住一个目录；新配置默认启动扫描，可关闭，已有配置保留原选择及历史缺省，存储统计与回收站按页面懒加载
 - 设置转码产物保留期与容量上限，并执行非阻塞后台维护
 - 导出包含运行时、设置摘要、FFmpeg、转码缓存统计和最近事件的诊断 ZIP；最近事件会替换已知缓存路径、用户主目录、URL 与常见命名凭据
 
@@ -47,7 +52,7 @@ Electron 44 自带运行所需的 Chromium，不依赖系统浏览器。桌面�
 
 ### Linux 运行依赖与安全限制
 
-Linux 桌面包与 CLI 是 `linux-x64` 自包含发布，但 **FFmpeg 不随 Linux 包分发**。deb 声明 `ffmpeg` 依赖，rpm 声明 Fedora 官方 `ffmpeg-free` 依赖；直接使用 CLI 压缩包时需要自行安装。播放准备和 MP4 导出要求系统 `PATH` 中存在可执行的 `ffmpeg` 与 `ffprobe`，建议在启动前验证：
+Linux 桌面包内置 `linux-x64` 自包含 Host，但 **FFmpeg 不随 Linux 包分发**。deb 声明 `ffmpeg` 依赖，rpm 声明 Fedora 官方 `ffmpeg-free` 依赖。播放准备和 MP4 导出要求系统 `PATH` 中存在可执行的 `ffmpeg` 与 `ffprobe`，建议在启动前验证：
 
 ```bash
 ffmpeg -version
@@ -59,7 +64,6 @@ Ubuntu 与 Debian 使用系统 `ffmpeg` 包；Fedora 43 的官方 `ffmpeg-free` 
 Linux 当前禁用不可逆删除：
 
 - 桌面端不能永久清空应用回收站。
-- CLI 在 Linux 上拒绝执行非 dry-run 的 `--permanent` 删除；`--dry-run` 仍可用于检查目标。
 - 移入应用回收站、列出和恢复仍受支持。
 
 这一限制会持续到 Unix 物理目录身份校验达到与 Windows 句柄绑定删除相同的安全保证。
@@ -74,6 +78,10 @@ Linux 当前禁用不可逆删除：
 
 搜索保留 350 毫秒防抖，新查询会取消同一窗口的旧搜索；旧查询结果不会覆盖当前输入。进度续期按固定阶段和计数器最高值判断，等待、重复、回退或其他请求的事件不续期。
 
+播放准备和导出期间可以继续浏览、搜索、查看详情；任务仍使用提交时的索引和目标快照。新的副作用操作、重入和目录切换会被阻止。变更搜索条件、重扫或切换目录会清空界面选择，不改变已提交任务。
+
+导出统一写入 `cache-export/视频标题_AV号/P001_分P名称.mp4`，重名批次使用 `cache-export (2)`。运行中出现新的转码需求时，本批不发布，显示原因和影响，确认后重试完整批次。窗口绑定确认会话不能跨索引、跨目标或借用旧播放缓存绕过许可。没有可信处理来源的历史产物会安全重建。
+
 播放列表及其转码产物的保护记录在重启后仍生效，期限至少 6 小时或队列总时长加 1 小时，不受会话 64 项保护上限影响。保护到期后按维护策略清理；暂停播放器超出期限时，应用无法通过系统文件关联获知实际播放位置。
 
 播放准备期间，每分钟将本批已准备产物的保护期限续至至少 6 小时后；准备失败或取消后停止续期，但不缩短已有保护。交给播放器前重新计算整队播放保护。续期失败会停止本批准备，并展示原因，不启动播放器。
@@ -86,17 +94,16 @@ Windows 使用仓库 `ffmpeg-bundle.json` 指定并校验的 FFmpeg bundle。Lin
 
 应用回收站使用版本化身份元数据。Windows 永久清理会进行物理句柄、卷与文件 ID 复核，并保留可恢复的清理日志直到删除提交；桌面端还要求永久清理请求显式绑定当前缓存根目录，并携带界面所显示的完整、非空条目集合。Core 会在取得同根目录跨进程变更锁后再次核对该集合；目录变化、列表过期、损坏、身份不匹配或未来 SchemaVersion 的条目都会使整批操作被安全拒绝。
 
-桌面端默认不会在启动时扫描磁盘。“记住缓存目录”与“启动时自动扫描”是两个独立选项；从旧版设置首次升级且存在已保存目录时，应用会要求明确选择今后的行为。保存的搜索词不会隐式触发扫描；只有本会话已明确扫描当前目录后才会自动筛选。即使选择不记住目录，当前会话中已验证的目录仍可继续使用，下次启动时才会忘记。
+新配置默认启用启动扫描；“记住缓存目录”与“启动时自动扫描”仍是独立选项。已有配置中的明确值和历史缺省不会被新默认值覆盖；旧版需要迁移确认的目录仍先由用户选择。没有已记住的有效目录时不会自行找目录扫描，保存的搜索词也不会绕过关闭启动扫描的选择。当前会话中已验证但不记住的目录可继续使用，下次启动时忘记。
 
 ## 项目结构
 
 - `BiliBiliLocalCacheManager.Core/`：索引、搜索、扫描报告和安全删除逻辑
 - `BiliBiliLocalCacheManager.Playback/`：缓存结构识别、媒体整理、FFmpeg 与产物生命周期
-- `BiliBiliLocalCacheManager.Cli/`：命令行界面
 - `BiliBiliLocalCacheManager.Desktop/`：Electron 主进程、Preload、React 渲染器和前端测试
 - `BiliBiliLocalCacheManager.Desktop.Host/`：桌面应用的 .NET JSON-lines Host
 - `BiliBiliLocalCacheManager.Desktop.Host.Tests/`：桌面 Host 协议、持久化和诊断脱敏契约测试
-- `BiliBiliLocalCacheManager.Core.Tests/`、`Playback.Tests/`、`Cli.Tests/`：.NET 回归测试
+- `BiliBiliLocalCacheManager.Core.Tests/`、`Playback.Tests/`：.NET 回归测试
 
 ## 开发与验证
 
@@ -142,22 +149,6 @@ dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.P
 
 `.github/workflows/ci.yml` 使用 .NET `10.0.400` 与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。自检会加载真实渲染器、读取隔离设置、通过 Preload/IPC 调用内置 Host，并扫描一条临时缓存夹具。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。稳定的 `ci-required` 汇总检查只有在隐私检查、完整构建/测试/打包矩阵和发行版安装包自检全部成功时才通过。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查仍需人工完成；转正流程会自动核验已提交的验收记录及安装包校验值，缺少必测记录时保持预览状态。
 
-## CLI 示例
-
-```powershell
-dotnet run --project BiliBiliLocalCacheManager.Cli -- scan --root "D:\BilibiliDownload"
-dotnet run --project BiliBiliLocalCacheManager.Cli -- search "关键词" --root "D:\BilibiliDownload"
-dotnet run --project BiliBiliLocalCacheManager.Cli -- play 187742 --root "D:\BilibiliDownload" --segment 1
-
-# 默认移入应用回收站（可恢复）
-dotnet run --project BiliBiliLocalCacheManager.Cli -- delete av187742 --root "D:\BilibiliDownload" --yes
-dotnet run --project BiliBiliLocalCacheManager.Cli -- trash list --root "D:\BilibiliDownload"
-dotnet run --project BiliBiliLocalCacheManager.Cli -- trash restore 187742 --root "D:\BilibiliDownload"
-
-# Windows 上永久删除必须显式声明；Linux 只允许 --dry-run
-dotnet run --project BiliBiliLocalCacheManager.Cli -- delete 187742 --root "D:\BilibiliDownload" --permanent --yes
-```
-
 ## 下载与发布
 
 正式发布覆盖 `win-x64` 与 `linux-x64`，必须在对应原生操作系统上构建，不支持从 Windows 交叉生成 Linux Electron 包。
@@ -166,8 +157,6 @@ dotnet run --project BiliBiliLocalCacheManager.Cli -- delete 187742 --root "D:\B
 - `BiliBiliLocalCacheManager-<版本>-windows-x64.zip`：Windows 免安装桌面包
 - `BiliBiliLocalCacheManager-<版本>-linux-x64.deb`：Linux deb 桌面包
 - `BiliBiliLocalCacheManager-<版本>-linux-x64.rpm`：Linux rpm 桌面包
-- `BiliBiliLocalCacheManager-cli-v<版本>-win-x64.zip`：Windows CLI
-- `BiliBiliLocalCacheManager-cli-v<版本>-linux-x64.tar.gz`：Linux CLI
 - `SHA256SUMS-<rid>.txt`：本地脚本生成的当前平台校验值；GitHub Release 会合并为 `SHA256SUMS.txt`
 
 当前流水线没有仓库内置的代码签名证书；本地脚本与未配置发布密钥的 CI 所生成的 Windows 可执行文件默认未签名，可能触发 SmartScreen。维护者可通过 GitHub Actions secrets `WINDOWS_CSC_LINK` 与 `WINDOWS_CSC_KEY_PASSWORD` 提供 electron-builder 兼容的证书；一旦配置证书，构建会强制签名主程序、内置 Host 与安装器，签名失败即终止。SHA-256 校验值可检查下载完整性，但不能替代 Authenticode 发布者身份验证。
@@ -184,7 +173,7 @@ Windows Release 可加 `-RunFfmpegIntegrationTests`；`-SkipTests` 与该选项�
 
 ## 许可证
 
-本项目采用 [MIT License](LICENSE)。CLI 与桌面发布产物均包含许可证文本。
+本项目采用 [MIT License](LICENSE)。桌面发布产物包含许可证文本。
 
 ## 仓库历史与隐私说明
 

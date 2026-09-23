@@ -6,7 +6,7 @@
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "tag": "v0.4.0",
   "commit": "<标签指向的完整 40 位提交 SHA>",
   "assets": [
@@ -33,7 +33,8 @@
 }
 ```
 
-- assets 必须列出全部六个 CLI/桌面包，文件名和哈希均与 Release 及 SHA256SUMS.txt 一致。
+- 新发布记录使用 `schemaVersion: 2`，assets 必须列出四个桌面包：Windows exe、Windows zip、Linux deb、Linux rpm；文件名和哈希均与 Release 及 SHA256SUMS.txt 一致。未来不再发布独立 CLI。
+- 历史六包 Release 继续使用 `schemaVersion: 1`，必须同时包含历史 Windows/Linux CLI 包及四个桌面包。校验器不依据版本号猜测资产集合，不允许四包和六包格式混用；历史包、标签与记录不追溯修改。
 - 必须包含 windows-10、windows-11、ubuntu-gnome、debian-gnome、debian-kde，以及 fedora-gnome 或 fedora-kde 至少一个。
 - Windows 两项各验证 exe 和桌面 zip；Ubuntu/Debian 验证 deb；Fedora 验证 rpm。Linux 的 sessionType 必须为 xwayland，Windows 为 native。
 - 每个包的 checks 必须完整列出 [桌面兼容性清单](../desktop-compatibility.md) 的 1–9 项，并全部通过。存在关联缺陷时填写 HTTPS 链接，否则明确写 null。

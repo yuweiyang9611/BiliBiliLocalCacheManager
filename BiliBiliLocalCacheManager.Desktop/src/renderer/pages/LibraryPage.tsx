@@ -4,6 +4,7 @@ import type { CachePageState } from '../ui-types';
 import { Icon } from '../components/Icon';
 import { Check, Empty, PageControls } from '../components/Common';
 import { toggleSet, formatBytes, formatDuration, formatDate } from '../display';
+import { partSelectionKey } from '../hooks/useLibrarySelection';
 
 export interface LibraryProps {
   settings: AppSettings;
@@ -26,6 +27,7 @@ export interface LibraryProps {
   cachePage: CachePageState;
   pageTo(offset: number): Promise<void>;
   busy: boolean;
+  readBusy?: boolean;
   play(targets?: SelectionTarget[]): Promise<void>;
   exportMedia(): Promise<void>;
   moveToTrash(): void;
@@ -34,15 +36,21 @@ export interface LibraryProps {
 
 export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
   const { settings, updateSetting } = props;
+  const visiblePartKeys = props.focusedDetails?.segments.map(segment => partSelectionKey(props.focusedDetails!.avid, segment.pageIndex)) ?? [];
+  const selectVisibleParts = (checked: boolean) => {
+    const ids = new Set(props.selectedSegmentIds);
+    for (const id of visiblePartKeys) { if (checked) ids.add(id); else ids.delete(id); }
+    props.setSelectedSegmentIds(ids);
+  };
   return <div className="library-layout">
     <section className="card root-card">
       <div className="field grow"><label htmlFor="root-path">缓存根目录</label><div className="input-action"><input id="root-path" value={settings.rootPath} readOnly title="请使用右侧按钮选择目录，或在设置页输入后验证切换" placeholder="选择 B 站 download 缓存目录" /><button className="icon-button" aria-label="浏览缓存目录" onClick={() => void props.browse()} disabled={props.busy}><Icon name="folder" /></button></div></div>
-      <label className="toggle"><input type="checkbox" checked={settings.includeIncomplete} onChange={(event) => updateSetting('includeIncomplete', event.target.checked)} /><span />包含未完成缓存</label>
+      <label className="toggle"><input type="checkbox" disabled={props.busy} checked={settings.includeIncomplete} onChange={(event) => updateSetting('includeIncomplete', event.target.checked)} /><span />包含未完成缓存</label>
     </section>
     <section className="card search-card">
-      <div className="search-box"><Icon name="search" /><input ref={props.searchInput} value={settings.keyword} onChange={(event) => updateSetting('keyword', event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !props.busy) void props.search(); }} placeholder="搜索标题、UP 主、BV 号或 AV 号" /></div>
+      <div className="search-box"><Icon name="search" /><input ref={props.searchInput} value={settings.keyword} onChange={(event) => updateSetting('keyword', event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !props.readBusy) void props.search(); }} placeholder="搜索标题、UP 主、BV 号或 AV 号" /></div>
       <select aria-label="匹配方式" value={settings.matchMode} onChange={(event) => updateSetting('matchMode', event.target.value as AppSettings['matchMode'])}><option value="contains">包含</option><option value="prefix">前缀</option><option value="exact">精确</option></select>
-      <button className="button secondary" onClick={() => void props.search()} disabled={props.busy}>筛选</button>
+      <button className="button secondary" onClick={() => void props.search()} disabled={props.readBusy}>筛选</button>
       <details className="filter-menu"><summary>高级筛选</summary><div className="filter-popover">
         <Check label="分词" checked={settings.splitKeywords} onChange={(value) => updateSetting('splitKeywords', value)} />
         <Check label="任意关键字" checked={settings.anyKeywords} onChange={(value) => updateSetting('anyKeywords', value)} />
@@ -54,12 +62,12 @@ export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
       </div></details>
     </section>
     <section className="card cache-panel">
-      <div className="panel-heading"><div><h2>缓存列表</h2><span>{props.cachePage.totalItems} 项</span></div><div className="toolbar"><button className="button ghost" onClick={() => void props.play()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="play" />播放</button><button className="button ghost" onClick={() => void props.exportMedia()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="export" />导出</button><button className="button ghost danger-text" onClick={props.moveToTrash} disabled={props.busy || !props.selectedIds.size}><Icon name="delete" />删除</button><button className="button ghost" onClick={props.clear} disabled={props.busy}>清空结果</button></div></div>
+      <div className="panel-heading"><div><h2>缓存列表</h2><span>{props.cachePage.totalItems} 项</span></div><div className="toolbar"><button className="button ghost" onClick={() => void props.play()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="play" />播放</button><button className="button ghost" onClick={() => void props.exportMedia()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="export" />导出</button><button className="button ghost danger-text" onClick={props.moveToTrash} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="delete" />删除</button><button className="button ghost" onClick={props.clear} disabled={props.readBusy}>清空结果</button></div></div>
       <VirtualizedCacheTable items={props.items} selectedIds={props.selectedIds} setSelectedIds={props.setSelectedIds} focusedId={props.focusedId} focus={props.focus} busy={props.busy} play={props.play} />
       <PageControls
         label="缓存"
         {...props.cachePage}
-        busy={props.busy}
+        busy={Boolean(props.readBusy)}
         onPage={(offset) => void props.pageTo(offset)}
       />
     </section>
@@ -67,7 +75,7 @@ export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
       {props.detailsLoading
         ? <Empty compact icon="film" title="正在加载分段" body="仅为当前页解析媒体结构与可播放状态。" />
         : props.focusedDetails
-          ? <><div className="table-scroll"><table><thead><tr><th className="check-cell"><input aria-label="选择全部分段" type="checkbox" checked={props.focusedDetails.segments.length > 0 && props.selectedSegmentIds.size === props.focusedDetails.segments.length} onChange={(event) => props.setSelectedSegmentIds(event.target.checked ? new Set(props.focusedDetails!.segments.map((item) => item.id)) : new Set())} /></th><th>Page</th><th>分段名</th><th>结构</th><th>类型</th><th>大小</th><th>时长</th><th>可播放</th></tr></thead><tbody>{props.focusedDetails.segments.map((segment) => <SegmentRow key={segment.id} item={segment} checked={props.selectedSegmentIds.has(segment.id)} toggle={() => props.setSelectedSegmentIds(toggleSet(props.selectedSegmentIds, segment.id))} play={() => { if (props.busy) return; props.setSelectedSegmentIds(new Set([segment.id])); void props.play([{ avid: props.focusedDetails!.avid, pageIndexes: [segment.pageIndex] }]); }} />)}</tbody></table></div><PageControls label="分段" offset={props.focusedDetails.offset} pageSize={props.focusedDetails.pageSize} totalItems={props.focusedDetails.totalItems} hasMore={props.focusedDetails.hasMore} busy={props.busy} onPage={props.setDetailsOffset} /></>
+          ? <><div className="table-scroll"><table><thead><tr><th className="check-cell"><input aria-label="选择全部分段" type="checkbox" checked={visiblePartKeys.length > 0 && visiblePartKeys.every(id => props.selectedSegmentIds.has(id))} onChange={(event) => selectVisibleParts(event.target.checked)} /></th><th>Page</th><th>分段名</th><th>结构</th><th>类型</th><th>大小</th><th>时长</th><th>可播放</th></tr></thead><tbody>{props.focusedDetails.segments.map((segment) => <SegmentRow key={segment.id} item={segment} checked={props.selectedSegmentIds.has(partSelectionKey(props.focusedDetails!.avid, segment.pageIndex))} toggle={() => props.setSelectedSegmentIds(toggleSet(props.selectedSegmentIds, partSelectionKey(props.focusedDetails!.avid, segment.pageIndex)))} play={() => { if (props.busy) return; props.setSelectedSegmentIds(new Set([partSelectionKey(props.focusedDetails!.avid, segment.pageIndex)])); void props.play([{ avid: props.focusedDetails!.avid, pageIndexes: [segment.pageIndex] }]); }} />)}</tbody></table></div><PageControls label="分段" offset={props.focusedDetails.offset} pageSize={props.focusedDetails.pageSize} totalItems={props.focusedDetails.totalItems} hasMore={props.focusedDetails.hasMore} busy={Boolean(props.readBusy)} onPage={props.setDetailsOffset} /></>
           : props.focusedItem
             ? <Empty compact icon="film" title="分段详情不可用" body="请重新选择缓存，或重新扫描以刷新索引。" />
             : <Empty compact icon="film" title="没有选择缓存" body="单击上方缓存后按页查看媒体结构；双击分段可直接播放。" />}
@@ -114,7 +122,7 @@ export const VirtualizedCacheTable = memo(function VirtualizedCacheTable(props: 
       setScrollTop(event.currentTarget.scrollTop);
       setViewportHeight(event.currentTarget.clientHeight || 420);
     }}
-  ><table><thead><tr><th className="check-cell"><input aria-label="选择全部缓存" type="checkbox" checked={props.items.length > 0 && props.selectedIds.size === props.items.length} onChange={(event) => props.setSelectedIds(event.target.checked ? new Set(props.items.map((item) => item.id)) : new Set())} /></th><th>视频</th><th>UP 主</th><th>标识</th><th>时长</th><th>分段</th><th>大小</th><th>状态</th><th>更新时间</th></tr></thead><tbody>
+  ><table><thead><tr><th className="check-cell"><input aria-label="选择全部缓存" type="checkbox" checked={props.items.length > 0 && props.items.every(item => props.selectedIds.has(item.id))} onChange={(event) => { const checked = event.target.checked; props.setSelectedIds(current => { const ids = new Set(current); for (const item of props.items) { if (checked) ids.add(item.id); else ids.delete(item.id); } return ids; }); }} /></th><th>视频</th><th>UP 主</th><th>标识</th><th>时长</th><th>分段</th><th>大小</th><th>状态</th><th>更新时间</th></tr></thead><tbody>
     {first > 0 && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={9} style={{ height: first * rowHeight }} /></tr>}
     {visibleItems.map(item => <CacheRow key={item.id} item={item} focused={props.focusedId === item.id} checked={props.selectedIds.has(item.id)} focus={props.focus} play={playRow} toggle={toggleRow} />)}
     {last < props.items.length && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={9} style={{ height: (props.items.length - last) * rowHeight }} /></tr>}

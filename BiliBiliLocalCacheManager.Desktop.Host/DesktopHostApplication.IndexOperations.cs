@@ -61,7 +61,8 @@ internal sealed partial class DesktopHostApplication
 
             var completedAt = DateTimeOffset.UtcNow;
             var snapshot = SetCurrentIndex(report.Index, root, includeIncomplete, completedAt,
-                report.Issues, generation, persistSettings);
+                report.Issues, generation, persistSettings, cancellationToken,
+                count => ReportPartCaptureProgress(requestId, "scan", count));
             var page = CreateCachePage(
                 snapshot,
                 snapshot.Index.VideoCaches,

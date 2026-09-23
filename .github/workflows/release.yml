@@ -141,8 +141,6 @@ jobs:
           find . -maxdepth 1 -type f -name 'SHA256SUMS-*.txt' -delete
           version="${{ needs.validate.outputs.version }}"
           expected=(
-            "BiliBiliLocalCacheManager-cli-v${version}-linux-x64.tar.gz"
-            "BiliBiliLocalCacheManager-cli-v${version}-win-x64.zip"
             "BiliBiliLocalCacheManager-${version}-linux-x64.deb"
             "BiliBiliLocalCacheManager-${version}-linux-x64.rpm"
             "BiliBiliLocalCacheManager-${version}-windows-x64.exe"

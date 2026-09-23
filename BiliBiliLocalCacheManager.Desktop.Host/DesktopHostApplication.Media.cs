@@ -1,8 +1,10 @@
 using System.Text.Json;
 using BiliBiliLocalCacheManager.Core.Domain.Models;
+using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
 using BiliBiliLocalCacheManager.Desktop.Host.Services;
 using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
+using BiliBiliLocalCacheManager.Playback.Contracts;
 using BiliBiliLocalCacheManager.Playback.Models;
 using BiliBiliLocalCacheManager.Playback.Services;
 
@@ -10,6 +12,8 @@ namespace BiliBiliLocalCacheManager.Desktop.Host;
 
 internal sealed partial class DesktopHostApplication
 {
+    private ICacheExportMaterializationService? _exportService;
+
     private async Task<object> PlayAsync(
         string requestId, JsonElement parameters, CancellationToken cancellationToken)
     {
@@ -18,22 +22,9 @@ internal sealed partial class DesktopHostApplication
         var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ?? settings.IncludeIncomplete;
         var selections = ParseSelectionTargets(parameters);
         var player = ParseWirePlayerPreference(parameters.OptionalString("playerPreference"), settings.PreferredPlayer);
-        var index = await ResolveIndexAsync(requestId, "play", root, includeIncomplete, cancellationToken);
+        var index = await ResolveMediaIndexAsync(requestId, "play", parameters, root, includeIncomplete, cancellationToken);
         var failures = new List<MediaFailureDto>();
-        var targets = new List<(BiliVideoCache Cache, int Page)>();
-        var seen = new HashSet<(long Avid, int Page)>();
-        foreach (var selection in selections)
-        {
-            if (!index.ByAvid.TryGetValue(selection.Avid, out var cache))
-            {
-                failures.Add(new(selection.Avid.ToString(), null, "", "Cache not found."));
-                continue;
-            }
-            var pages = selection.PageIndexes is { Count: > 0 }
-                ? selection.PageIndexes : cache.Segments.Select(segment => segment.PageIndex).Distinct().ToArray();
-            foreach (var page in pages.Order())
-                if (seen.Add((cache.Avid, page))) targets.Add((cache, page));
-        }
+        var targets = OrderMediaTargets(index, selections, failures);
         var prepared = new List<(PlaybackQueueItem Item, BiliVideoCache Cache, int Page)>();
         var store = new PlaybackArtifactStore(_artifactStore.RootDirectory);
         await using var protection = new PlaybackPreparationProtection(store, cancellationToken);
@@ -100,82 +91,163 @@ internal sealed partial class DesktopHostApplication
         var includeIncomplete = parameters.OptionalBoolean("includeIncomplete") ?? settings.IncludeIncomplete;
         var selections = ParseSelectionTargets(parameters);
         var requestedOutputPath = Path.GetFullPath(parameters.RequireString("outputPath"));
-        var requestedParent = Path.GetDirectoryName(requestedOutputPath);
-        if (string.IsNullOrWhiteSpace(requestedParent) || !Directory.Exists(requestedParent))
-            throw new DirectoryNotFoundException($"Export destination directory not found: {requestedParent}");
-        var index = await ResolveIndexAsync(requestId, "export", root, includeIncomplete, cancellationToken);
-        var requests = ExpandExportTargets(index, selections);
-        var failures = selections.Where(selection => !index.ByAvid.ContainsKey(selection.Avid))
-            .Select(selection => new MediaFailureDto(selection.Avid.ToString(), null, "", "Cache not found.")).ToList();
-        if (requests.Count == 0) return new ExportBatchResultDto(null, 0, failures, false);
-        var destinationIsDirectory = requests.Count > 1 || Directory.Exists(requestedOutputPath);
-        var destination = destinationIsDirectory ? ResolveBatchExportDirectory(requestedOutputPath) : requestedOutputPath;
-        string? stagingDirectory = destinationIsDirectory ? CreateBatchExportStagingDirectory(destination) : null;
-        string? stagingFile = destinationIsDirectory ? null : Path.Combine(requestedParent,
-            "." + Path.GetFileName(destination) + "." + Guid.NewGuid().ToString("N") + ".exporting");
-        var workingDestination = stagingDirectory ?? destination;
+        if (!Directory.Exists(requestedOutputPath))
+            throw new DirectoryNotFoundException($"Export destination must be an existing directory: {requestedOutputPath}");
+        var approvals = ParseOptionalStringArray(parameters, "transcodeApprovals", 10000);
+        if (approvals.Any(value => value.Length != 64 || value.Any(character => !char.IsAsciiHexDigit(character))))
+            throw new RpcException("invalid_params", "Every transcode approval must be a 64-character hexadecimal token.");
+        var index = await ResolveMediaIndexAsync(requestId, "export", parameters, root, includeIncomplete, cancellationToken);
+        var failures = new List<MediaFailureDto>();
+        var requirements = new List<ExportTranscodeRequirementDto>();
+        var requests = OrderMediaTargets(index, selections, failures);
+        if (requests.Count == 0 || failures.Count > 0) return new ExportBatchResultDto(null, 0, failures, false, requirements);
+        using var destinationGuard = new ExportDirectoryGuard(requestedOutputPath, allowRename: false);
+        var destination = ResolveBatchExportDirectory(requestedOutputPath);
+        string? stagingDirectory = CreateBatchExportStagingDirectory(destination);
+        using var stagingGuard = new ExportDirectoryGuard(stagingDirectory, allowRename: true);
+        var exportService = _exportService ??= new CacheExportService(_artifactStore);
+        var store = new PlaybackArtifactStore(_artifactStore.RootDirectory);
+        await using var protection = new PlaybackPreparationProtection(store, cancellationToken);
         var preparedCount = 0;
+        var prepared = new List<(CachePlaybackPlan Plan, PlaybackMaterializationResult Result, string Output)>();
+        var outputLeases = new List<FileStream>();
         try
         {
-            // Missing selections must also prevent a single-file export from committing.
-            if (failures.Count > 0) return new ExportBatchResultDto(null, 0, failures, false);
             for (var ordinal = 0; ordinal < requests.Count; ordinal++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var target = requests[ordinal];
-                var cache = index.ByAvid[target.Avid];
+                var cache = target.Cache;
+                destinationGuard.Validate();
+                stagingGuard.Validate();
                 try
                 {
-                    var plan = _playbackService.CreatePagePlan(cache, target.SegmentKey);
+                    var plan = _playbackService.CreatePagePlan(cache, target.Page.ToString(System.Globalization.CultureInfo.InvariantCulture));
                     var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
                         ReportProgress(new HostProgressEvent(requestId, "export", value.Stage, value.Percentage,
-                            ordinal + 1, requests.Count, $"av{target.Avid} P{plan.PageIndex}",
+                            ordinal + 1, requests.Count, $"av{cache.Avid} P{plan.PageIndex}",
                             new { processedSeconds = value.ProcessedSeconds, bytesProcessed = value.ProcessedBytes }, Phase: value.Phase)));
-                    var materialization = await _playbackService.MaterializeAsync(plan.SelectedPlan, progress, cancellationToken);
+                    var materialization = await exportService.MaterializeAsync(plan.SelectedPlan, approvals, progress, protection.Token);
                     if (!materialization.Succeeded || string.IsNullOrWhiteSpace(materialization.OutputPath))
                         throw new IOException(materialization.Message);
-                    if (!destinationIsDirectory && PathsEqual(materialization.OutputPath, destination))
-                        throw new IOException("The export source and destination are the same file.");
-                    var output = destinationIsDirectory
-                        ? PortableFileNaming.EnsureUnique(workingDestination, PortableFileNaming.Build(cache.Title,
-                            cache.Avid, plan.PageIndex, plan.PartName, cache.Segments.Select(segment => segment.PageIndex).Distinct().Count() > 1), ".mp4")
-                        : stagingFile!;
-                    await CopyAtomicallyAsync(materialization.OutputPath, output, cancellationToken, bytes =>
+                    protection.Register(materialization.OutputPath);
+                    destinationGuard.Validate();
+                    stagingGuard.Validate();
+                    var videoDirectory = Path.Combine(stagingDirectory, PortableFileNaming.Build(cache.Title,
+                        cache.Avid, plan.PageIndex, null, false) + "_AV" + cache.Avid);
+                    Directory.CreateDirectory(videoDirectory);
+                    using var videoGuard = new ExportDirectoryGuard(videoDirectory, allowRename: false);
+                    var partName = PortableFileNaming.Build(plan.PartName, cache.Avid, plan.PageIndex, null, false);
+                    var output = Path.Combine(videoDirectory, $"P{plan.PageIndex:D3}_{partName}.mp4");
+                    await CopyAtomicallyAsync(materialization.OutputPath, output, protection.Token, bytes =>
                         ReportProgress(new HostProgressEvent(requestId, "export", "copying", Current: ordinal + 1,
                             Total: requests.Count, Details: new { bytesCopied = bytes }, Phase: "copy")));
                     preparedCount++;
+                    prepared.Add((plan.SelectedPlan, materialization, output));
+                }
+                catch (ExportTranscodeRequiredException exception)
+                {
+                    var requirement = exception.Requirement;
+                    requirements.Add(new(cache.Avid.ToString(), target.Page, BoundWireString(cache.Title),
+                        requirement.ApprovalToken, requirement.ProcessingKind, BoundWireString(requirement.Reason), BoundWireString(requirement.Impact)));
+                }
+                catch (Exception) when (protection.Failure is not null)
+                {
+                    throw new IOException("Export preparation protection failed: " + protection.Failure.Message, protection.Failure);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception exception)
                 {
-                    failures.Add(new(target.Avid.ToString(), int.TryParse(target.SegmentKey, out var page) ? page : null,
+                    failures.Add(new(cache.Avid.ToString(), target.Page,
                         BoundWireString(cache.Title), BoundWireString(exception.Message)));
                 }
             }
-            if (failures.Count > 0) return new ExportBatchResultDto(null, 0, failures, false);
+            if (failures.Count > 0 || requirements.Count > 0) return new ExportBatchResultDto(null, 0, failures, false, requirements);
+            for (var ordinal = 0; ordinal < prepared.Count; ordinal++)
+            {
+                var item = prepared[ordinal];
+                PlaybackBatchLauncher.ValidateLocalFile(item.Output);
+                outputLeases.Add(new FileStream(item.Output, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
+                var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
+                    ReportProgress(new HostProgressEvent(requestId, "export", value.Stage, Current: requests.Count + ordinal + 1,
+                        Total: requests.Count * 2, Details: new { bytesProcessed = value.ProcessedBytes }, Phase: value.Phase)));
+                await exportService.ValidatePreparedAsync(item.Plan, item.Result, progress, protection.Token, item.Output);
+            }
+            await protection.StopAsync();
+            if (protection.Failure is not null) throw new IOException("Export preparation protection failed: " + protection.Failure.Message);
             cancellationToken.ThrowIfCancellationRequested();
-            if (stagingDirectory is not null)
+            // Windows can refuse a parent-directory rename while a child file is open.
+            // Keep outputs read-only through verification, then release just before publication.
+            foreach (var lease in outputLeases) lease.Dispose();
+            outputLeases.Clear();
+            while (true)
             {
-                Directory.Move(stagingDirectory, destination);
-                stagingDirectory = null;
+                try
+                {
+                    destinationGuard.Validate();
+                    stagingGuard.Validate();
+                    foreach (var item in prepared) PlaybackBatchLauncher.ValidateLocalFile(item.Output);
+                    Directory.Move(stagingDirectory!, destination);
+                    stagingDirectory = null;
+                    break;
+                }
+                catch (IOException) when (Directory.Exists(destination) || File.Exists(destination))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    destination = ResolveBatchExportDirectory(requestedOutputPath);
+                }
             }
-            else if (stagingFile is not null)
-            {
-                File.Move(stagingFile, destination, overwrite: true);
-                stagingFile = null;
-            }
-            return new ExportBatchResultDto(destination, preparedCount, failures, true);
+            return new ExportBatchResultDto(destination, preparedCount, failures, true, requirements);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception exception)
         {
             failures.Add(new("", null, "", BoundWireString(exception.Message)));
-            return new ExportBatchResultDto(null, 0, failures, false);
+            return new ExportBatchResultDto(null, 0, failures, false, requirements);
         }
         finally
         {
-            if (stagingDirectory is not null) TryDeleteDirectory(stagingDirectory);
-            if (stagingFile is not null) TryDelete(stagingFile);
+            foreach (var lease in outputLeases) lease.Dispose();
+            if (stagingDirectory is not null && destinationGuard.IsCurrent && stagingGuard.IsCurrent)
+                TryDeleteDirectory(stagingDirectory);
+        }
+    }
+
+    private static List<(BiliVideoCache Cache, int Page)> OrderMediaTargets(CacheIndex index,
+        IReadOnlyList<SelectionTargetRequest> selections, List<MediaFailureDto> failures)
+    {
+        var grouped = selections.GroupBy(selection => selection.Avid).ToDictionary(group => group.Key, group => group.ToArray());
+        foreach (var missing in grouped.Keys.Where(avid => !index.ByAvid.ContainsKey(avid)))
+            failures.Add(new(missing.ToString(), null, "", "Cache not found."));
+        var targets = new List<(BiliVideoCache, int)>();
+        foreach (var cache in index.VideoCaches)
+        {
+            if (!grouped.TryGetValue(cache.Avid, out var selected)) continue;
+            var pages = selected.Any(selection => selection.PageIndexes is not { Count: > 0 })
+                ? cache.Segments.Select(segment => segment.PageIndex)
+                : selected.SelectMany(selection => selection.PageIndexes!);
+            foreach (var page in pages.Distinct().Order())
+            {
+                if (targets.Count == 10000) throw new RpcException("invalid_params", "A media batch may contain at most 10000 parts; no items were submitted.");
+                targets.Add((cache, page));
+            }
+        }
+        return targets;
+    }
+
+    private Task<CacheIndex> ResolveMediaIndexAsync(string requestId, string operation, JsonElement parameters,
+        string root, bool includeIncomplete, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!parameters.TryGetProperty("indexToken", out _))
+            return ResolveIndexAsync(requestId, operation, root, includeIncomplete, cancellationToken);
+        var token = RequireIndexToken(parameters);
+        lock (_stateSync)
+        {
+            var snapshot = ResolveCurrentIndex(token);
+            if (!PathsEqual(snapshot.Root, root) || _currentIncludeIncomplete != includeIncomplete)
+                throw StaleIndexException();
+            return Task.FromResult(snapshot.Index);
         }
     }
 

@@ -31,7 +31,7 @@ public sealed class SystemPlaybackLauncherTests
     }
 
     [Fact]
-    public void SystemDefaultFirst_FallsBackOnlyAfterShellFailure()
+    public void SystemDefaultFailure_DoesNotStartAnotherPlayer()
     {
         var launches = new List<ProcessStartInfo>();
         var launcher = new SystemPlaybackLauncher(info =>
@@ -40,9 +40,9 @@ public sealed class SystemPlaybackLauncherTests
             if (launches.Count == 1) throw new System.ComponentModel.Win32Exception("No association");
         }, (name, _) => name);
         var result = launcher.Launch(PlaybackMaterializationResult.Success("local.mp4", true, "Ready", null));
-        Assert.True(result.Succeeded);
-        Assert.Equal("mpv", result.PlayerName);
-        Assert.Equal(2, launches.Count);
+        Assert.False(result.Succeeded);
+        Assert.Equal("SystemDefault", result.PlayerName);
+        Assert.Single(launches);
     }
 
     [Fact]

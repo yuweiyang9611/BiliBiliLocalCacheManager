@@ -58,6 +58,15 @@ describe('validateInitialState', () => {
 });
 
 describe('paged Host responses', () => {
+  it('preserves logical page counts and rejects counts exceeding physical segments', () => {
+    const page = validCachePage();
+    const items = [{ ...validCacheEntry('100'), segmentCount: 3, pageCount: 2 }, page.items[1]];
+    expect(validateCachePage({ ...page, items }).items[0].pageCount).toBe(2);
+    for (const pageCount of [-1, 4, 1.5, '2']) {
+      expect(() => validateCachePage({ ...page, items: [{ ...items[0], pageCount }, items[1]] })).toThrow(/pageCount/);
+    }
+  });
+
   it('requires bounded scan issues and structured media outcomes', () => {
     expect(() => validateScanResult(validCachePage())).toThrow(/issues/);
     expect(() => validateScanResult({ ...validCachePage(), issues: Array(101).fill({}), issuesTruncated: true })).toThrow(/100/);
@@ -179,9 +188,39 @@ describe('cache byte-size wire boundaries', () => {
 });
 
 describe('disk mutation outcomes', () => {
+  it('preserves validated transcode approval requirements without trusting Host confirmation ids', () => {
+    const requirement = { avid: '100', pageIndex: 2, title: 'P2', approvalToken: 'a'.repeat(64),
+      processingKind: 'audio-aac', reason: 'Unsupported audio', impact: 'Audio re-encoded' };
+    const result = validateExportBatchResult({ published: false, outputPath: null, exportedCount: 0, failures: [],
+      transcodeRequirements: [requirement], confirmationId: 'host-controlled' });
+    expect(result.transcodeRequirements).toEqual([requirement]);
+    expect(result.confirmationId).toBeUndefined();
+    expect(() => validateExportBatchResult({ ...result, transcodeRequirements: [{ ...requirement, approvalToken: 'wrong' }] }))
+      .toThrow();
+    expect(() => validateExportBatchResult({ ...result, published: true, outputPath: '/export', exportedCount: 1 }))
+      .toThrow(/inconsistent/);
+  });
+
+  it('preserves exact moved entry ids and part identities for undo', () => {
+    const result = { moved: ['100:P2'], failed: [], entryIds: ['/trash/part-2'],
+      items: [{ avid: '100', pageIndex: 2, succeeded: true, entryId: '/trash/part-2' }] };
+    expect(validateTrashMoveResult(result)).toEqual(result);
+    expect(() => validateTrashMoveResult({ ...result, entryIds: [] })).toThrow();
+    expect(() => validateTrashMoveResult({ ...result, items: [{ ...result.items[0], entryId: '/other-entry' }] })).toThrow();
+  });
+
+  it('preserves per-part restore conflicts without reporting them as success', () => {
+    const result = { restored: ['restored-entry'], failed: ['conflict-entry'], items: [
+      { entryId: 'restored-entry', avid: '100', pageIndex: 1, succeeded: true },
+      { entryId: 'conflict-entry', avid: '100', pageIndex: 2, succeeded: false, error: '目标分 P 已存在' },
+    ] };
+    expect(validateTrashRestoreResult(result)).toEqual(result);
+    expect(() => validateTrashRestoreResult({ ...result, items: [{ ...result.items[1], pageIndex: -1 }] })).toThrow();
+  });
+
   const trashValidators = [
-    { operation: 'move', key: 'moved', validate: validateTrashMoveResult, limit: 1_000 },
-    { operation: 'restore', key: 'restored', validate: validateTrashRestoreResult, limit: 1_000 },
+    { operation: 'move', key: 'moved', validate: validateTrashMoveResult, limit: 20_000 },
+    { operation: 'restore', key: 'restored', validate: validateTrashRestoreResult, limit: 20_000 },
     { operation: 'purge', key: 'purged', validate: validateTrashPurgeResult, limit: 10_000 },
   ];
 

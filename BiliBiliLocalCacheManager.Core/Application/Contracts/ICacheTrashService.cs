@@ -1,4 +1,5 @@
 using BiliBiliLocalCacheManager.Core.Application.Models;
+using BiliBiliLocalCacheManager.Core.Domain.Models;
 
 namespace BiliBiliLocalCacheManager.Core.Application.Contracts;
 
@@ -7,6 +8,12 @@ public interface ICacheTrashService
     string GetTrashDirectory(string rootDirectory);
 
     CacheTrashOperationResult MoveToTrash(string rootDirectory, long avid);
+
+    CacheTrashPartTarget CapturePartTarget(string rootDirectory, BiliSegment segment)
+        => throw new NotSupportedException("Part trash is not supported by this service.");
+
+    CacheTrashOperationResult MovePartToTrash(string rootDirectory, CacheTrashPartTarget target)
+        => throw new NotSupportedException("Part trash is not supported by this service.");
 
     CacheTrashOperationResult Restore(string rootDirectory, long avid, string trashPath);
 

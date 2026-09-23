@@ -90,7 +90,7 @@ describe('IPC cancellable request tracking', () => {
     const fake = createDeferredBridge();
     unregister = registerIpc(fake.bridge, () => null);
     electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
-    const result = invoke(channels.trashPurgeSnapshot, trustedEvent(303), path.resolve('cache'), 'snapshot-1');
+    const result = invoke(channels.trashPurgeSnapshot, trustedEvent(303), path.resolve('cache'), 'snapshot-1', '永久删除');
     expect(fake.calls[0].method).toBe('trash.page');
     fake.pending.get(fake.calls[0].id)!.resolve({ snapshotToken: 'snapshot-1', offset: 0, pageSize: 1, totalItems: 11000, totalSizeBytes: 123, hasMore: true,
       items: [{ id: 'entry-1', avid: '1', title: 'First', sizeBytes: 1, deletedAt: null }] });
@@ -125,7 +125,7 @@ describe('IPC cancellable request tracking', () => {
     unregister = registerIpc(fake.bridge, () => null);
     const owner = trustedEvent(102);
     const other = trustedEvent(103);
-    const call = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false);
+    const call = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false, 'index-1');
     const rejected = expect(call).rejects.toThrow('OUTCOME_UNKNOWN');
     const id = fake.calls[0].id;
     const payload = { requestId: id, operation: 'play', state: 'unknown', sideEffects: true };
@@ -159,7 +159,7 @@ describe('IPC cancellable request tracking', () => {
     const fake = createDeferredBridge();
     unregister = registerIpc(fake.bridge, () => null);
     const owner = trustedEvent(104);
-    const call = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false);
+    const call = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false, 'index-1');
     const id = fake.calls[0].id;
     const payload = { requestId: id, operation: 'play', state: 'cancelling', sideEffects: true };
     fake.bridge.emit('operation-state', payload);
@@ -172,7 +172,7 @@ describe('IPC cancellable request tracking', () => {
     await call;
     expect(await invoke(channels.operationStates, owner)).toEqual([]);
 
-    const next = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false);
+    const next = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false, 'index-1');
     const rejected = expect(next).rejects.toThrow();
     fake.bridge.emit('operation-state', { ...payload, requestId: fake.calls[1].id });
     owner.sender.emit('destroyed');
@@ -226,18 +226,19 @@ describe('IPC cancellable request tracking', () => {
     const cacheRoot = path.resolve('cache');
     electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
     electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: path.resolve('exports', 'result.bin') });
+    electronMocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [path.resolve('exports')] });
 
     const operations = [
       invoke(channels.storageGet, event, cacheRoot),
       invoke(channels.artifactsCleanup, event),
       invoke(channels.artifactsClear, event),
       invoke(channels.artifactsOpen, event),
-      invoke(channels.trashMove, event, cacheRoot, ['100']),
+      invoke(channels.trashMove, event, cacheRoot, 'index-1', [{ avid: '100' }]),
       invoke(channels.trashList, event, cacheRoot),
       invoke(channels.trashRestore, event, cacheRoot, ['trash-100']),
-      invoke(channels.trashPurge, event, cacheRoot, ['trash-100']),
-      invoke(channels.play, event, cacheRoot, [{ avid: '100' }], 'system', false),
-      invoke(channels.exportMedia, event, cacheRoot, [{ avid: '100', pageIndexes: [1] }], 'result.mp4', false),
+      invoke(channels.trashPurge, event, cacheRoot, ['trash-100'], '永久删除'),
+      invoke(channels.play, event, cacheRoot, [{ avid: '100' }], 'system', false, 'index-1'),
+      invoke(channels.exportMedia, event, cacheRoot, [{ avid: '100', pageIndexes: [1] }], 'result.mp4', false, undefined, 'index-1'),
       invoke(channels.exportDiagnostics, event, 'diagnostics.zip', cacheRoot),
     ];
     const settled = Promise.allSettled(operations);
@@ -284,9 +285,9 @@ describe('IPC cancellable request tracking', () => {
 
 describe('IPC Host contract wiring', () => {
   it.each([
-    { method: 'trash.move', channel: channels.trashMove, args: [path.resolve('cache'), ['100']], result: { moved: ['100'], failed: [], cancelled: true, unprocessed: ['200'] } },
+    { method: 'trash.move', channel: channels.trashMove, args: [path.resolve('cache'), 'index-1', [{ avid: '100' }]], result: { moved: ['100'], failed: [], cancelled: true, unprocessed: ['200'] } },
     { method: 'trash.restore', channel: channels.trashRestore, args: [path.resolve('cache'), ['entry-1']], result: { restored: ['entry-1'], failed: [], cancelled: true, unprocessed: ['entry-2'] } },
-    { method: 'trash.purge', channel: channels.trashPurge, args: [path.resolve('cache'), ['entry-1']], result: { purged: ['entry-1'], failed: [], cancelled: false, unprocessed: [] } },
+    { method: 'trash.purge', channel: channels.trashPurge, args: [path.resolve('cache'), ['entry-1'], '永久删除'], result: { purged: ['entry-1'], failed: [], cancelled: false, unprocessed: [] } },
     { method: 'artifacts.cleanup', channel: channels.artifactsCleanup, args: [], result: { deletedFileCount: 1, freedBytes: 42, failedFileCount: 0, remainingBytes: 123, cancelled: true, unprocessedFileCount: 2, remainingBytesEstimated: true } },
     { method: 'artifacts.clear', channel: channels.artifactsClear, args: [], result: { deletedFileCount: 1, freedBytes: 42, failedFileCount: 0, remainingBytes: 123, cancelled: true, unprocessedFileCount: 2, remainingBytesEstimated: true } },
   ])('validates and preserves $method cancellation outcomes', async ({ method, channel, args, result }) => {
@@ -297,9 +298,9 @@ describe('IPC Host contract wiring', () => {
   });
 
   it.each([
-    { method: 'trash.move', channel: channels.trashMove, args: [path.resolve('cache'), ['100']], result: { moved: [], failed: [], unprocessed: [1] } },
+    { method: 'trash.move', channel: channels.trashMove, args: [path.resolve('cache'), 'index-1', [{ avid: '100' }]], result: { moved: [], failed: [], unprocessed: [1] } },
     { method: 'trash.restore', channel: channels.trashRestore, args: [path.resolve('cache'), ['entry-1']], result: { restored: [], failed: [], cancelled: 'true' } },
-    { method: 'trash.purge', channel: channels.trashPurge, args: [path.resolve('cache'), ['entry-1']], result: { purged: null, failed: [] } },
+    { method: 'trash.purge', channel: channels.trashPurge, args: [path.resolve('cache'), ['entry-1'], '永久删除'], result: { purged: null, failed: [] } },
     { method: 'artifacts.cleanup', channel: channels.artifactsCleanup, args: [], result: { deletedFileCount: 1, freedBytes: 42, failedFileCount: 0, remainingBytes: 123, unprocessedFileCount: -1 } },
     { method: 'artifacts.clear', channel: channels.artifactsClear, args: [], result: { deletedFileCount: 1, freedBytes: 42, failedFileCount: 0, remainingBytes: 123, remainingBytesEstimated: 'true' } },
   ])('rejects malformed $method outcomes', async ({ method, channel, args, result }) => {
@@ -381,12 +382,94 @@ describe('IPC Host contract wiring', () => {
 });
 
 describe('IPC export destinations', () => {
-  it('uses a save-file dialog only for one explicitly selected page', async () => {
+  it('rejects unbound media operations before opening dialogs or calling the Host', async () => {
+    const fake = createImmediateBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(701);
+    await expect(invoke(channels.play, event, path.resolve('cache'), [{ avid: '100' }], 'system', false)).rejects.toThrow(/indexToken/);
+    await expect(invoke(channels.exportMedia, event, path.resolve('cache'), [{ avid: '100' }], '', false)).rejects.toThrow(/indexToken/);
+    expect(fake.calls).toHaveLength(0);
+    expect(electronMocks.showOpenDialog).not.toHaveBeenCalled();
+  });
+
+  it('binds transcode confirmation and its directory to the originating window and target snapshot', async () => {
+    const requirement = { avid: '100', pageIndex: 1, title: 'P1', approvalToken: 'a'.repeat(64),
+      processingKind: 'audio-aac', reason: 'Audio codec', impact: 'Audio quality may change' };
+    const replies = { export: { published: false, outputPath: null, exportedCount: 0, failures: [], transcodeRequirements: [requirement] } };
+    const fake = createImmediateBridge(replies);
+    unregister = registerIpc(fake.bridge, () => null);
+    const owner = trustedEvent(401);
+    const root = path.resolve('cache');
+    const targets = [{ avid: '100', pageIndexes: [1] }];
+    const directory = path.resolve('chosen-export');
+    electronMocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [directory] });
+    const result = await invoke(channels.exportMedia, owner, root, targets, 'unused.mp4', false, undefined, 'index-1') as { confirmationId: string };
+    expect(result.confirmationId).toMatch(/^[a-f0-9-]{36}$/);
+    const confirmation = { id: result.confirmationId, approvals: [requirement.approvalToken] };
+    await expect(invoke(channels.exportMedia, trustedEvent(402), root, targets, '', false, confirmation, 'index-1')).rejects.toThrow();
+    await expect(invoke(channels.exportMedia, owner, root, [{ avid: '200' }], '', false, confirmation, 'index-1')).rejects.toThrow();
+    await expect(invoke(channels.exportMedia, owner, root, targets, '', false, confirmation, 'new-index')).rejects.toThrow();
+    await expect(invoke(channels.exportMedia, owner, root, targets, '', false, { ...confirmation, approvals: ['b'.repeat(64)] }, 'index-1')).rejects.toThrow();
+    replies.export = { published: false, outputPath: null, exportedCount: 0, failures: [], transcodeRequirements: [{ ...requirement, approvalToken: 'b'.repeat(64) }] };
+    await invoke(channels.exportMedia, owner, root, targets, '', false, confirmation, 'index-1');
+    expect(fake.calls[1].params).toMatchObject({ outputPath: directory, transcodeApprovals: ['a'.repeat(64)] });
+    await invoke(channels.exportMedia, owner, root, targets, '', false, { ...confirmation, approvals: ['b'.repeat(64)] }, 'index-1');
+    expect(fake.calls[2].params.transcodeApprovals).toEqual(['a'.repeat(64), 'b'.repeat(64)]);
+    expect(electronMocks.showOpenDialog).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['destroyed', 'unavailable', 'new-request', 'published'] as const)('invalidates old export confirmation after %s', async reason => {
+    const requirement = { avid: '100', pageIndex: 1, title: 'P1', approvalToken: 'a'.repeat(64),
+      processingKind: 'audio-aac', reason: 'Audio codec', impact: 'Audio quality may change' };
+    const replies: Record<string, unknown> = { export: { published: false, outputPath: null, exportedCount: 0, failures: [], transcodeRequirements: [requirement] } };
+    const fake = createImmediateBridge(replies);
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(710);
+    const root = path.resolve('cache');
+    const targets = [{ avid: '100', pageIndexes: [1] }];
+    electronMocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [path.resolve('exports')] });
+    const initial = await invoke(channels.exportMedia, event, root, targets, '', false, undefined, 'index-1') as { confirmationId: string };
+    const confirmation = { id: initial.confirmationId, approvals: [requirement.approvalToken] };
+    if (reason === 'destroyed') event.sender.emit('destroyed');
+    if (reason === 'unavailable') fake.bridge.emit('unavailable', 'Host exited');
+    if (reason === 'new-request') await invoke(channels.exportMedia, event, root, targets, '', false, undefined, 'index-1');
+    if (reason === 'published') {
+      replies.export = { published: true, outputPath: path.resolve('exports', 'cache-export'), exportedCount: 1, failures: [] };
+      await invoke(channels.exportMedia, event, root, targets, '', false, confirmation, 'index-1');
+    }
+    const count = fake.calls.length;
+    await expect(invoke(channels.exportMedia, event, root, targets, '', false, confirmation, 'index-1')).rejects.toThrow(/确认/);
+    expect(fake.calls).toHaveLength(count);
+  });
+
+  it('prevents duplicate export while preparing, but allows searches and retries after a failed batch', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(720);
+    const root = path.resolve('cache');
+    const targets = [{ avid: '100', pageIndexes: [1] }];
+    electronMocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [path.resolve('exports')] });
+    const first = invoke(channels.exportMedia, event, root, targets, '', false, undefined, 'index-1');
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(1));
+    await expect(invoke(channels.exportMedia, event, root, targets, '', false, undefined, 'index-1')).rejects.toThrow(/尚未结束/);
+    const search = invoke(channels.search, event, validSearchRequest());
+    fake.pending.get(fake.calls[1].id)!.resolve(validScanResult());
+    await search;
+    fake.pending.get(fake.calls[0].id)!.resolve({ published: false, outputPath: null, exportedCount: 0,
+      failures: [{ avid: '100', pageIndex: 1, title: 'P1', message: 'Disk full' }] });
+    const failed = await first as { confirmationId: string };
+    const retry = invoke(channels.exportMedia, event, root, targets, '', false, { id: failed.confirmationId, approvals: [] }, 'index-1');
+    fake.pending.get(fake.calls[2].id)!.resolve({ published: true, outputPath: path.resolve('exports', 'cache-export'), exportedCount: 1, failures: [] });
+    await retry;
+    expect(electronMocks.showOpenDialog).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a directory dialog even for one explicitly selected page', async () => {
     const fake = createImmediateBridge();
     unregister = registerIpc(fake.bridge, () => null);
     const event = trustedEvent(17);
-    const selectedPath = path.resolve('exports', 'one.mp4');
-    electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: selectedPath });
+    const selectedPath = path.resolve('exports');
+    electronMocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [selectedPath] });
 
     await invoke(
       channels.exportMedia,
@@ -395,13 +478,15 @@ describe('IPC export destinations', () => {
       [{ avid: '123', pageIndexes: [1] }],
       '../../renderer-controlled.mp4',
       false,
+      undefined,
+      'index-1',
     );
 
-    expect(electronMocks.showSaveDialog).toHaveBeenCalledWith(expect.objectContaining({
-      title: '导出 MP4',
-      defaultPath: path.join(path.resolve('downloads'), 'renderer-controlled.mp4'),
+    expect(electronMocks.showOpenDialog).toHaveBeenCalledWith(expect.objectContaining({
+      title: '选择 MP4 导出目录',
+      defaultPath: path.resolve('downloads'),
     }));
-    expect(electronMocks.showOpenDialog).not.toHaveBeenCalled();
+    expect(electronMocks.showSaveDialog).not.toHaveBeenCalled();
     expect(fake.calls.find((call) => call.method === 'export')?.params.outputPath).toBe(selectedPath);
   });
 
@@ -419,7 +504,7 @@ describe('IPC export destinations', () => {
       filePaths: [selectedDirectory],
     });
 
-    await invoke(channels.exportMedia, event, path.resolve('cache'), targets, 'batch.mp4', false);
+    await invoke(channels.exportMedia, event, path.resolve('cache'), targets, 'batch.mp4', false, undefined, 'index-1');
 
     expect(electronMocks.showOpenDialog).toHaveBeenCalledWith(expect.objectContaining({
       title: '选择 MP4 导出目录',
@@ -432,12 +517,31 @@ describe('IPC export destinations', () => {
 });
 
 describe('IPC trash root safety', () => {
+  it('requires the typed irreversible confirmation before any purge lookup or dialog', async () => {
+    const fake = createImmediateBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(601);
+    await expect(invoke(channels.trashPurge, event, path.resolve('cache'), ['one'], '删除')).rejects.toThrow(/永久删除/);
+    await expect(invoke(channels.trashPurgeSnapshot, event, path.resolve('cache'), 'snapshot')).rejects.toThrow(/永久删除/);
+    expect(fake.calls).toHaveLength(0);
+    expect(electronMocks.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it('binds trash move targets to the current index and retains exact undo identities', async () => {
+    const result = { moved: ['100:P2'], failed: [], entryIds: ['part-entry'] };
+    const fake = createImmediateBridge({ 'trash.move': result });
+    unregister = registerIpc(fake.bridge, () => null);
+    const targets = [{ avid: '100', pageIndexes: [2] }];
+    expect(await invoke(channels.trashMove, trustedEvent(602), path.resolve('cache'), 'index-1', targets)).toEqual(result);
+    expect(fake.calls[0].params).toEqual({ rootPath: path.resolve('cache'), indexToken: 'index-1', targets });
+  });
+
   it('reports the complete unprocessed snapshot when the native purge confirmation is cancelled', async () => {
     const fake = createImmediateBridge();
     unregister = registerIpc(fake.bridge, () => null);
     electronMocks.showMessageBox.mockResolvedValue({ response: 1 });
 
-    expect(await invoke(channels.trashPurge, trustedEvent(36), path.resolve('cache'), ['entry-1', 'entry-2']))
+    expect(await invoke(channels.trashPurge, trustedEvent(36), path.resolve('cache'), ['entry-1', 'entry-2'], '永久删除'))
       .toEqual({ purged: [], failed: [], cancelled: true, unprocessed: ['entry-1', 'entry-2'] });
     expect(fake.calls).toHaveLength(0);
   });
@@ -447,8 +551,8 @@ describe('IPC trash root safety', () => {
     unregister = registerIpc(fake.bridge, () => null);
     const event = trustedEvent(29);
 
-    await expect(invoke(channels.trashPurge, event, '', ['entry-1'])).rejects.toThrow('rootPath');
-    await expect(invoke(channels.trashPurge, event, path.resolve('cache'), [])).rejects.toThrow('至少包含 1 项');
+    await expect(invoke(channels.trashPurge, event, '', ['entry-1'], '永久删除')).rejects.toThrow('rootPath');
+    await expect(invoke(channels.trashPurge, event, path.resolve('cache'), [], '永久删除')).rejects.toThrow('至少包含 1 项');
 
     expect(electronMocks.showMessageBox).not.toHaveBeenCalled();
     expect(fake.calls.some((call) => call.method === 'trash.purge')).toBe(false);
@@ -461,7 +565,7 @@ describe('IPC trash root safety', () => {
     const rootPath = path.resolve('cache-b');
     electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
 
-    await invoke(channels.trashPurge, event, rootPath, ['entry-1', 'entry-2']);
+    await invoke(channels.trashPurge, event, rootPath, ['entry-1', 'entry-2'], '永久删除');
 
     expect(electronMocks.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
       detail: expect.stringContaining(rootPath),
@@ -470,6 +574,7 @@ describe('IPC trash root safety', () => {
       rootPath,
       entryIds: ['entry-1', 'entry-2'],
       confirmed: true,
+      confirmationText: '永久删除',
     });
   });
 
@@ -481,12 +586,13 @@ describe('IPC trash root safety', () => {
     const entryIds = Array.from({ length: 1_001 }, (_, index) => `entry-${index}`);
     electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
 
-    await invoke(channels.trashPurge, event, rootPath, entryIds);
+    await invoke(channels.trashPurge, event, rootPath, entryIds, '永久删除');
 
     expect(fake.calls.find((call) => call.method === 'trash.purge')?.params).toEqual({
       rootPath,
       entryIds,
       confirmed: true,
+      confirmationText: '永久删除',
     });
   });
 });

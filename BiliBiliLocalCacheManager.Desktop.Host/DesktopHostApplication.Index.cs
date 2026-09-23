@@ -1,4 +1,5 @@
 using System.Text.Json;
+using BiliBiliLocalCacheManager.Core.Application.Contracts;
 using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Core.Domain.Models;
 using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
@@ -8,6 +9,10 @@ namespace BiliBiliLocalCacheManager.Desktop.Host;
 internal sealed partial class DesktopHostApplication
 {
     private CurrentIndexSnapshot? _indexSnapshot;
+
+    private void ReportPartCaptureProgress(string requestId, string operation, int count)
+        => ReportProgress(new HostProgressEvent(requestId, operation, "verifying", Current: count,
+            Details: new { processedSegmentDirectories = count }, Phase: "measure"));
 
     private long ReadIndexGeneration() { lock (_stateSync) return _indexGeneration; }
 
@@ -59,6 +64,7 @@ internal sealed partial class DesktopHostApplication
         public string Root { get; }
         public IReadOnlyList<CacheScanIssue> Issues { get; }
         public IReadOnlyDictionary<long, CacheSummaryDto> Summaries { get; }
+        private readonly Dictionary<(long Avid, int PageIndex), (CacheTrashPartTarget? Target, string? Error)> _trashParts = new();
 
         public CurrentIndexSnapshot(CacheIndex index, string token, string root, IReadOnlyList<CacheScanIssue> issues)
         {
@@ -68,6 +74,42 @@ internal sealed partial class DesktopHostApplication
             Issues = issues.Take(100).ToArray();
             Summaries = index.VideoCaches.ToDictionary(cache => cache.Avid, MapCacheSummary);
         }
+
+        public void CaptureTrashPartTargets(ICacheTrashService trashService, CancellationToken cancellationToken, Action<int>? progress)
+        {
+            var processed = 0;
+            foreach (var cache in Index.VideoCaches)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var overlapping = cache.Segments.GroupBy(segment => segment.SegmentDirectory, PathComparer)
+                    .Where(group => group.Select(segment => segment.PageIndex).Distinct().Skip(1).Any())
+                    .Select(group => group.Key).ToHashSet(PathComparer);
+                foreach (var page in cache.Segments.GroupBy(segment => segment.PageIndex))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var segments = page.ToArray();
+                    var key = (cache.Avid, page.Key);
+                    if (segments.Select(segment => segment.SegmentDirectory).Distinct(PathComparer).Count() != 1 ||
+                        overlapping.Contains(segments[0].SegmentDirectory))
+                    {
+                        _trashParts[key] = (null, "该分 P 对应多个或重叠物理目录，无法安全确定删除范围。");
+                    }
+                    else
+                    {
+                        try { _trashParts[key] = (trashService.CapturePartTarget(Root, segments[0]), null); }
+                        catch (Exception exception) when (IsTrashItemFailure(exception) || exception is NotSupportedException or JsonException)
+                        {
+                            _trashParts[key] = (null, $"无法安全绑定分 P 目录：{exception.Message}");
+                        }
+                    }
+                    progress?.Invoke(++processed);
+                }
+            }
+        }
+
+        public (CacheTrashPartTarget? Target, string? Error) GetTrashPart(long avid, int pageIndex)
+            => _trashParts.TryGetValue((avid, pageIndex), out var target)
+                ? target : (null, "当前索引中不存在该分 P，请重新扫描。");
 
         public IReadOnlyCollection<BiliVideoCache> Search(CacheSearchOptions options, CancellationToken cancellationToken)
         {

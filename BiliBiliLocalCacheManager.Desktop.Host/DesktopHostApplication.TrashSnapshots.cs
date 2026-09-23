@@ -60,7 +60,7 @@ internal sealed partial class DesktopHostApplication
     private async Task<object> PurgeTrashSnapshotAsync(JsonElement parameters, CancellationToken cancellationToken)
     {
         if (!OperatingSystem.IsWindows()) throw new RpcException("unsupported_platform", "Permanent trash purge is disabled outside Windows.");
-        if (parameters.OptionalBoolean("confirmed") != true)
+        if (!HasTrashPurgeConfirmation(parameters))
             throw new RpcException("confirmation_required", "trash.purgeSnapshot requires params.confirmed=true because it is irreversible.");
         var root = ResolveExplicitRequiredRoot(parameters);
         var token = parameters.RequireString("snapshotToken");

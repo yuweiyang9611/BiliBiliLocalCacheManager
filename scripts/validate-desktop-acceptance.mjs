@@ -4,10 +4,13 @@ import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export function expectedAssets(version) {
+export function expectedAssets(version, schemaVersion = 2) {
+  requireValue(schemaVersion === 1 || schemaVersion === 2, 'Unsupported acceptance schema.');
   return [
-    `BiliBiliLocalCacheManager-cli-v${version}-linux-x64.tar.gz`,
-    `BiliBiliLocalCacheManager-cli-v${version}-win-x64.zip`,
+    ...(schemaVersion === 1 ? [
+      `BiliBiliLocalCacheManager-cli-v${version}-linux-x64.tar.gz`,
+      `BiliBiliLocalCacheManager-cli-v${version}-win-x64.zip`,
+    ] : []),
     `BiliBiliLocalCacheManager-${version}-linux-x64.deb`,
     `BiliBiliLocalCacheManager-${version}-linux-x64.rpm`,
     `BiliBiliLocalCacheManager-${version}-windows-x64.exe`,
@@ -26,9 +29,10 @@ function sameSet(left, right) {
 
 export async function validateAcceptance({ record, assetsDirectory, tag, commit }) {
   requireValue(/^v\d+\.\d+\.\d+$/.test(tag), 'Only stable version tags may be promoted.');
-  requireValue(record.schemaVersion === 1 && record.tag === tag, 'Acceptance schema or tag does not match.');
+  requireValue((record.schemaVersion === 1 || record.schemaVersion === 2) && record.tag === tag,
+    'Acceptance schema or tag does not match.');
   requireValue(/^[0-9a-f]{40}$/.test(commit) && record.commit === commit, 'Acceptance commit does not match the tag.');
-  const expected = expectedAssets(tag.slice(1));
+  const expected = expectedAssets(tag.slice(1), record.schemaVersion);
   requireValue(Array.isArray(record.assets) && sameSet(record.assets.map(value => value.name), expected), 'Acceptance asset set is incomplete or duplicated.');
   const files = await readdir(assetsDirectory);
   requireValue(sameSet(files.filter(name => name !== 'desktop-acceptance.json'), [...expected, 'SHA256SUMS.txt']), 'Release asset set does not match.');

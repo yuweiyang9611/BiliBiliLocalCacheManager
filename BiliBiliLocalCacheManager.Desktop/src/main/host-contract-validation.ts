@@ -19,6 +19,7 @@ import type {
   MediaFailure,
   PlaybackBatchResult,
   ExportBatchResult,
+  ExportTranscodeRequirement,
 } from '../shared/contracts';
 import {
   DESKTOP_HOST_PROTOCOL_VERSION,
@@ -103,9 +104,21 @@ export function validateExportBatchResult(value: unknown): ExportBatchResult {
   const outputPath = source.outputPath == null ? null : string(source.outputPath, 'export.outputPath', 32_768);
   const exportedCount = integer(source.exportedCount, 'export.exportedCount');
   const failures = mediaFailures(source.failures);
-  if (published ? !outputPath || exportedCount === 0 || failures.length > 0 : exportedCount !== 0 || outputPath !== null)
+  const transcodeRequirements: ExportTranscodeRequirement[] = source.transcodeRequirements == null ? [] :
+    array(source.transcodeRequirements, 'export.transcodeRequirements', 10_000).map(value => {
+      const item = record(value, 'export.transcodeRequirement');
+      const approvalToken = string(item.approvalToken, 'export.approvalToken', 64);
+      if (!/^[0-9a-f]{64}$/.test(approvalToken) || item.processingKind !== 'audio-aac')
+        invalid('export transcode approval or processing kind is invalid');
+      return { avid: string(item.avid, 'export.avid', 64), pageIndex: integer(item.pageIndex, 'export.pageIndex'),
+        title: string(item.title, 'export.title'), approvalToken, processingKind: 'audio-aac',
+        reason: string(item.reason, 'export.reason'), impact: string(item.impact, 'export.impact') };
+    });
+  if (new Set(transcodeRequirements.map(item => item.approvalToken)).size !== transcodeRequirements.length)
+    invalid('export transcode requirements are duplicated');
+  if (published ? !outputPath || exportedCount === 0 || failures.length > 0 || transcodeRequirements.length > 0 : exportedCount !== 0 || outputPath !== null)
     invalid('export result is inconsistent');
-  return { published, outputPath, exportedCount, failures };
+  return { published, outputPath, exportedCount, failures, transcodeRequirements };
 }
 
 export function validateArtifactCleanupResult(value: unknown): ArtifactCleanupResult {
@@ -123,12 +136,41 @@ export function validateArtifactCleanupResult(value: unknown): ArtifactCleanupRe
 
 export function validateTrashMoveResult(value: unknown): TrashMoveResult {
   const source = record(value, 'trash.move');
-  return { moved: diskIds(source.moved, 'trash.move.moved', 1_000), ...trashOutcome(source, 'trash.move', 1_000) };
+  const moved = diskIds(source.moved, 'trash.move.moved', 20_000);
+  const entryIds = source.entryIds === undefined ? undefined : diskIds(source.entryIds, 'trash.move.entryIds', 20_000);
+  const committedIds = new Set(entryIds);
+  if (entryIds && (entryIds.length !== moved.length || committedIds.size !== entryIds.length))
+    invalid('trash.move entry identities do not match moved items');
+  const items = source.items === undefined ? undefined : array(source.items, 'trash.move.items', 20_000).map(value => {
+    const item = record(value, 'trash.move.item');
+    const succeeded = boolean(item.succeeded, 'trash.move.item.succeeded');
+    const entryId = item.entryId == null ? undefined : diskIds([item.entryId], 'trash.move.item.entryId', 1)[0];
+    if (succeeded && (!entryId || !committedIds.has(entryId))) invalid('trash.move item has no committed entry identity');
+    if (!succeeded && entryId) invalid('trash.move failed item has an entry identity');
+    return { avid: string(item.avid, 'trash.move.item.avid', 64), succeeded,
+      ...(item.pageIndex == null ? {} : { pageIndex: integer(item.pageIndex, 'trash.move.item.pageIndex') }),
+      ...(entryId === undefined ? {} : { entryId }),
+      ...(item.error == null ? {} : { error: string(item.error, 'trash.move.item.error') }) };
+  });
+  if (items && entryIds && (items.filter(item => item.succeeded).length !== entryIds.length ||
+      new Set(items.filter(item => item.succeeded).map(item => item.entryId)).size !== entryIds.length))
+    invalid('trash.move item identities are inconsistent');
+  return { moved, ...trashOutcome(source, 'trash.move', 20_000),
+    ...(entryIds === undefined ? {} : { entryIds }), ...(items === undefined ? {} : { items }) };
 }
 
 export function validateTrashRestoreResult(value: unknown): TrashRestoreResult {
   const source = record(value, 'trash.restore');
-  return { restored: diskIds(source.restored, 'trash.restore.restored', 1_000), ...trashOutcome(source, 'trash.restore', 1_000) };
+  const items = source.items === undefined ? undefined : array(source.items, 'trash.restore.items', 20_000).map(value => {
+    const item = record(value, 'trash.restore.item');
+    return { entryId: diskIds([item.entryId], 'trash.restore.item.entryId', 1)[0],
+      succeeded: boolean(item.succeeded, 'trash.restore.item.succeeded'),
+      ...(item.avid == null ? {} : { avid: string(item.avid, 'trash.restore.item.avid', 64) }),
+      ...(item.pageIndex == null ? {} : { pageIndex: integer(item.pageIndex, 'trash.restore.item.pageIndex') }),
+      ...(item.error == null ? {} : { error: string(item.error, 'trash.restore.item.error') }) };
+  });
+  return { restored: diskIds(source.restored, 'trash.restore.restored', 20_000), ...trashOutcome(source, 'trash.restore', 20_000),
+    ...(items === undefined ? {} : { items }) };
 }
 
 export function validateTrashPurgeResult(value: unknown): TrashPurgeResult {
@@ -199,6 +241,7 @@ function cacheEntry(value: unknown, label: string): CacheEntry {
     ownerName: string(source.ownerName, `${label}.ownerName`),
     durationSeconds: number(source.durationSeconds, `${label}.durationSeconds`),
     segmentCount: integer(source.segmentCount, `${label}.segmentCount`),
+    ...(source.pageCount == null ? {} : { pageCount: integer(source.pageCount, `${label}.pageCount`, 0, integer(source.segmentCount, `${label}.segmentCount`)) }),
     sizeBytes: integer(source.sizeBytes, `${label}.sizeBytes`, 0, Number.MAX_SAFE_INTEGER),
     isAllCompleted: boolean(source.isAllCompleted, `${label}.isAllCompleted`),
     lastUpdated: nullableString(source.lastUpdated, `${label}.lastUpdated`),
@@ -341,6 +384,7 @@ function trashEntry(value: unknown, label: string): TrashEntry {
     title: string(source.title, `${label}.title`),
     sizeBytes: integer(source.sizeBytes, `${label}.sizeBytes`, 0, Number.MAX_SAFE_INTEGER),
     deletedAt: nullableString(source.deletedAt, `${label}.deletedAt`),
+    ...(source.pageIndex == null ? {} : { pageIndex: integer(source.pageIndex, `${label}.pageIndex`) }),
     ...(source.originalPath === undefined || source.originalPath === null
       ? {}
       : { originalPath: string(source.originalPath, `${label}.originalPath`, 32_768) }),

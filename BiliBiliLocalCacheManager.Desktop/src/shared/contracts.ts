@@ -55,6 +55,7 @@ export interface CacheEntry {
   ownerName: string;
   durationSeconds: number;
   segmentCount: number;
+  pageCount?: number;
   sizeBytes: number;
   isAllCompleted: boolean;
   lastUpdated: string | null;
@@ -104,8 +105,10 @@ export interface ArtifactCleanupResult {
   remainingBytesEstimated?: boolean;
 }
 
-export interface TrashMoveResult { moved: string[]; failed: string[]; cancelled?: boolean; unprocessed?: string[] }
-export interface TrashRestoreResult { restored: string[]; failed: string[]; cancelled?: boolean; unprocessed?: string[] }
+export interface TrashMoveItem { avid: string; pageIndex?: number; succeeded: boolean; entryId?: string; error?: string }
+export interface TrashMoveResult { moved: string[]; failed: string[]; cancelled?: boolean; unprocessed?: string[]; entryIds?: string[]; items?: TrashMoveItem[] }
+export interface TrashRestoreItem { entryId: string; avid?: string; pageIndex?: number; succeeded: boolean; error?: string }
+export interface TrashRestoreResult { restored: string[]; failed: string[]; cancelled?: boolean; unprocessed?: string[]; items?: TrashRestoreItem[] }
 export interface TrashPurgeResult { purged: string[]; failed: string[]; cancelled?: boolean; unprocessed?: string[] }
 
 export interface TrashEntry {
@@ -115,6 +118,7 @@ export interface TrashEntry {
   sizeBytes: number;
   deletedAt: string | null;
   originalPath?: string;
+  pageIndex?: number | null;
 }
 
 export interface HostHealth {
@@ -163,7 +167,24 @@ export interface ScanResult extends CachePage {
 export interface ScanIssue { id: number; kind: string; path: string; message: string }
 export interface MediaFailure { avid: string; pageIndex: number | null; title: string; message: string }
 export interface PlaybackBatchResult { queued: number; failures: MediaFailure[] }
-export interface ExportBatchResult { outputPath: string | null; exportedCount: number; failures: MediaFailure[]; published: boolean }
+export interface ExportTranscodeRequirement {
+  avid: string;
+  pageIndex: number;
+  title: string;
+  approvalToken: string;
+  processingKind: 'audio-aac';
+  reason: string;
+  impact: string;
+}
+export interface ExportConfirmation { id: string; approvals: string[] }
+export interface ExportBatchResult {
+  outputPath: string | null;
+  exportedCount: number;
+  failures: MediaFailure[];
+  published: boolean;
+  transcodeRequirements?: ExportTranscodeRequirement[];
+  confirmationId?: string;
+}
 
 export interface SearchRequest {
   indexToken: string;
@@ -193,7 +214,8 @@ export interface SelectionTarget {
 }
 
 export interface HostProgress {
-  phase?: 'scan' | 'copy' | 'measure' | 'prepare' | 'probe' | 'concat' | 'mux' | 'fallback';
+  phase?: 'scan' | 'copy' | 'measure' | 'prepare' | 'probe' | 'concat' | 'mux' | 'fallback' | 'download' | 'verify' | 'extract'
+    | 'source-hash' | 'source-verify' | 'artifact-verify' | 'export-copy' | 'final-source-verify' | 'final-artifact-verify' | 'final-output-verify';
   requestId: string;
   operation: string;
   stage: string;
@@ -215,7 +237,7 @@ export interface DesktopInfo {
 
 export interface CacheManagerApi {
   getTrashPage(rootPath: string, options?: { snapshotToken?: string; offset?: number; pageSize?: number }): Promise<TrashPage>;
-  purgeTrashSnapshot(rootPath: string, snapshotToken: string): Promise<TrashPurgeResult | null>;
+  purgeTrashSnapshot(rootPath: string, snapshotToken: string, confirmationText: string): Promise<TrashPurgeResult | null>;
   cancelSearch(): Promise<boolean>;
   acknowledgeUncertain(requestId: string): Promise<boolean>;
   onOperationState(listener: (state: OperationState) => void): () => void;
@@ -234,12 +256,12 @@ export interface CacheManagerApi {
   cleanupTranscodeCache(): Promise<ArtifactCleanupResult>;
   clearTranscodeCache(): Promise<ArtifactCleanupResult | null>;
   openTranscodeCache(): Promise<boolean>;
-  moveToTrash(rootPath: string, avids: string[]): Promise<TrashMoveResult>;
+  moveToTrash(rootPath: string, indexToken: string, targets: SelectionTarget[]): Promise<TrashMoveResult>;
   listTrash(rootPath: string): Promise<TrashEntry[]>;
   restoreTrash(rootPath: string, entryIds: string[]): Promise<TrashRestoreResult>;
-  purgeTrash(rootPath: string, entryIds: string[]): Promise<TrashPurgeResult>;
-  play(rootPath: string, targets: SelectionTarget[], playerPreference: PlayerPreference, includeIncomplete: boolean): Promise<PlaybackBatchResult>;
-  exportMedia(rootPath: string, targets: SelectionTarget[], suggestedName: string, includeIncomplete: boolean): Promise<ExportBatchResult | null>;
+  purgeTrash(rootPath: string, entryIds: string[], confirmationText: string): Promise<TrashPurgeResult>;
+  play(rootPath: string, targets: SelectionTarget[], playerPreference: PlayerPreference, includeIncomplete: boolean, indexToken?: string): Promise<PlaybackBatchResult>;
+  exportMedia(rootPath: string, targets: SelectionTarget[], suggestedName: string, includeIncomplete: boolean, confirmation?: ExportConfirmation, indexToken?: string): Promise<ExportBatchResult | null>;
   exportDiagnostics(suggestedName: string, rootPath?: string): Promise<{ outputPath: string } | null>;
   getDesktopInfo(): Promise<DesktopInfo>;
   onProgress(listener: (progress: HostProgress) => void): () => void;
@@ -266,12 +288,12 @@ export interface TrashPage {
 export const defaultSettings: AppSettings = {
   rootPath: '',
   rememberRootPath: true,
-  scanOnStartup: false,
+  scanOnStartup: true,
   includeIncomplete: false,
   keyword: '',
   splitKeywords: true,
   anyKeywords: false,
-  includePartName: true,
+  includePartName: false,
   includeOwnerName: true,
   includeBvid: true,
   includeAvid: true,

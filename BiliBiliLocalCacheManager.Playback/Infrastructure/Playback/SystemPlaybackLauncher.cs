@@ -32,14 +32,7 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
         {
             if (candidate == PlayerKind.SystemDefault)
             {
-                var shellResult = LaunchWithShell(materializationResult.OutputPath);
-                if (shellResult.Succeeded ||
-                    effectiveOptions.PreferredPlayer == PlaybackPlayerPreference.SystemDefaultOnly)
-                {
-                    return shellResult;
-                }
-
-                continue;
+                return LaunchWithShell(materializationResult.OutputPath);
             }
 
             var player = DiscoverPlayer(candidate);
@@ -57,7 +50,7 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
             return LaunchWithKnownPlayer(player.Value, materializationResult.OutputPath);
         }
 
-        return PlaybackLaunchResult.Failure("未找到可用播放器。当前策略为系统默认优先，其次 mpv、VLC。");
+        return PlaybackLaunchResult.Failure("未找到指定播放器。");
     }
 
     private PlaybackLaunchResult LaunchWithKnownPlayer(DiscoveredPlayer player, string filePath)
@@ -130,10 +123,6 @@ public sealed class SystemPlaybackLauncher : IPlaybackLauncher
         switch (preferredPlayer)
         {
             case PlaybackPlayerPreference.SystemDefaultFirst:
-                yield return PlayerKind.SystemDefault;
-                yield return PlayerKind.Mpv;
-                yield return PlayerKind.Vlc;
-                yield break;
             case PlaybackPlayerPreference.SystemDefaultOnly:
                 yield return PlayerKind.SystemDefault;
                 yield break;
