@@ -4,7 +4,7 @@ using BiliBiliLocalCacheManager.Core.Domain.Models;
 namespace BiliBiliLocalCacheManager.Core.Application.Contracts;
 
 /// <summary>
-/// High-level cache operations for CLI and desktop clients.
+/// High-level cache operations for desktop clients.
 /// </summary>
 public interface ICacheManager
 {

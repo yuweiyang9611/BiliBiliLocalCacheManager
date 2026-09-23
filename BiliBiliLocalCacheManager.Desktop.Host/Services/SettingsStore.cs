@@ -89,6 +89,7 @@ internal sealed class SettingsStore
                                          document.RootElement.GetRawText(),
                                          FileSerializerOptions) ??
                                      new DesktopSettings();
+                PreservePersistedDefaults(futureSettings, document.RootElement);
                 Normalize(futureSettings);
                 return new SettingsState(
                     futureSettings,
@@ -102,6 +103,7 @@ internal sealed class SettingsStore
                                document.RootElement.GetRawText(),
                                FileSerializerOptions) ??
                            new DesktopSettings();
+            PreservePersistedDefaults(settings, document.RootElement);
             if (sourceVersion == 1)
             {
                 // Schema v1 always remembered the last root and scanned it implicitly.
@@ -127,6 +129,13 @@ internal sealed class SettingsStore
         {
             return RecoverCorrupt(exception.Message);
         }
+    }
+
+    private static void PreservePersistedDefaults(DesktopSettings settings, JsonElement persisted)
+    {
+        // A missing field in an existing file belongs to the old default, not a fresh install.
+        settings.ScanOnStartup = persisted.OptionalBoolean("ScanOnStartup") ?? false;
+        settings.IncludePartName = persisted.OptionalBoolean("IncludePartName") ?? true;
     }
 
     private SettingsState RecoverCorrupt(string reason)

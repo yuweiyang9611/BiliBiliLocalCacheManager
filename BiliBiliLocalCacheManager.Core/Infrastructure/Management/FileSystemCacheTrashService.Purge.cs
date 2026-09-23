@@ -351,9 +351,10 @@ public sealed partial class FileSystemCacheTrashService
         out TrashEntryNameIdentity identity)
     {
         var parts = name.Split('_');
+        var isPartEntry = parts.Length == 5 && parts[0] == "v2";
         var schemaVersion = 0;
         var valueOffset = 0;
-        if (parts.Length == 4 &&
+        if ((parts.Length == 4 || isPartEntry) &&
             parts[0].Length > 1 &&
             parts[0][0] == 'v' &&
             int.TryParse(
@@ -390,12 +391,18 @@ public sealed partial class FileSystemCacheTrashService
             return false;
         }
 
+        if (isPartEntry && (parts[4].Length != 64 || parts[4].Any(character => !char.IsAsciiHexDigit(character))))
+        {
+            identity = default!;
+            return false;
+        }
         identity = new TrashEntryNameIdentity(
             schemaVersion,
             avid,
             parts[valueOffset + 1],
             deletedAtUtc,
-            entryId);
+            entryId,
+            isPartEntry ? parts[4] : null);
         return true;
     }
 
@@ -411,7 +418,7 @@ public sealed partial class FileSystemCacheTrashService
         TrashEntryNameIdentity entryIdentity,
         PurgeDeletionProgress progress)
     {
-        if (entryIdentity.SchemaVersion != CurrentMetadataSchemaVersion)
+        if (entryIdentity.SchemaVersion is not (CurrentMetadataSchemaVersion or PartMetadataSchemaVersion))
         {
             return false;
         }
@@ -883,5 +890,6 @@ public sealed partial class FileSystemCacheTrashService
         long Avid,
         string TimestampToken,
         DateTime DeletedAtUtc,
-        Guid EntryId);
+        Guid EntryId,
+        string? PartIdentityHash = null);
 }

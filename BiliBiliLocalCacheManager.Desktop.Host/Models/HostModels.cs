@@ -6,7 +6,10 @@ namespace BiliBiliLocalCacheManager.Desktop.Host;
 
 internal sealed record MediaFailureDto(string Avid, int? PageIndex, string Title, string Message);
 internal sealed record PlaybackBatchResultDto(int Queued, IReadOnlyList<MediaFailureDto> Failures);
-internal sealed record ExportBatchResultDto(string? OutputPath, int ExportedCount, IReadOnlyList<MediaFailureDto> Failures, bool Published);
+internal sealed record ExportTranscodeRequirementDto(string Avid, int PageIndex, string Title,
+    string ApprovalToken, string ProcessingKind, string Reason, string Impact);
+internal sealed record ExportBatchResultDto(string? OutputPath, int ExportedCount, IReadOnlyList<MediaFailureDto> Failures,
+    bool Published, IReadOnlyList<ExportTranscodeRequirementDto>? TranscodeRequirements = null);
 
 internal sealed record HostProgressEvent(
     string RequestId,
@@ -29,7 +32,7 @@ internal sealed class DesktopSettings
 
     public bool RememberRootPath { get; set; } = true;
 
-    public bool ScanOnStartup { get; set; }
+    public bool ScanOnStartup { get; set; } = true;
 
     public bool IncludeIncomplete { get; set; }
 
@@ -39,7 +42,7 @@ internal sealed class DesktopSettings
 
     public bool AnyKeywords { get; set; }
 
-    public bool IncludePartName { get; set; } = true;
+    public bool IncludePartName { get; set; }
 
     public bool IncludeOwnerName { get; set; } = true;
 
@@ -111,7 +114,8 @@ internal sealed record CacheSummaryDto(
     long SizeBytes,
     bool IsAllCompleted,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
-    DateTimeOffset? LastUpdated);
+    DateTimeOffset? LastUpdated,
+    int? PageCount = null);
 
 internal sealed record CachePageDto(
     string IndexToken,
@@ -149,7 +153,8 @@ internal sealed record TrashEntryDto(
     string Title,
     long SizeBytes,
     DateTimeOffset? DeletedAt,
-    string? OriginalPath);
+    string? OriginalPath,
+    int? PageIndex = null);
 
 internal sealed record DiagnosticEvent(
     DateTimeOffset TimestampUtc,

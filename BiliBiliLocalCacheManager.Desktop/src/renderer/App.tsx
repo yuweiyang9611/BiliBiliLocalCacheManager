@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { AppSettings, CacheDetails, CacheEntry, DesktopCapabilities, DesktopInfo, HostHealth, OperationState, PlayerPreference, SearchRequest, SelectionTarget, StorageSnapshot, TrashEntry, TrashPage as TrashPageResult, ScanResult, MediaFailure } from '../shared/contracts';
+import type { AppSettings, CacheDetails, CacheEntry, DesktopCapabilities, DesktopInfo, HostHealth, OperationState, PlayerPreference, SearchRequest, SelectionTarget, StorageSnapshot, TrashEntry, TrashPage as TrashPageResult, ScanResult, MediaFailure, ExportConfirmation, ExportTranscodeRequirement } from '../shared/contracts';
 import { DEFAULT_CACHE_PAGE_SIZE, defaultSettings, emptyStorage } from '../shared/contracts';
 import { Icon, type IconName } from './components/Icon';
 import { buildPlaybackRetryTargets } from './playback-retry-targets';
@@ -7,9 +7,12 @@ import { cacheManager } from './cache-manager';
 import { errorCode } from '../shared/ipc-result';
 import { OperationProgress } from './components/OperationProgress';
 import { FailureList } from './components/FailureList';
+import { SelectionList } from './components/SelectionList';
+import { ConfirmationDialog, type Confirmation } from './components/ConfirmationDialog';
 import { useShortcuts } from './hooks/useShortcuts';
+import { useLibrarySelection } from './hooks/useLibrarySelection';
 import type { Page, Notice, Activity, CachePageState } from './ui-types';
-import { selectedBytes, safeName, dateStamp, formatBytes, trashTime, diskOutcomeKind, diskOutcomeMessage, artifactCleanupMessage } from './display';
+import { safeName, dateStamp, formatBytes, diskOutcomeKind, diskOutcomeMessage, artifactCleanupMessage } from './display';
 import { Modal } from './components/Common';
 import { LibraryPage } from './pages/LibraryPage';
 import { StoragePage } from './pages/StoragePage';
@@ -17,7 +20,7 @@ import { TrashPage } from './pages/TrashPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
 
-type UndoDeleteBatch = { rootPath: string; avids: string[] };
+type UndoDeleteBatch = { rootPath: string; entryIds: string[] };
 type RootBoundState<T> = { rootPath: string | null; value: T };
 type LegacySettingsMigration = { rootPath: string };
 type IndexBinding = { rootPath: string; includeIncomplete: boolean; indexToken: string };
@@ -27,7 +30,10 @@ type StartupScanStatus = 'not-required' | 'running' | 'completed' | 'failed' | '
 type BatchReport = {
   kind: 'play' | 'export'; rootPath: string; targets: SelectionTarget[];
   includeIncomplete: boolean; playerPreference: PlayerPreference;
-  status: 'success' | 'partial' | 'failed' | 'cancelled' | 'unknown'; succeeded: number; failures: MediaFailure[];
+  status: 'success' | 'partial' | 'failed' | 'cancelled' | 'unknown' | 'confirmation'; succeeded: number; failures: MediaFailure[];
+  indexToken?: string;
+  confirmationId?: string;
+  transcodeRequirements?: ExportTranscodeRequirement[];
   retryUnavailable?: string;
 };
 
@@ -55,6 +61,7 @@ export function App() {
   const [indexBinding, setIndexBinding] = useState<IndexBinding | null>(null);
   const [scanReport, setScanReport] = useState<ScanResult | null>(null);
   const [batchReport, setBatchReport] = useState<BatchReport | null>(null);
+  const [diskReport, setDiskReport] = useState<{ rootPath: string; title: string; failures: MediaFailure[] } | null>(null);
   const [focusedDetails, setFocusedDetails] = useState<CacheDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsOffset, setDetailsOffset] = useState(0);
@@ -64,9 +71,15 @@ export function App() {
   const [health, setHealth] = useState<HostHealth | null>(null);
   const [capabilities, setCapabilities] = useState<DesktopCapabilities>({ playback: true, exportMedia: true, cacheDetails: true, trashPurge: false, nativeWayland: false });
   const [desktop, setDesktop] = useState<DesktopInfo | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [focusedId, setFocusedId] = useState<string | null>(null);
-  const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<string>>(new Set());
+  const selection = useLibrarySelection(items, focusedDetails);
+  const { selectedIds, setSelectedIds, selectedSegmentIds, setSelectedSegmentIds, clearSelection, targets } = selection;
+  const [selectionVisible, setSelectionVisible] = useState(false);
+  const selectionItems = useMemo(() => selection.parts.length
+    ? selection.parts.map(({ video, segment }) => ({ id: `${video.avid}:${segment.pageIndex}`, title: video.title,
+      detail: `av${video.avid} · P${segment.pageIndex} ${segment.partName}` }))
+    : selection.videos.map(video => ({ id: video.id, title: video.title, detail: `av${video.avid} · 索引中 ${video.pageCount ?? video.segmentCount} 个分 P` })),
+  [selection.parts, selection.videos]);
   const [selectedTrashIds, setSelectedTrashIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>('正在连接 Desktop Host…');
   const [inspectionBusy, setInspectionBusy] = useState<string | null>(null);
@@ -87,7 +100,7 @@ export function App() {
   const [progressRevision, resetProgress] = useState(0);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
-  const [confirm, setConfirm] = useState<{ title: string; body: string; destructive?: boolean; action(): void } | null>(null);
+  const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const [legacySettingsMigration, setLegacySettingsMigration] = useState<LegacySettingsMigration | null>(null);
   const [undoDeleteBatch, setUndoDeleteBatch] = useState<UndoDeleteBatch | null>(null);
   const noticeId = useRef(0);
@@ -95,9 +108,11 @@ export function App() {
   const searchWasActive = useRef(false);
   const pendingSearch = useRef<QueuedSearch | null>(null);
   const latestSearchRevision = useRef(0);
+  const displayedSearch = useRef<SearchRequest | null>(null);
   const searchDrainActive = useRef(false);
   const resumePendingSearch = useRef<() => void>(() => undefined);
   const operationInFlight = useRef(true);
+  const allowReadOnly = useRef(false);
   const detailsRevision = useRef(0);
   const activeRootPath = settings.rootPath.trim();
   const activeRootPathRef = useRef(activeRootPath);
@@ -131,18 +146,17 @@ export function App() {
     window.setTimeout(() => setNotices((current) => current.filter((item) => item.id !== id)), 4_500);
   }, []);
 
-  const replaceLibraryItems = useCallback((nextItems: CacheEntry[] = [], page?: CachePageState) => {
+  const replaceLibraryItems = useCallback((nextItems: CacheEntry[] = [], page?: CachePageState, preserveSelection = false) => {
     void cacheManager.cancelCacheDetails().catch(() => undefined);
     setItems(nextItems);
     setCachePage(page ?? { ...initialCachePage, totalItems: nextItems.length });
-    setSelectedIds(new Set());
+    if (!preserveSelection) { clearSelection(); displayedSearch.current = null; }
     setFocusedId(null);
     setFocusedDetails(null);
     setDetailsOffset(0);
     detailsRevision.current += 1;
     setDetailsLoading(false);
-    setSelectedSegmentIds(new Set());
-  }, []);
+  }, [clearSelection]);
 
   const invalidateIndex = useCallback(() => {
     void cacheManager.cancelSearch().catch(() => undefined);
@@ -180,10 +194,11 @@ export function App() {
     }
   }, []);
 
-  const run = useCallback(async <T,>(label: string, operation: () => Promise<T>): Promise<T | undefined> => {
+  const run = useCallback(async <T,>(label: string, operation: () => Promise<T>, browsing = false): Promise<T | undefined> => {
     if (blockedOperations.current) { notify('info', '上次操作结果尚未确认，请先核对结果。'); return undefined; }
     if (operationInFlight.current || inspectionInFlight.current) return undefined;
     operationInFlight.current = true;
+    allowReadOnly.current = browsing;
     setBusy(label);
     try {
       return await operation();
@@ -200,6 +215,7 @@ export function App() {
       return undefined;
     } finally {
       operationInFlight.current = false;
+      allowReadOnly.current = false;
       setBusy(null);
       resetProgress(value => value + 1);
       resumePendingSearch.current();
@@ -377,7 +393,6 @@ export function App() {
     }
     const revision = ++detailsRevision.current;
     setFocusedDetails(null);
-    setSelectedSegmentIds(new Set());
     setDetailsLoading(true);
     void (async () => {
       try {
@@ -406,16 +421,6 @@ export function App() {
       void cacheManager.cancelCacheDetails().catch(() => undefined);
     };
   }, [detailsOffset, focusedItem, indexBinding?.indexToken, invalidateIndex, notify]);
-
-  const targets = useMemo<SelectionTarget[]>(() => {
-    if (focusedDetails && selectedSegmentIds.size > 0) {
-      return [{
-        avid: focusedDetails.avid,
-        pageIndexes: focusedDetails.segments.filter((segment) => selectedSegmentIds.has(segment.id)).map((segment) => segment.pageIndex),
-      }];
-    }
-    return items.filter((item) => selectedIds.has(item.id)).map((item) => ({ avid: item.avid }));
-  }, [focusedDetails, items, selectedIds, selectedSegmentIds]);
 
   const browse = useCallback(async () => {
     const completed = await run('正在验证缓存目录…', async () => {
@@ -463,7 +468,7 @@ export function App() {
   }, [applyScanResult, restoreAndRescan, activeRootPath, invalidateIndex, invalidateStorage, notify, replaceLibraryItems, reportScan, run, settings.includeIncomplete]);
 
   const drainSearchQueue = useCallback(async () => {
-    if (operationInFlight.current || !pendingSearch.current) return;
+    if ((operationInFlight.current && !allowReadOnly.current) || !pendingSearch.current) return;
     const queued = pendingSearch.current;
     pendingSearch.current = null;
     searchDrainActive.current = true;
@@ -472,7 +477,12 @@ export function App() {
       const result = await cacheManager.search(queued.request);
       const context = searchContextRef.current;
       if (queued.revision === latestSearchRevision.current && context.hasActiveIndex &&
-          sameSearchRequest(context.request, queued.request)) replaceLibraryItems(result.items, result);
+          sameSearchRequest(context.request, queued.request)) {
+        const sameDisplayedQuery = displayedSearch.current
+          ? sameSearchRequest(displayedSearch.current, queued.request) : queued.request.keyword === '';
+        replaceLibraryItems(result.items, result, sameDisplayedQuery);
+        displayedSearch.current = queued.request;
+      }
     } catch (error) {
       if (queued.revision !== latestSearchRevision.current || !searchContextRef.current.hasActiveIndex ||
           !sameSearchRequest(searchContextRef.current.request, queued.request)) return;
@@ -537,7 +547,7 @@ export function App() {
   }, [activeRootPath, hasActiveIndex, indexBinding, invalidateIndex, settings.includeIncomplete]);
 
   const cancelCurrentOperation = useCallback(async () => {
-    if (searchDrainActive.current) {
+    if (searchDrainActive.current && !operationInFlight.current) {
       latestSearchRevision.current += 1;
       pendingSearch.current = null;
       searchDrainActive.current = false;
@@ -557,24 +567,27 @@ export function App() {
   }, [detailsLoading, notify]);
 
   const updateSetting = useCallback(<K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
+    clearSelection();
     setSettings((current) => ({ ...current, [key]: value }));
-  }, []);
+  }, [clearSelection]);
 
   const play = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport) => {
     const requestedTargets = explicitTargets ?? targets;
     if (requestedTargets.length === 0) { notify('info', '请先选择缓存或分段。'); return; }
     if (!activeRootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
-    const context = { kind: 'play' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets,
+    const context = { kind: 'play' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets, indexToken: retry?.indexToken ?? indexBinding?.indexToken,
       playerPreference: retry?.playerPreference ?? settings.playerPreference, includeIncomplete: retry?.includeIncomplete ?? settings.includeIncomplete };
     setBatchReport(null);
     const result = await run('正在准备播放…', async () => {
-      try { return await cacheManager.play(context.rootPath, requestedTargets, context.playerPreference, context.includeIncomplete); }
+      try { return context.indexToken
+        ? await cacheManager.play(context.rootPath, requestedTargets, context.playerPreference, context.includeIncomplete, context.indexToken)
+        : await cacheManager.play(context.rootPath, requestedTargets, context.playerPreference, context.includeIncomplete); }
       catch (error) {
         setBatchReport({ ...context, status: isUnknownOutcome(error) ? 'unknown' : isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
           failures: [{ avid: '', pageIndex: null, title: '', message: describeError(error) }] });
         throw error;
       }
-    });
+    }, true);
     if (result) {
       const failures = result.failures;
       let retryTargets: SelectionTarget[] = [];
@@ -585,40 +598,50 @@ export function App() {
         status: result.queued === 0 ? 'failed' : failures.length ? 'partial' : 'success', succeeded: result.queued, failures });
       notify(result.queued === 0 ? 'error' : failures.length ? 'info' : 'success', `已将 ${result.queued} 个页面交给播放器，失败 ${failures.length} 项。`);
     }
-  }, [activeRootPath, notify, run, settings.includeIncomplete, settings.playerPreference, targets]);
+  }, [activeRootPath, indexBinding?.indexToken, notify, run, settings.includeIncomplete, settings.playerPreference, targets]);
 
-  const exportMedia = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport) => {
+  const exportMedia = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport, confirmation?: ExportConfirmation) => {
     const requestedTargets = explicitTargets ?? targets;
     if (requestedTargets.length === 0) { notify('info', '请先选择要导出的缓存或分段。'); return; }
     if (!activeRootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
     const title = targets.length === 1 && focusedItem ? safeName(focusedItem.title) : `缓存导出-${dateStamp()}`;
-    const context = { kind: 'export' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets,
+    const context = { kind: 'export' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets, indexToken: retry?.indexToken ?? indexBinding?.indexToken,
       includeIncomplete: retry?.includeIncomplete ?? settings.includeIncomplete, playerPreference: settings.playerPreference };
     setBatchReport(null);
     const result = await run('正在导出 MP4…', async () => {
-      try { return await cacheManager.exportMedia(context.rootPath, requestedTargets, `${title}.mp4`, context.includeIncomplete); }
+      try { return context.indexToken
+        ? await cacheManager.exportMedia(context.rootPath, requestedTargets, `${title}.mp4`, context.includeIncomplete, confirmation, context.indexToken)
+        : confirmation ? await cacheManager.exportMedia(context.rootPath, requestedTargets, `${title}.mp4`, context.includeIncomplete, confirmation)
+        : await cacheManager.exportMedia(context.rootPath, requestedTargets, `${title}.mp4`, context.includeIncomplete); }
       catch (error) {
         setBatchReport({ ...context, status: isUnknownOutcome(error) ? 'unknown' : isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
           failures: [{ avid: '', pageIndex: null, title: '', message: describeError(error) }] });
         throw error;
       }
-    });
+    }, true);
     if (result) {
-      setBatchReport({ ...context, status: result.published ? 'success' : 'failed', succeeded: result.exportedCount, failures: result.failures });
-      notify(result.published ? 'success' : 'error', result.published ? `已导出：${result.outputPath}` : '本批导出未发布，请查看失败明细。');
+      const needsConfirmation = Boolean(result.confirmationId && result.transcodeRequirements?.length);
+      setBatchReport({ ...context, status: result.published ? 'success' : needsConfirmation ? 'confirmation' : 'failed',
+        confirmationId: result.confirmationId, transcodeRequirements: result.transcodeRequirements,
+        succeeded: result.exportedCount, failures: result.failures });
+      notify(result.published ? 'success' : needsConfirmation ? 'info' : 'error', result.published ? `已导出：${result.outputPath}`
+        : needsConfirmation ? '本批尚未发布，需要确认转码。' : '本批导出未发布，请查看失败明细。');
     } else if (result === null) {
       setBatchReport({ ...context, status: 'cancelled', succeeded: 0, failures: [] });
     }
-  }, [activeRootPath, focusedItem, notify, run, settings.includeIncomplete, targets]);
+  }, [activeRootPath, focusedItem, indexBinding?.indexToken, notify, run, settings.includeIncomplete, targets]);
 
   const moveToTrash = useCallback(() => {
-    const avids = items.filter((item) => selectedIds.has(item.id)).map((item) => item.avid);
-    if (avids.length === 0) { notify('info', '请先选择要删除的缓存。'); return; }
+    const requestedTargets = targets.map(target => ({ ...target, ...(target.pageIndexes ? { pageIndexes: [...target.pageIndexes] } : {}) }));
+    if (!requestedTargets.length) { notify('info', '请先选择要删除的缓存。'); return; }
     const rootPath = activeRootPath;
     if (!rootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
+    const indexToken = indexBinding?.indexToken;
+    if (!hasActiveIndex || !indexToken) { notify('info', '请先扫描当前缓存目录，再删除。'); return; }
     setConfirm({
-      title: `移入回收站（${avids.length} 项）`,
-      body: '所选缓存将移动到应用回收站，之后仍可恢复。正在播放或导出的项目请先停止操作。',
+      title: `移入回收站（${selection.videoCount} 个视频）`,
+      body: `${selection.label}。${selectedSegmentIds.size ? '仅所选分 P 将移入回收站。' : '将移动整个视频目录，包括未完成或未被索引的内容。'}之后仍可恢复。`,
+      items: selectionItems,
       destructive: true,
       action: () => { void (async () => {
         if (activeRootPathRef.current !== rootPath) {
@@ -626,27 +649,24 @@ export function App() {
           return;
         }
         const completed = await run('正在移动到回收站…', async () => {
-          const result = await cacheManager.moveToTrash(rootPath, avids);
+          const result = await cacheManager.moveToTrash(rootPath, indexToken, requestedTargets);
           if (result.moved.length > 0) invalidateIndex();
-          return { result };
+          const scanResult = result.moved.length > 0 && !result.cancelled
+            ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete: settings.includeIncomplete, persistSettings: false, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
+            : null;
+          return { result, scanResult };
         });
         if (!completed) return;
-        if (completed.result.moved.length > 0) {
-          setIndexBinding(null);
-          replaceLibraryItems();
-        } else {
-          setSelectedIds(new Set());
-          setFocusedId(null);
-          setSelectedSegmentIds(new Set());
-        }
+        clearSelection();
         invalidateRootViews();
-        setUndoDeleteBatch(completed.result.moved.length > 0
-          ? { rootPath, avids: completed.result.moved }
-          : null);
+        if (completed.scanResult) applyScanResult(rootPath, settings.includeIncomplete, completed.scanResult);
+        if (completed.result.moved.length > 0) setUndoDeleteBatch(completed.result.entryIds?.length
+          ? { rootPath, entryIds: completed.result.entryIds } : null);
+        setDiskReport({ rootPath, title: '移入回收站', failures: diskFailureDetails(completed.result) });
         notify(diskOutcomeKind(completed.result), diskOutcomeMessage('移动', completed.result.moved.length, completed.result) + (completed.result.moved.length ? '可按 Ctrl+Z 撤销。' : ''));
       })(); },
     });
-  }, [activeRootPath, invalidateIndex, invalidateRootViews, items, notify, replaceLibraryItems, run, selectedIds]);
+  }, [activeRootPath, applyScanResult, clearSelection, hasActiveIndex, indexBinding?.indexToken, invalidateIndex, invalidateRootViews, notify, refreshAfterMutation, run, selectedSegmentIds.size, selection.label, selection.videoCount, selectionItems, settings.includeIncomplete, targets]);
 
   useEffect(() => {
     invalidateRootViews();
@@ -664,41 +684,21 @@ export function App() {
     const rootPath = batch.rootPath;
 
     const completed = await run('正在撤销删除…', async () => {
-      const entries: TrashEntry[] = [];
-      let page = await cacheManager.getTrashPage(rootPath, { pageSize: 200 });
-      entries.push(...page.items);
-      while (page.hasMore) {
-        page = await cacheManager.getTrashPage(rootPath, { snapshotToken: page.snapshotToken, offset: page.offset + page.pageSize, pageSize: 200 });
-        entries.push(...page.items);
-      }
-      const requestedAvids = new Set(batch.avids);
-      const newestByAvid = new Map<string, TrashEntry>();
-      for (const entry of [...entries].sort((left, right) => trashTime(right) - trashTime(left))) {
-        if (requestedAvids.has(entry.avid) && !newestByAvid.has(entry.avid)) newestByAvid.set(entry.avid, entry);
-      }
-      const entryIds = batch.avids.flatMap((avid) => {
-        const entry = newestByAvid.get(avid);
-        return entry ? [entry.id] : [];
-      });
-      const { result: restoreResult, scanResult } = await restoreAndRescan(rootPath, entryIds, settings.includeIncomplete);
+      const { result: restoreResult, scanResult } = await restoreAndRescan(rootPath, batch.entryIds, settings.includeIncomplete);
       return {
         restoreResult,
         scanResult,
-        missingCount: batch.avids.length - entryIds.length,
-        remainingAvids: batch.avids.filter(avid => {
-          const entry = newestByAvid.get(avid);
-          return entry && !restoreResult.restored.includes(entry.id);
-        }),
+        remainingEntryIds: batch.entryIds.filter(id => !restoreResult.restored.includes(id)),
       };
     });
     if (!completed) return;
-    setUndoDeleteBatch(completed.remainingAvids.length ? { rootPath, avids: completed.remainingAvids } : null);
+    setUndoDeleteBatch(completed.remainingEntryIds.length ? { rootPath, entryIds: completed.remainingEntryIds } : null);
     invalidateRootViews();
     if (completed.scanResult) {
       applyScanResult(rootPath, settings.includeIncomplete, completed.scanResult);
     }
-    const failedCount = completed.restoreResult.failed.length + completed.missingCount;
-    notify(failedCount ? 'error' : diskOutcomeKind(completed.restoreResult), diskOutcomeMessage('撤销删除', completed.restoreResult.restored.length, completed.restoreResult, failedCount));
+    setDiskReport({ rootPath, title: '撤销删除', failures: diskFailureDetails(completed.restoreResult) });
+    notify(diskOutcomeKind(completed.restoreResult), diskOutcomeMessage('撤销删除', completed.restoreResult.restored.length, completed.restoreResult));
   }, [applyScanResult, restoreAndRescan, activeRootPath, invalidateIndex, invalidateRootViews, notify, refreshAfterMutation, replaceLibraryItems, reportScan, run, settings.includeIncomplete, undoDeleteBatch]);
 
   const refreshStorage = useCallback(async (announce = true) => {
@@ -820,7 +820,7 @@ export function App() {
 
   const uiBusy = Boolean(busy) || Boolean(inspectionBusy) || detailsLoading || searching || operationsBlocked;
   const focusCache = useCallback((item: CacheEntry) => {
-    setDetailsOffset(0); setFocusedId(item.id); setSelectedSegmentIds(new Set());
+    setDetailsOffset(0); setFocusedId(item.id);
   }, []);
   const inspectionDisabled = !initialized || Boolean(inspectionBusy) || (Boolean(busy) && !operationsBlocked);
 
@@ -903,15 +903,31 @@ export function App() {
             {scanReport.issuesTruncated && <p>仅展示前 100 条问题，汇总计数包含全部条目。</p>}
           </section>}
           {batchReport && batchReport.rootPath === activeRootPath && <section className="result-panel" aria-label="操作结果">
-            <div className="panel-heading"><h2>{batchReport.kind === 'play' ? '播放' : '导出'}结果：{{ success: '全部成功', partial: '部分失败', failed: '失败', cancelled: '已取消', unknown: '结果无法确认' }[batchReport.status]}</h2>
+            <div className="panel-heading"><h2>{batchReport.kind === 'play' ? '播放' : '导出'}结果：{{ success: '全部成功', partial: '部分失败', failed: '失败', cancelled: '已取消', unknown: '结果无法确认', confirmation: '待确认转码' }[batchReport.status]}</h2>
               <button className="icon-button" title="关闭结果" aria-label="关闭操作结果" onClick={() => setBatchReport(null)}><Icon name="close" /></button></div>
             <p>{batchReport.kind === 'play' ? `已交给播放器 ${batchReport.succeeded} 项` : `已发布 ${batchReport.succeeded} 项`}，失败 {batchReport.failures.length} 项。</p>
             {batchReport.kind === 'export' && batchReport.status !== 'success' && batchReport.status !== 'unknown' && <p>本批导出未发布。重试将重新执行完整批次，并复用已生成的转码缓存。</p>}
             {batchReport.status === 'unknown' && <p>操作可能已经完成，请先核对输出文件或缓存状态。</p>}
             {batchReport.retryUnavailable && <p>{batchReport.retryUnavailable}</p>}
             {batchReport.failures.length > 0 && <FailureList failures={batchReport.failures} />}
-            {batchReport.status !== 'success' && batchReport.targets.length > 0 && <button className="button secondary" disabled={uiBusy}
+            {batchReport.status === 'confirmation' && <>
+              <SelectionList label="转码需求" items={(batchReport.transcodeRequirements ?? []).map(item => ({ id: item.approvalToken,
+                title: `${item.title} · av${item.avid} P${item.pageIndex}`, detail: `${item.reason}；${item.impact}` }))} />
+              <button className="button primary" disabled={uiBusy} onClick={() => void exportMedia(batchReport.targets, batchReport,
+                { id: batchReport.confirmationId!, approvals: batchReport.transcodeRequirements!.map(item => item.approvalToken) })}><Icon name="check" />确认转码并重试整批</button>
+            </>}
+            {batchReport.status !== 'success' && batchReport.status !== 'confirmation' && batchReport.targets.length > 0 && <button className="button secondary" disabled={uiBusy}
               onClick={() => void (batchReport.kind === 'play' ? play(batchReport.targets, batchReport) : exportMedia(batchReport.targets, batchReport))}><Icon name="refresh" />{batchReport.kind === 'play' ? '重试未成功项目' : '重试完整批次'}</button>}
+          </section>}
+          {diskReport?.rootPath === activeRootPath && diskReport.failures.length > 0 && <section className="result-panel" aria-label="磁盘操作问题">
+            <div className="panel-heading"><h2>{diskReport.title}问题</h2><button className="icon-button" title="关闭问题" aria-label="关闭磁盘问题" onClick={() => setDiskReport(null)}><Icon name="close" /></button></div>
+            <FailureList failures={diskReport.failures} />
+          </section>}
+          {page === 'library' && targets.length > 0 && <section className="result-panel" aria-label="当前选择">
+            <div className="panel-heading"><strong>{selection.label}</strong><div className="toolbar">
+              <button className="button ghost" onClick={() => setSelectionVisible(true)}><Icon name="check" />查看已选清单</button>
+              <button className="button ghost" onClick={clearSelection}><Icon name="close" />清空选择</button>
+            </div></div>
           </section>}
           {page === 'library' && <LibraryPage
             settings={settings} updateSetting={updateSetting} browse={browse} search={search} searchInput={searchInput}
@@ -919,7 +935,9 @@ export function App() {
             focus={focusCache} focusedItem={focusedItem}
             focusedDetails={focusedDetails} detailsLoading={detailsLoading} detailsOffset={detailsOffset} setDetailsOffset={setDetailsOffset}
             selectedSegmentIds={selectedSegmentIds} setSelectedSegmentIds={setSelectedSegmentIds}
-            cachePage={cachePage} pageTo={search} busy={uiBusy} play={play} exportMedia={exportMedia} moveToTrash={moveToTrash}
+            cachePage={cachePage} pageTo={search} busy={uiBusy}
+            readBusy={!initialized || Boolean(inspectionBusy) || (Boolean(busy) && !allowReadOnly.current)}
+            play={play} exportMedia={exportMedia} moveToTrash={moveToTrash}
             clear={clearLibrary}
           />}
           {page === 'storage' && <StoragePage
@@ -942,6 +960,7 @@ export function App() {
               const completed = await run('正在恢复缓存…', () => restoreAndRescan(rootPath, entryIds, settings.includeIncomplete));
               if (!completed) return;
               const restored = new Set(completed.result.restored);
+              setDiskReport({ rootPath, title: '恢复', failures: diskFailureDetails(completed.result) });
               if (activeRootPathRef.current === rootPath) {
                 setTrashState((current) => current.rootPath === rootPath
                   ? { rootPath, value: current.value.filter((entry) => !restored.has(entry.id)) }
@@ -963,8 +982,8 @@ export function App() {
             body: (() => {
               const chosen = all ? trash : trash.filter((entry) => selectedTrashIds.has(entry.id));
               return `缓存目录：${trashState.rootPath ?? '未加载'}；永久删除 ${all ? trashSnapshot?.totalItems ?? chosen.length : chosen.length} 项，共 ${formatBytes(all ? trashSnapshot?.totalSizeBytes ?? 0 : chosen.reduce((sum, entry) => sum + entry.sizeBytes, 0))}。此操作无法撤销。`;
-            })(), destructive: true,
-            action: () => { void (async () => {
+            })(), destructive: true, requiredText: '永久删除',
+            action: (confirmationText) => { void (async () => {
               const rootPath = trashState.rootPath;
               const chosen = all ? trash : trash.filter((entry) => selectedTrashIds.has(entry.id));
               const ids = chosen.map((entry) => entry.id);
@@ -972,8 +991,8 @@ export function App() {
               if (!ids.length) { notify('info', '没有可永久删除的条目。'); return; }
               const completed = await run('正在永久删除…', async () => {
                 const result = all && trashSnapshot
-                  ? await cacheManager.purgeTrashSnapshot(rootPath, trashSnapshot.snapshotToken)
-                  : await cacheManager.purgeTrash(rootPath, ids);
+                  ? await cacheManager.purgeTrashSnapshot(rootPath, trashSnapshot.snapshotToken, confirmationText)
+                  : await cacheManager.purgeTrash(rootPath, ids, confirmationText);
                 if (!result) return null;
                 return { result };
               });
@@ -1040,11 +1059,12 @@ export function App() {
           }} busy={uiBusy} />}
         </section>
 
-        <footer className="statusbar"><span>{inspectionBusy ?? busy ?? (detailsLoading ? '正在加载分段详情…' : items.length ? `当前显示 ${cachePage.offset + 1}–${cachePage.offset + items.length} / ${cachePage.totalItems} 条缓存，已选 ${selectedIds.size} 条 · ${formatBytes(selectedBytes(items, selectedIds))}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
+        <footer className="statusbar"><span>{inspectionBusy ?? busy ?? (detailsLoading ? '正在加载分段详情…' : items.length ? `当前显示 ${cachePage.offset + 1}–${cachePage.offset + items.length} / ${cachePage.totalItems} 条缓存，${selection.label} · ${formatBytes(selection.bytes)}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
       </main>
 
       <div className="toast-stack" aria-live="polite">{notices.map((notice) => <div key={notice.id} className={`toast ${notice.kind}`}><Icon name={notice.kind === 'error' ? 'warning' : 'check'} /><span>{notice.message}</span></div>)}</div>
-      {confirm && <Modal title={confirm.title} onClose={() => setConfirm(null)}><p>{confirm.body}</p><div className="modal-actions"><button className="button ghost" onClick={() => setConfirm(null)}>取消</button><button className={confirm.destructive ? 'button danger' : 'button primary'} onClick={() => { const action = confirm.action; setConfirm(null); action(); }}>确认</button></div></Modal>}
+      {selectionVisible && <Modal title={selection.label} onClose={() => setSelectionVisible(false)}><SelectionList items={selectionItems} /></Modal>}
+      {confirm && <ConfirmationDialog value={confirm} close={() => setConfirm(null)} />}
       {legacySettingsMigration && <Modal title="确认旧版缓存目录" onClose={() => undefined} closable={false}><p>旧版本记住了以下目录：</p><p className="migration-path">{legacySettingsMigration.rootPath}</p><p>请选择今后的启动行为。本次选择会保存，也可以稍后在“设置”中更改。</p><div className="modal-actions migration-actions"><button className="button ghost" disabled={Boolean(busy)} onClick={() => void resolveLegacySettingsMigration('forget')}>忘记目录</button><button className="button secondary" disabled={Boolean(busy)} onClick={() => void resolveLegacySettingsMigration('remember')}>仅记住，不扫描</button><button className="button primary" disabled={Boolean(busy)} onClick={() => void resolveLegacySettingsMigration('scan')}>启用并立即扫描</button></div></Modal>}
     </div>
   );
@@ -1053,6 +1073,11 @@ export function App() {
 
 function isUnknownOutcome(error: unknown): boolean {
   return errorCode(error) === 'OUTCOME_UNKNOWN';
+}
+function diskFailureDetails(result: { failed: string[]; items?: { succeeded: boolean; avid?: string; pageIndex?: number; entryId?: string; error?: string }[] }): MediaFailure[] {
+  const details = result.items?.filter(item => !item.succeeded).map(item => ({ avid: item.avid ?? '', pageIndex: item.pageIndex ?? null,
+    title: item.entryId ?? (item.avid ? `av${item.avid}` : '操作失败'), message: item.error ?? '操作失败' }));
+  return details?.length ? details : result.failed.map(id => ({ avid: '', pageIndex: null, title: id, message: '操作失败，请核对条目状态。' }));
 }
 
 function isCancellationError(error: unknown): boolean {

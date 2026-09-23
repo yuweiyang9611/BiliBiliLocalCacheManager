@@ -89,9 +89,14 @@ public sealed partial class FileSystemCacheTrashService
                 }
 
                 var inspection = InspectDirectoryTree(path, cancellationToken);
+                var partMetadata = pendingPurge ? null : ReadPartMetadata(path);
+                if (partMetadata is not null)
+                {
+                    originalPath = GetPartRestorePath(root, partMetadata);
+                }
                 var blockedReason = pendingPurge
                     ? "已进入永久清理，无法还原。"
-                    : Directory.Exists(originalPath)
+                    : Directory.Exists(originalPath) || File.Exists(originalPath)
                         ? "原始位置已存在同名目录。"
                         : null;
 
@@ -103,7 +108,8 @@ public sealed partial class FileSystemCacheTrashService
                     inspection.FileCount,
                     inspection.TotalBytes,
                     blockedReason is null,
-                    blockedReason));
+                    blockedReason,
+                    partMetadata?.PageIndex));
             }
             catch (UntrustedTrashEntryException ex)
             {

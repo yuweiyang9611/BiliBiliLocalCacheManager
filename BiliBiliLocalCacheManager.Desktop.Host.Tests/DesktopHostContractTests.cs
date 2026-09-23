@@ -32,8 +32,8 @@ public sealed partial class DesktopHostContractTests
         var settings = result.GetProperty("settings");
         Assert.Equal(string.Empty, settings.GetProperty("rootPath").GetString());
         Assert.True(settings.GetProperty("rememberRootPath").GetBoolean());
-        Assert.False(settings.GetProperty("scanOnStartup").GetBoolean());
-        Assert.True(settings.GetProperty("includePartName").GetBoolean());
+        Assert.True(settings.GetProperty("scanOnStartup").GetBoolean());
+        Assert.False(settings.GetProperty("includePartName").GetBoolean());
         Assert.True(settings.GetProperty("includeOwnerName").GetBoolean());
         Assert.True(settings.GetProperty("includeBvid").GetBoolean());
         Assert.True(settings.GetProperty("includeAvid").GetBoolean());
@@ -546,7 +546,8 @@ public sealed partial class DesktopHostContractTests
         var publishedDirectory = result.GetProperty("outputPath").GetString()!;
         Assert.Equal(Path.Combine(exportParent, "cache-export"), publishedDirectory);
         Assert.True(Directory.Exists(publishedDirectory));
-        Assert.Equal(2, Directory.EnumerateFiles(publishedDirectory, "*.mp4").Count());
+        Assert.True(File.Exists(Path.Combine(publishedDirectory, "Successful batch_AV717", "P001_Part 1.mp4")));
+        Assert.True(File.Exists(Path.Combine(publishedDirectory, "Successful batch_AV717", "P002_Part 2.mp4")));
         Assert.DoesNotContain(
             Directory.EnumerateDirectories(exportParent),
             path => Path.GetFileName(path).EndsWith(".staging", StringComparison.Ordinal));
@@ -630,7 +631,7 @@ public sealed partial class DesktopHostContractTests
             DispatchAsync(
                 application,
                 "trash.purge",
-                """{"confirmed":true,"entryIds":["not-used"]}"""));
+                """{"confirmed":true,"confirmationText":"永久删除","entryIds":["not-used"]}"""));
         Assert.Equal("invalid_params", missingRoot.Code);
 
         var missingIds = await Assert.ThrowsAsync<RpcException>(() =>
@@ -640,7 +641,7 @@ public sealed partial class DesktopHostContractTests
                 JsonSerializer.Serialize(new
                 {
                     rootPath = workspace.CacheRoot,
-                    confirmed = true
+                    confirmed = true, confirmationText = "永久删除"
                 })));
         Assert.Equal("invalid_params", missingIds.Code);
 
@@ -676,6 +677,7 @@ public sealed partial class DesktopHostContractTests
                 {
                     rootPath = workspace.CacheRoot,
                     confirmed = true,
+                    confirmationText = "永久删除",
                     entryIds = aboveLegacyBatchLimit
                 })));
         Assert.Equal("unsupported_operation", acceptedCompleteSnapshotSize.Code);
@@ -688,6 +690,7 @@ public sealed partial class DesktopHostContractTests
                 {
                     rootPath = workspace.CacheRoot,
                     confirmed = true,
+                    confirmationText = "永久删除",
                     entryIds = new[] { entryIds[0] }
                 })));
         Assert.Equal("unsupported_operation", partialSelection.Code);
@@ -718,6 +721,7 @@ public sealed partial class DesktopHostContractTests
                 {
                     rootPath = workspace.CacheRoot,
                     confirmed = true,
+                    confirmationText = "永久删除",
                     entryIds
                 })));
         Assert.Equal("unsupported_operation", staleSnapshot.Code);
@@ -741,6 +745,7 @@ public sealed partial class DesktopHostContractTests
             {
                 rootPath = workspace.CacheRoot,
                 confirmed = true,
+                confirmationText = "永久删除",
                 entryIds
             }));
         var pathComparer = OperatingSystem.IsWindows()
@@ -889,8 +894,8 @@ public sealed partial class DesktopHostContractTests
     public async Task PlaybackBatch_ReturnsPartialFailuresAndLaunchesOneOrderedPlaylist()
     {
         using var workspace = new HostTestWorkspace();
-        workspace.CreateCache(101, "First", 2);
-        workspace.CreateCache(102, "Second");
+        workspace.CreateCache(101, "First", 2, timestampOverride: 100);
+        workspace.CreateCache(102, "Second", timestampOverride: 200);
         var launcher = new QueueRecorder();
         var application = new DesktopHostApplication(launcher);
         var result = await DispatchAsync(application, "play", JsonSerializer.Serialize(new {
@@ -904,9 +909,9 @@ public sealed partial class DesktopHostContractTests
         Assert.Equal(999, failure.GetProperty("pageIndex").GetInt32());
         var paths = File.ReadAllLines(launcher.Path!).Where(line => !line.StartsWith('#')).ToArray();
         Assert.Equal(3, paths.Length);
-        Assert.Contains(Path.Combine("101", "c_1"), paths[0]);
-        Assert.Contains(Path.Combine("101", "c_2"), paths[1]);
-        Assert.Contains(Path.Combine("102", "c_1"), paths[2]);
+        Assert.Contains(Path.Combine("102", "c_1"), paths[0]);
+        Assert.Contains(Path.Combine("101", "c_1"), paths[1]);
+        Assert.Contains(Path.Combine("101", "c_2"), paths[2]);
     }
 
     [Fact]
@@ -1013,7 +1018,7 @@ public sealed partial class DesktopHostContractTests
             if (progress.Stage == "copying") cancellation.Cancel();
         };
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DispatchAsync(application, "export",
-            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, outputPath = destination,
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, outputPath = workspace.Root,
                 targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } } } }), cancellation.Token));
         Assert.Equal("previous file", File.ReadAllText(destination));
         Assert.Empty(Directory.EnumerateFiles(workspace.Root, "*.exporting"));
@@ -1082,9 +1087,9 @@ public sealed partial class DesktopHostContractTests
 
         public DesktopHostApplication CreateApplication() => new();
 
-        public void CreateCache(long avid, string title, int segmentCount = 1)
+        public void CreateCache(long avid, string title, int segmentCount = 1, long? timestampOverride = null)
         {
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var timestamp = timestampOverride ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             for (var pageIndex = 1; pageIndex <= segmentCount; pageIndex++)
             {
                 var segmentDirectory = Path.Combine(

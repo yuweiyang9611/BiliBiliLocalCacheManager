@@ -5,7 +5,7 @@ using FFMpegCore;
 
 namespace BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 
-public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
+public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder, IExportMediaProcessor
 {
     private static readonly TranscodeConcurrencyGate TranscodeGate = new(ReadConcurrencyLimit());
 
@@ -231,7 +231,8 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
         string outputPath,
         TimeSpan expectedDuration,
         IProgress<PlaybackPreparationProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<string>? requireAudioTranscode = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var tracker = new ProgressTracker(progress);
@@ -259,7 +260,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
             tracker.Report("Video analysed", 100d, "probe");
         }
 
-        if (!string.Equals(
+        if (requireAudioTranscode is null && !string.Equals(
                 audioAnalysis.PrimaryAudioStream?.CodecName,
                 "aac",
                 StringComparison.OrdinalIgnoreCase))
@@ -303,6 +304,7 @@ public sealed partial class FfmpegCoreTranscoder : IFfmpegTranscoder
             ex is FFMpegCore.Exceptions.FFMpegException or InvalidOperationException)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            requireAudioTranscode?.Invoke("Direct DASH stream copy failed; AAC audio conversion is required for the compatibility retry.");
             await MuxDashAudioFallbackAsync(
                     videoPath,
                     audioPath,

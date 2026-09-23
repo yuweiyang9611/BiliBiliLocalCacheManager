@@ -9,6 +9,42 @@ public sealed class FfmpegCoreTranscoderIntegrationTests(
 {
     [FfmpegIntegrationFact]
     [Trait("Category", "FFmpegIntegration")]
+    public async Task Export_PreservesCompatibleNonAacAudioWithoutRequestingTranscode()
+    {
+        using var workspace = fixture.CreateWorkspace();
+        var service = new BiliBiliLocalCacheManager.Playback.Services.CacheExportService(new PlaybackArtifactStore(workspace.ArtifactRoot));
+        var plan = CreateDashPlan(workspace, workspace.Mp3AudioPath, TimeSpan.FromSeconds(2));
+        var result = await service.MaterializeAsync(plan, [], null, default);
+        Assert.Equal("mp3", fixture.GetCodecName(result.OutputPath!, "a:0"));
+        Assert.Equal(fixture.GetPacketHashes(workspace.Mp3AudioPath, "a:0").ToArray(),
+            fixture.GetPacketHashes(result.OutputPath!, "a:0").ToArray());
+    }
+
+    [FfmpegIntegrationFact]
+    [Trait("Category", "FFmpegIntegration")]
+    public async Task Export_RequiresConsentDespitePreviouslyTranscodedPlaybackArtifact()
+    {
+        using var workspace = fixture.CreateWorkspace();
+        var store = new PlaybackArtifactStore(workspace.ArtifactRoot);
+        var plan = CreateDashPlan(workspace, workspace.WmaAudioPath, TimeSpan.FromSeconds(2));
+        var playback = await new DashPairPlaybackMaterializer(new FfmpegCoreTranscoder(), store)
+            .MaterializeAsync(plan, null, default);
+        Assert.True(playback.Succeeded);
+        var export = new BiliBiliLocalCacheManager.Playback.Services.CacheExportService(store);
+        var requirement = await Assert.ThrowsAsync<ExportTranscodeRequiredException>(() => export.MaterializeAsync(plan, [], null, default));
+        var approved = new[] { requirement.Requirement.ApprovalToken };
+        var result = await export.MaterializeAsync(plan, approved, null, default);
+        Assert.True(result.Succeeded);
+        Assert.NotEqual(playback.OutputPath, result.OutputPath);
+        Assert.Equal("aac", fixture.GetCodecName(result.OutputPath!, "a:0"));
+        Assert.Equal(fixture.GetPacketHashes(workspace.VideoPath, "v:0").ToArray(),
+            fixture.GetPacketHashes(result.OutputPath!, "v:0").ToArray());
+        Assert.Equal(result.OutputPath, (await export.MaterializeAsync(plan, approved, null, default)).OutputPath);
+        await Assert.ThrowsAsync<ExportTranscodeRequiredException>(() => export.MaterializeAsync(plan, [], null, default));
+    }
+
+    [FfmpegIntegrationFact]
+    [Trait("Category", "FFmpegIntegration")]
     public void MuxDashPairToMp4_ShouldCopyAacPacketsWithoutReencoding()
     {
         using var workspace = fixture.CreateWorkspace();

@@ -1,10 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AppSettings, CacheDetailsRequest, CacheManagerApi, HostProgress, PlayerPreference, SearchRequest, SelectionTarget } from '../shared/contracts';
+import type { AppSettings, CacheDetailsRequest, CacheManagerApi, HostProgress, SearchRequest } from '../shared/contracts';
 import { channels } from '../shared/channels';
 
 const api: CacheManagerApi = {
   getTrashPage: (rootPath, options) => ipcRenderer.invoke(channels.trashPage, rootPath, options),
-  purgeTrashSnapshot: (rootPath, token) => ipcRenderer.invoke(channels.trashPurgeSnapshot, rootPath, token),
+  purgeTrashSnapshot: (rootPath, token, confirmationText) => ipcRenderer.invoke(channels.trashPurgeSnapshot, rootPath, token, confirmationText),
   health: () => ipcRenderer.invoke(channels.health),
   getInitialState: () => ipcRenderer.invoke(channels.initialState),
   updateSettings: (patch: Partial<AppSettings>) => ipcRenderer.invoke(channels.settingsUpdate, patch),
@@ -23,14 +23,14 @@ const api: CacheManagerApi = {
   cleanupTranscodeCache: () => ipcRenderer.invoke(channels.artifactsCleanup),
   clearTranscodeCache: () => ipcRenderer.invoke(channels.artifactsClear),
   openTranscodeCache: () => ipcRenderer.invoke(channels.artifactsOpen),
-  moveToTrash: (rootPath: string, avids: string[]) => ipcRenderer.invoke(channels.trashMove, rootPath, avids),
+  moveToTrash: (rootPath, indexToken, targets) => ipcRenderer.invoke(channels.trashMove, rootPath, indexToken, targets),
   listTrash: (rootPath: string) => ipcRenderer.invoke(channels.trashList, rootPath),
   restoreTrash: (rootPath: string, entryIds: string[]) => ipcRenderer.invoke(channels.trashRestore, rootPath, entryIds),
-  purgeTrash: (rootPath: string, entryIds: string[]) => ipcRenderer.invoke(channels.trashPurge, rootPath, entryIds),
-  play: (rootPath: string, targets: SelectionTarget[], playerPreference: PlayerPreference, includeIncomplete: boolean) =>
-    ipcRenderer.invoke(channels.play, rootPath, targets, playerPreference, includeIncomplete),
-  exportMedia: (rootPath: string, targets: SelectionTarget[], suggestedName: string, includeIncomplete: boolean) =>
-    ipcRenderer.invoke(channels.exportMedia, rootPath, targets, suggestedName, includeIncomplete),
+  purgeTrash: (rootPath, entryIds, confirmationText) => ipcRenderer.invoke(channels.trashPurge, rootPath, entryIds, confirmationText),
+  play: (rootPath, targets, playerPreference, includeIncomplete, indexToken) =>
+    ipcRenderer.invoke(channels.play, rootPath, targets, playerPreference, includeIncomplete, indexToken),
+  exportMedia: (rootPath, targets, suggestedName, includeIncomplete, confirmation, indexToken) =>
+    ipcRenderer.invoke(channels.exportMedia, rootPath, targets, suggestedName, includeIncomplete, confirmation, indexToken),
   exportDiagnostics: (suggestedName: string, rootPath?: string) => ipcRenderer.invoke(channels.exportDiagnostics, suggestedName, rootPath),
   getDesktopInfo: () => ipcRenderer.invoke(channels.desktopInfo),
   onProgress: (listener: (progress: HostProgress) => void) => subscribe<HostProgress>(channels.progress, listener),

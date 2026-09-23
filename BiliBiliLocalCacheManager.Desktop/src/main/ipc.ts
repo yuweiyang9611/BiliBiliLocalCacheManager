@@ -1,5 +1,6 @@
 import { BrowserWindow, app, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
 import { mkdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
   AppSettings,
@@ -57,6 +58,26 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     onDestroyed(): void;
   };
   const activeRequests = new Map<number, SenderState>();
+  type ExportSession = {
+    id: string;
+    sender: IpcMainInvokeEvent['sender'];
+    rootPath: string;
+    targets: SelectionTarget[];
+    indexToken: string;
+    includeIncomplete: boolean;
+    outputPath?: string;
+    approved: Set<string>;
+    requested: Set<string>;
+    busy: boolean;
+    onDestroyed(): void;
+  };
+  const exportSessions = new Map<number, ExportSession>();
+  const clearExportSession = (senderId: number) => {
+    const session = exportSessions.get(senderId);
+    if (!session) return;
+    session.sender.removeListener('destroyed', session.onDestroyed);
+    exportSessions.delete(senderId);
+  };
   const handlers: Array<[string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown]> = [];
   const handle = (channel: string, listener: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) => {
     handlers.push([channel, listener]);
@@ -263,11 +284,13 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     if (openError) throw new Error(`无法打开转码缓存目录：${openError}`);
     return true;
   });
-  handle(channels.trashMove, async (event, rootPath, avids) => {
+  handle(channels.trashMove, async (event, rootPath, indexToken, targets) => {
     assertTrusted(event);
     return validateTrashMoveResult(await track(event, host<unknown>('trash.move', {
       rootPath: assertPath(rootPath, 'rootPath'),
-      avids: validateNonEmptyStringArray(avids, 'avids'),
+      indexToken: assertNonEmptyString(indexToken, 'indexToken', 128),
+      targets: validateTargets(targets).map(target => ({ avid: target.avid,
+        ...(target.pageIndexes ? { pageIndexes: target.pageIndexes } : {}) })),
     })));
   });
   handle(channels.trashList, (event, rootPath) => {
@@ -278,11 +301,12 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     assertTrusted(event);
     return validateTrashRestoreResult(await track(event, host<unknown>('trash.restore', {
       rootPath: assertPath(rootPath, 'rootPath'),
-      entryIds: validateNonEmptyStringArray(entryIds, 'entryIds'),
+      entryIds: validateNonEmptyStringArray(entryIds, 'entryIds', 20_000),
     })));
   });
-  handle(channels.trashPurge, async (event, rootPath, entryIds) => {
+  handle(channels.trashPurge, async (event, rootPath, entryIds, confirmationText) => {
     assertTrusted(event);
+    assertPurgeConfirmation(confirmationText);
     const validatedRoot = assertPath(rootPath, 'rootPath');
     const validatedIds = validateNonEmptyStringArray(entryIds, 'entryIds', 10_000);
     const parent = BrowserWindow.fromWebContents(event.sender) ?? getWindow() ?? undefined;
@@ -304,6 +328,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       rootPath: validatedRoot,
       entryIds: validatedIds,
       confirmed: true,
+      confirmationText,
     })));
   });
   handle(channels.trashPage, async (event, rootPath, options = {}) => {
@@ -318,8 +343,9 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       (request.snapshotToken !== undefined && result.snapshotToken !== request.snapshotToken)) throw new TypeError('Trash page does not match request.');
     return result;
   });
-  handle(channels.trashPurgeSnapshot, async (event, rootPath, token) => {
+  handle(channels.trashPurgeSnapshot, async (event, rootPath, token, confirmationText) => {
     assertTrusted(event);
+    assertPurgeConfirmation(confirmationText);
     const request = { rootPath: assertPath(rootPath, 'rootPath'), snapshotToken: assertNonEmptyString(token, 'snapshotToken', 128) };
     const snapshot = validateTrashPage(await track(event, host<unknown>('trash.page', { ...request, offset: 0, pageSize: 1 })));
     if (snapshot.snapshotToken !== request.snapshotToken || snapshot.offset !== 0 || snapshot.pageSize !== 1) throw new TypeError('Trash snapshot mismatch.');
@@ -329,11 +355,12 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       buttons: ['永久删除', '取消'], defaultId: 1, cancelId: 1, noLink: true };
     const confirmation = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
     if (confirmation.response !== 0) return null;
-    return validateTrashSnapshotPurgeResult(await track(event, host<unknown>('trash.purgeSnapshot', { ...request, confirmed: true })));
+    return validateTrashSnapshotPurgeResult(await track(event, host<unknown>('trash.purgeSnapshot', { ...request, confirmed: true, confirmationText })));
   });
-  handle(channels.play, async (event, rootPath, targets, playerPreference, includeIncomplete) => {
+  handle(channels.play, async (event, rootPath, targets, playerPreference, includeIncomplete, indexToken) => {
     assertTrusted(event);
     const call = host<unknown>('play', {
+      indexToken: assertNonEmptyString(indexToken, 'indexToken', 128),
       rootPath: assertPath(rootPath, 'rootPath'),
       targets: validateTargets(targets).map(target => ({ avid: target.avid, ...(target.pageIndexes ? { pageIndexes: target.pageIndexes } : {}) })),
       playerPreference: validatePlayer(playerPreference),
@@ -341,24 +368,62 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     });
     return validatePlaybackBatchResult(await track(event, call));
   });
-  handle(channels.exportMedia, async (event, rootPath, targets, suggestedName, includeIncomplete) => {
+  handle(channels.exportMedia, async (event, rootPath, targets, suggestedName, includeIncomplete, confirmation, indexToken) => {
     assertTrusted(event);
     const validatedRoot = assertPath(rootPath, 'rootPath');
     const validatedTargets = validateTargets(targets);
-    const outputPath = await chooseExportDestination(
-      event,
-      getWindow,
-      suggestedName,
-      requiresExportDirectory(validatedTargets) ? 'media-directory' : 'media-file',
-    );
-    if (!outputPath) return null;
-    const call = host<unknown>('export', {
-      rootPath: validatedRoot,
-      targets: validatedTargets.map(target => ({ avid: target.avid, ...(target.pageIndexes ? { pageIndexes: target.pageIndexes } : {}) })),
-      outputPath,
-      includeIncomplete: assertBoolean(includeIncomplete, 'includeIncomplete'),
-    });
-    return validateExportBatchResult(await track(event, call));
+    const incomplete = assertBoolean(includeIncomplete, 'includeIncomplete');
+    const validatedToken = assertNonEmptyString(indexToken, 'indexToken', 128);
+    const senderId = event.sender.id;
+    let session = exportSessions.get(senderId);
+    if (session?.busy) throw new Error('此窗口的导出尚未结束。');
+    if (confirmation !== undefined) {
+      if (!isRecord(confirmation) || !session || session.sender !== event.sender ||
+          confirmation.id !== session.id || session.rootPath !== validatedRoot || session.indexToken !== validatedToken ||
+          session.includeIncomplete !== incomplete || JSON.stringify(session.targets) !== JSON.stringify(validatedTargets))
+        throw new TypeError('导出确认已失效或与原始目标不一致。');
+      const approvals = validateStringArray(confirmation.approvals, 'approvals', 10_000);
+      if (approvals.some(token => !/^[0-9a-f]{64}$/.test(token) ||
+          (!session!.requested.has(token) && !session!.approved.has(token))))
+        throw new TypeError('导出确认包含未请求的转码许可。');
+      if (new Set([...session.approved, ...approvals]).size > 10_000) throw new TypeError('转码许可数量超出限制。');
+      for (const token of approvals) session.approved.add(token);
+    } else {
+      clearExportSession(senderId);
+      const onDestroyed = () => clearExportSession(senderId);
+      session = { id: randomUUID(), sender: event.sender, rootPath: validatedRoot, targets: validatedTargets,
+        indexToken: validatedToken, includeIncomplete: incomplete, approved: new Set(), requested: new Set(), busy: false, onDestroyed };
+      exportSessions.set(senderId, session);
+      event.sender.once('destroyed', onDestroyed);
+    }
+    session.busy = true;
+    try {
+      if (!session.outputPath) {
+        const outputPath = await chooseExportDestination(event, getWindow, suggestedName, 'media-directory');
+        if (!outputPath || event.sender.isDestroyed() || exportSessions.get(senderId) !== session) {
+          if (exportSessions.get(senderId) === session) clearExportSession(senderId);
+          return null;
+        }
+        session.outputPath = outputPath;
+      }
+      const result = validateExportBatchResult(await track(event, host<unknown>('export', {
+        rootPath: session.rootPath,
+        indexToken: session.indexToken,
+        targets: session.targets.map(target => ({ avid: target.avid, ...(target.pageIndexes ? { pageIndexes: target.pageIndexes } : {}) })),
+        outputPath: session.outputPath,
+        includeIncomplete: session.includeIncomplete,
+        transcodeApprovals: [...session.approved],
+      })));
+      if (exportSessions.get(senderId) !== session) return result;
+      if (result.published) {
+        clearExportSession(senderId);
+        return result;
+      }
+      session.requested = new Set(result.transcodeRequirements?.map(item => item.approvalToken) ?? []);
+      return { ...result, confirmationId: session.id };
+    } finally {
+      session.busy = false;
+    }
   });
   handle(channels.exportDiagnostics, async (event, suggestedName, rootPath) => {
     assertTrusted(event);
@@ -405,7 +470,10 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       }
     }
   };
-  const onUnavailable = (message: string) => getWindow()?.webContents.send(channels.unavailable, message);
+  const onUnavailable = (message: string) => {
+    for (const senderId of exportSessions.keys()) clearExportSession(senderId);
+    getWindow()?.webContents.send(channels.unavailable, message);
+  };
   bridge.on('event', onEvent);
   bridge.on('unavailable', onUnavailable);
   bridge.on('operation-state', onOperationState);
@@ -417,6 +485,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
       for (const call of state.calls.values()) call.cancel();
     }
     activeRequests.clear();
+    for (const senderId of exportSessions.keys()) clearExportSession(senderId);
     bridge.off('event', onEvent);
     bridge.off('unavailable', onUnavailable);
     bridge.off('operation-state', onOperationState);
@@ -427,7 +496,7 @@ async function chooseExportDestination(
   event: IpcMainInvokeEvent,
   getWindow: () => BrowserWindow | null,
   suggestedName: unknown,
-  kind: 'media-file' | 'media-directory' | 'diagnostics',
+  kind: 'media-directory' | 'diagnostics',
 ): Promise<string | null> {
   const safeName = safeFileName(assertString(suggestedName, 'suggestedName', 160));
   const parent = BrowserWindow.fromWebContents(event.sender) ?? getWindow() ?? undefined;
@@ -444,22 +513,14 @@ async function chooseExportDestination(
     return result.canceled || !result.filePaths[0] ? null : path.resolve(result.filePaths[0]);
   }
   const options = {
-    title: kind === 'media-file' ? '导出 MP4' : '导出诊断报告',
+    title: '导出诊断报告',
     defaultPath: path.join(app.getPath('downloads'), safeName),
-    filters: kind === 'media-file'
-      ? [{ name: 'MP4 视频', extensions: ['mp4'] }]
-      : [{ name: 'ZIP 诊断包', extensions: ['zip'] }],
+    filters: [{ name: 'ZIP 诊断包', extensions: ['zip'] }],
   };
   const result = parent
     ? await dialog.showSaveDialog(parent, options)
     : await dialog.showSaveDialog(options);
   return result.canceled || !result.filePath ? null : path.resolve(result.filePath);
-}
-
-function requiresExportDirectory(targets: SelectionTarget[]): boolean {
-  if (targets.length !== 1) return true;
-  const pageIndexes = targets[0].pageIndexes;
-  return pageIndexes === undefined || new Set(pageIndexes).size !== 1;
 }
 
 function assertTrusted(event: IpcMainInvokeEvent): void {
@@ -566,6 +627,10 @@ function validateNonEmptyStringArray(value: unknown, name: string, maximumCount 
 function validatePlayer(value: unknown): PlayerPreference {
   if (value !== 'system' && value !== 'mpv' && value !== 'vlc') throw new TypeError('无效播放器偏好。');
   return value;
+}
+
+function assertPurgeConfirmation(value: unknown): asserts value is '永久删除' {
+  if (value !== '永久删除') throw new TypeError('请输入“永久删除”以确认不可恢复的清空操作。');
 }
 
 function optionalPath(value: unknown): string | undefined {

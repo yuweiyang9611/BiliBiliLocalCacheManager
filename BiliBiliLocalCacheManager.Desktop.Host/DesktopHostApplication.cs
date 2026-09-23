@@ -81,7 +81,8 @@ internal sealed partial class DesktopHostApplication
     public DesktopHostApplication(
         PlaybackContracts.IPlaybackLauncher? playbackLauncher = null,
         CoreContracts.ICacheTrashService? trashService = null,
-        CoreContracts.ICacheManager? cacheManager = null)
+        CoreContracts.ICacheManager? cacheManager = null,
+        PlaybackContracts.ICacheExportMaterializationService? exportService = null)
     {
         _cacheManager = cacheManager ?? new CacheManager();
         _desktopPlaybackLauncher = playbackLauncher ?? new SystemPlaybackLauncher();
@@ -96,6 +97,7 @@ internal sealed partial class DesktopHostApplication
             ? PlaybackArtifactStore.Shared
             : new PlaybackArtifactStore(transcodeCacheRoot);
         _playbackService = new CachePlaybackService(_artifactStore);
+        _exportService = exportService;
         _diagnosticExporter = new DiagnosticExporter(
             _eventRecorder,
             _ffmpegDiagnosticsProvider,
@@ -126,10 +128,10 @@ internal sealed partial class DesktopHostApplication
                 "storage.get" => await GetStorageAsync(requestId, parameters, cancellationToken),
                 "artifacts.cleanup" => await CleanupArtifactsAsync(requestId, cancellationToken),
                 "artifacts.clear" => await ClearArtifactsAsync(requestId, parameters, cancellationToken),
-                "trash.move" => await MoveToTrashAsync(parameters, cancellationToken),
+                "trash.move" => await MoveToTrashAsync(requestId, parameters, cancellationToken),
                 "trash.list" => await ListTrashAsync(parameters, cancellationToken),
                 "trash.page" => await ListTrashPageAsync(parameters, cancellationToken),
-                "trash.restore" => await RestoreTrashAsync(parameters, cancellationToken),
+                "trash.restore" => await RestoreTrashAsync(requestId, parameters, cancellationToken),
                 "trash.purge" => await PurgeTrashAsync(parameters, cancellationToken),
                 "trash.purgeSnapshot" => await PurgeTrashSnapshotAsync(parameters, cancellationToken),
                 "play" => await PlayAsync(requestId, parameters, cancellationToken),
@@ -334,7 +336,8 @@ internal sealed partial class DesktopHostApplication
                 $"av{entry.Avid}",
                 entry.TotalBytes,
                 entry.DeletedAtUtc,
-                entry.OriginalPath);
+                entry.OriginalPath,
+                entry.PageIndex);
         })
             .ToArray();
     }

@@ -61,7 +61,8 @@ internal sealed partial class DesktopHostApplication
                 report.Index,
                 root,
                 includeIncomplete,
-                DateTimeOffset.UtcNow, report.Issues, generation).Index;
+                DateTimeOffset.UtcNow, report.Issues, generation, cancellationToken: cancellationToken,
+                partCaptureProgress: count => ReportPartCaptureProgress(requestId, operation, count)).Index;
         }
         finally { _indexBuildGate.Release(); }
     }
@@ -107,7 +108,8 @@ internal sealed partial class DesktopHostApplication
             cache.Segments.Count,
             cache.TotalSize,
             cache.IsAllCompleted,
-            lastUpdated == DateTimeOffset.MinValue ? null : lastUpdated);
+            lastUpdated == DateTimeOffset.MinValue ? null : lastUpdated,
+            cache.Segments.Select(segment => segment.PageIndex).Distinct().Count());
     }
 
     private SegmentDto MapSegment(BiliSegment segment)
@@ -193,10 +195,13 @@ internal sealed partial class DesktopHostApplication
         DateTimeOffset completedAtUtc,
         IReadOnlyList<CacheScanIssue>? issues = null,
         long? expectedGeneration = null,
-        bool persistScanSettings = false)
+        bool persistScanSettings = false,
+        CancellationToken cancellationToken = default,
+        Action<int>? partCaptureProgress = null)
     {
         var orderedIndex = new CacheIndex(index.VideoCaches.OrderByDescending(GetLastUpdatedUtc).ThenBy(cache => cache.Avid));
         var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, issues ?? []);
+        snapshot.CaptureTrashPartTargets(_trashService, cancellationToken, partCaptureProgress);
         lock (_stateSync)
         {
             if (expectedGeneration is { } generation && generation != _indexGeneration) throw StaleIndexException();

@@ -47,6 +47,7 @@ public sealed class FfmpegIntegrationFixture : IDisposable
         VideoPath = Path.Combine(RootDirectory, "video.m4s");
         AacAudioPath = Path.Combine(RootDirectory, "audio-aac.m4s");
         WmaAudioPath = Path.Combine(RootDirectory, "audio-wma.wma");
+        Mp3AudioPath = Path.Combine(RootDirectory, "audio.mp3");
         CancellationAudioPath = Path.Combine(RootDirectory, "cancel.flac");
 
         RunFfmpeg(
@@ -78,6 +79,8 @@ public sealed class FfmpegIntegrationFixture : IDisposable
 
         // One hour of compressed silence is only a few megabytes, but keeps the
         // AAC fallback active long enough to exercise cancellation mid-process.
+        RunFfmpeg("-f", "lavfi", "-i", "sine=frequency=500:sample_rate=48000:duration=2",
+            "-vn", "-c:a", "libmp3lame", "-b:a", "96k", Mp3AudioPath);
         RunFfmpeg(
             "-f", "lavfi",
             "-i", "anullsrc=r=48000:cl=stereo",
@@ -98,6 +101,7 @@ public sealed class FfmpegIntegrationFixture : IDisposable
     public string AacAudioPath { get; } = string.Empty;
 
     public string WmaAudioPath { get; } = string.Empty;
+    public string Mp3AudioPath { get; } = string.Empty;
 
     public string CancellationAudioPath { get; } = string.Empty;
 
@@ -245,6 +249,7 @@ public sealed class FfmpegIntegrationWorkspace : IDisposable
         VideoPath = CopyToWorkspace(fixture.VideoPath);
         AacAudioPath = CopyToWorkspace(fixture.AacAudioPath);
         WmaAudioPath = CopyToWorkspace(fixture.WmaAudioPath);
+        Mp3AudioPath = CopyToWorkspace(fixture.Mp3AudioPath);
         if (includeCancellationAudio)
         {
             CancellationAudioPath = CopyToWorkspace(fixture.CancellationAudioPath);
@@ -258,6 +263,7 @@ public sealed class FfmpegIntegrationWorkspace : IDisposable
     public string AacAudioPath { get; }
 
     public string WmaAudioPath { get; }
+    public string Mp3AudioPath { get; }
 
     public string? CancellationAudioPath { get; }
 

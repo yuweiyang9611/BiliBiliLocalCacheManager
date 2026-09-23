@@ -178,6 +178,11 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
         EnsureRestoreIsNotPendingPurge(trashRoot, normalizedTrashPath);
         EnsureTrashIdentity(normalizedTrashPath, avid, originalPath);
 
+        if (ReadPartMetadata(normalizedTrashPath) is { } partMetadata)
+        {
+            return RestorePart(root, trashRoot, normalizedTrashPath, partMetadata);
+        }
+
         if (Directory.Exists(originalPath))
         {
             EnsurePhysicalDirectory(originalPath, "The original avid cache directory");
@@ -450,15 +455,21 @@ public sealed partial class FileSystemCacheTrashService : ICacheTrashService
             }
 
             if (!schemaElement.TryGetInt32(out var schemaVersion) ||
-                schemaVersion != CurrentMetadataSchemaVersion)
+                schemaVersion is not (CurrentMetadataSchemaVersion or PartMetadataSchemaVersion))
             {
                 throw new InvalidDataException(
                     $"不支持的回收站元数据版本：{schemaElement.GetRawText()}。");
             }
 
-            if (entryIdentity.SchemaVersion != CurrentMetadataSchemaVersion)
+            if (entryIdentity.SchemaVersion != schemaVersion)
             {
                 throw new InvalidDataException("回收站目录版本与元数据版本不匹配，已拒绝操作。");
+            }
+
+            if (schemaVersion == PartMetadataSchemaVersion)
+            {
+                ValidatePartMetadata(document.RootElement, entryIdentity);
+                return;
             }
 
             TrashMetadata metadata;

@@ -1,6 +1,7 @@
 import type { JsonValue } from '../shared/contracts';
 
-const phases = new Set(['scan', 'copy', 'measure', 'prepare', 'probe', 'concat', 'mux', 'fallback', 'download', 'verify', 'extract']);
+const phases = new Set(['scan', 'copy', 'measure', 'prepare', 'probe', 'concat', 'mux', 'fallback', 'download', 'verify', 'extract',
+  'source-hash', 'source-verify', 'artifact-verify', 'export-copy', 'final-source-verify', 'final-artifact-verify', 'final-output-verify']);
 
 export class HostProgressTracker {
   #item = 0;

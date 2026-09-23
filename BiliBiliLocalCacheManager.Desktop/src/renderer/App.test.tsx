@@ -40,7 +40,7 @@ const initialItem: CacheEntry = {
 };
 const initial: InitialState = {
   protocolVersion: 3,
-  settings: { ...defaultSettings, rootPath: 'D:\\Bilibili\\download' },
+  settings: { ...defaultSettings, rootPath: 'D:\\Bilibili\\download', scanOnStartup: false },
   settingsState: { canSave: true, sourceSchemaVersion: 2 },
   items: [initialItem],
   storage: emptyStorage,
@@ -90,7 +90,7 @@ function createApi(): CacheManagerApi {
       const pageSize = options?.pageSize ?? 100;
       return { snapshotToken: 'trash-snapshot', offset, pageSize, totalItems: items.length, totalSizeBytes: items.reduce((n, x) => n + x.sizeBytes, 0), hasMore: offset + pageSize < items.length, items: items.slice(offset, offset + pageSize) };
     }),
-    purgeTrashSnapshot: vi.fn().mockImplementation(async (rootPath) => api.purgeTrash(rootPath, (await api.listTrash(rootPath)).map(x => x.id))),
+    purgeTrashSnapshot: vi.fn().mockImplementation(async (rootPath, _snapshotToken, confirmationText) => api.purgeTrash(rootPath, (await api.listTrash(rootPath)).map(x => x.id), confirmationText)),
     health: vi.fn().mockResolvedValue({ protocolVersion: 3, status: 'ok', version: '1.0.0' }),
     getInitialState: vi.fn().mockResolvedValue(initial),
     updateSettings: vi.fn().mockImplementation(async (patch) => ({ ...initial.settings, ...patch })),
@@ -175,8 +175,10 @@ describe('desktop renderer', () => {
     expect(api.getTrashPage).toHaveBeenLastCalledWith(initial.settings.rootPath, { offset: 100, pageSize: 100, snapshotToken: 'trash-snapshot' });
     fireEvent.click(screen.getByRole('button', { name: '清空回收站' }));
     expect(screen.getByText('彻底清空回收站（205 项）')).toBeInTheDocument();
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: '确认' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('输入确认文字'), { target: { value: '永久删除' } });
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '确认' }));
-    await waitFor(() => expect(api.purgeTrashSnapshot).toHaveBeenCalledWith(initial.settings.rootPath, 'trash-snapshot'));
+    await waitFor(() => expect(api.purgeTrashSnapshot).toHaveBeenCalledWith(initial.settings.rootPath, 'trash-snapshot', '永久删除'));
     expect(api.purgeTrash).not.toHaveBeenCalled();
   });
   let api: CacheManagerApi;
@@ -193,6 +195,121 @@ describe('desktop renderer', () => {
   });
 
   afterEach(cleanup);
+
+  it('keeps selected videos when paging and submits the complete selection', async () => {
+    const second = { ...initialItem, id: '200', avid: '200', title: 'Second page video' };
+    vi.mocked(api.scan).mockResolvedValue(createCachePage([initialItem], { totalItems: 101, hasMore: true }));
+    vi.mocked(api.search).mockImplementation(async request => createCachePage(
+      request.offset ? [second] : [initialItem], { offset: request.offset, totalItems: 101, hasMore: !request.offset }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(within(screen.getByLabelText('缓存分页')).getByRole('button', { name: '下一页' }));
+    await screen.findByText('Second page video');
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 Second page video' }));
+    fireEvent.click(screen.getByRole('button', { name: '查看已选清单' }));
+    expect(within(screen.getByRole('dialog')).getByText('测试缓存')).toBeInTheDocument();
+    expect(within(screen.getByRole('dialog')).getByText('Second page video')).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '关闭' }));
+    fireEvent.click(screen.getByRole('button', { name: '播放' }));
+    await waitFor(() => expect(api.play).toHaveBeenCalledWith(initial.settings.rootPath,
+      [{ avid: '100' }, { avid: '200' }], 'system', false, indexToken));
+  });
+
+  it('selects logical parts across videos without losing them when inspecting another video', async () => {
+    const second = { ...initialItem, id: '200', avid: '200', title: 'Second video' };
+    vi.mocked(api.scan).mockResolvedValue(createCachePage([initialItem, second]));
+    vi.mocked(api.getCacheDetails).mockImplementation(async request => request.avid === '100'
+      ? createCacheDetails([{ ...initialSegments[0], id: '100:source-a' }])
+      : createCacheDetails([{ ...initialSegments[0], id: '200:source-b', pageIndex: 3, partName: 'Third part' }], { avid: '200', item: second }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await screen.findByText('Second video');
+    fireEvent.click(screen.getByText('测试缓存'));
+    fireEvent.click(await screen.findByRole('checkbox', { name: '选择分段 第一集' }));
+    fireEvent.click(screen.getByText('Second video'));
+    fireEvent.click(await screen.findByRole('checkbox', { name: '选择分段 Third part' }));
+    fireEvent.click(screen.getByRole('button', { name: '播放' }));
+    await waitFor(() => expect(api.play).toHaveBeenCalledWith(initial.settings.rootPath,
+      [{ avid: '100', pageIndexes: [1] }, { avid: '200', pageIndexes: [3] }], 'system', false, indexToken));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 Second video' }));
+    expect(screen.getByRole('checkbox', { name: '选择分段 Third part' })).not.toBeChecked();
+  });
+
+  it('searches during export without changing the submitted targets', async () => {
+    const exporting = deferred<Awaited<ReturnType<CacheManagerApi['exportMedia']>>>();
+    vi.mocked(api.exportMedia).mockReturnValue(exporting.promise);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    await waitFor(() => expect(api.exportMedia).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号'), { target: { value: 'other' } });
+    await waitFor(() => expect(api.search).toHaveBeenCalledWith(expect.objectContaining({ keyword: 'other' })));
+    expect(screen.getByRole('button', { name: '浏览缓存目录' })).toBeDisabled();
+    expect(vi.mocked(api.exportMedia).mock.calls[0][1]).toEqual([{ avid: '100' }]);
+    await act(async () => exporting.resolve({ published: true, outputPath: 'batch', exportedCount: 1, failures: [] }));
+  });
+
+  it('clears old-page selections made while a different query is still pending', async () => {
+    const pending = deferred<CachePage>();
+    vi.mocked(api.search).mockReturnValue(pending.promise);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号'), { target: { value: 'new' } });
+    await waitFor(() => expect(api.search).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    await act(async () => pending.resolve(createCachePage([{ ...initialItem, id: '200', avid: '200', title: 'New result' }])));
+    expect(screen.getByRole('button', { name: '播放' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: '查看已选清单' })).not.toBeInTheDocument();
+  });
+
+  it('requires explicit transcode consent and retries the original export snapshot', async () => {
+    const approvalToken = 'a'.repeat(64);
+    vi.mocked(api.exportMedia).mockResolvedValueOnce({ published: false, outputPath: null, exportedCount: 0, failures: [],
+      confirmationId: 'confirmation-1', transcodeRequirements: [{ avid: '100', pageIndex: 1, title: '测试缓存',
+        approvalToken, processingKind: 'audio-aac', reason: 'Unsupported audio', impact: 'Audio will be re-encoded' }] })
+      .mockResolvedValueOnce({ published: true, outputPath: 'batch', exportedCount: 1, failures: [] });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    expect(await screen.findByText('导出结果：待确认转码')).toBeInTheDocument();
+    expect(api.exportMedia).toHaveBeenCalledOnce();
+    expect(screen.getByText(/Audio will be re-encoded/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '清空选择' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认转码并重试整批' }));
+    await waitFor(() => expect(api.exportMedia).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.exportMedia).mock.calls[1][1]).toEqual([{ avid: '100' }]);
+    expect(vi.mocked(api.exportMedia).mock.calls[1][4]).toEqual({ id: 'confirmation-1', approvals: [approvalToken] });
+  });
+
+  it('deletes only selected parts and undoes the exact returned trash identities', async () => {
+    vi.mocked(api.moveToTrash).mockResolvedValue({ moved: ['100'], failed: [], entryIds: ['this-part-entry'] });
+    vi.mocked(api.restoreTrash).mockResolvedValue({ restored: ['this-part-entry'], failed: [] });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByText('测试缓存'));
+    fireEvent.click(await screen.findByRole('checkbox', { name: '选择分段 第一集' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('1 个视频中的 1 个分 P');
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '确认' }));
+    await waitFor(() => expect(api.moveToTrash).toHaveBeenCalledWith(initial.settings.rootPath, indexToken,
+      [{ avid: '100', pageIndexes: [1] }]));
+    await waitFor(() => expect(screen.getByRole('button', { name: /撤销删除/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /撤销删除/ }));
+    await waitFor(() => expect(api.restoreTrash).toHaveBeenCalledWith(initial.settings.rootPath, ['this-part-entry']));
+    expect(api.getTrashPage).not.toHaveBeenCalled();
+  });
 
   it('shows damaged scan entries and locates an issue using its index token', async () => {
     vi.mocked(api.scan).mockResolvedValue({ ...createCachePage(), invalidEntries: 2, hasWarnings: true,
@@ -698,6 +815,7 @@ describe('desktop renderer', () => {
       [{ avid: '200' }],
       'system',
       false,
+      indexToken,
     ));
   });
 
@@ -968,11 +1086,15 @@ describe('desktop renderer', () => {
   });
 
   it('keeps completed moves and undo after cancellation of the remaining batch', async () => {
+    vi.mocked(api.scan).mockResolvedValue(createCachePage([...initial.items, { ...initialItem, id: '101', avid: '101', title: '第二项' }]));
     vi.mocked(api.getInitialState).mockResolvedValue({ ...initial,
       items: [...initial.items, { ...initial.items[0], id: '101', avid: '101', title: '第二项' }] });
-    vi.mocked(api.moveToTrash).mockResolvedValue({ moved: ['100'], failed: [], cancelled: true, unprocessed: ['101'] });
+    vi.mocked(api.moveToTrash).mockResolvedValue({ moved: ['100'], failed: [], cancelled: true, unprocessed: ['101'], entryIds: ['trash-100'] });
     render(<App />);
     await screen.findByText('第二项');
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 第二项' }));
     fireEvent.click(screen.getByRole('button', { name: '删除' }));
@@ -1003,11 +1125,17 @@ describe('desktop renderer', () => {
   });
 
   it('preserves undo for committed moves when a later item fails', async () => {
+    const remaining = { ...initialItem, id: '101', avid: '101', title: 'Failed move' };
+    vi.mocked(api.scan).mockResolvedValueOnce(createCachePage([...initial.items, remaining]))
+      .mockResolvedValue(createCachePage([remaining]));
     vi.mocked(api.getInitialState).mockResolvedValue({ ...initial,
       items: [...initial.items, { ...initialItem, id: '101', avid: '101', title: 'Failed move' }] });
-    vi.mocked(api.moveToTrash).mockResolvedValue({ moved: ['100'], failed: ['101'], cancelled: false, unprocessed: [] });
+    vi.mocked(api.moveToTrash).mockResolvedValue({ moved: ['100'], failed: ['101'], cancelled: false, unprocessed: [], entryIds: ['trash-100'] });
     render(<App />);
     await screen.findByText('Failed move');
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 Failed move' }));
     fireEvent.click(screen.getByRole('button', { name: '删除' }));
@@ -1073,16 +1201,20 @@ describe('desktop renderer', () => {
       deletedAt: '2026-08-26T01:00:00Z',
       originalPath: 'D:\\Bilibili\\download\\100',
     };
-    vi.mocked(api.moveToTrash).mockResolvedValue({ moved: ['100'], failed: [] });
+    vi.mocked(api.moveToTrash).mockResolvedValue({ moved: ['100'], failed: [], entryIds: [trashEntry.id] });
     vi.mocked(api.listTrash).mockResolvedValue([trashEntry]);
     vi.mocked(api.restoreTrash).mockResolvedValue({ restored: [trashEntry.id], failed: [] });
 
     render(<App />);
     await screen.findByText('测试缓存');
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
     fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('包括未完成或未被索引的内容');
     fireEvent.click(screen.getByRole('button', { name: '确认' }));
-    await waitFor(() => expect(api.moveToTrash).toHaveBeenCalledWith('D:\\Bilibili\\download', ['100']));
+    await waitFor(() => expect(api.moveToTrash).toHaveBeenCalledWith('D:\\Bilibili\\download', indexToken, [{ avid: '100' }]));
     await screen.findByText(/可按 Ctrl\+Z 撤销/);
     expect(screen.getByRole('button', { name: /撤销删除/ })).toBeInTheDocument();
 
@@ -1129,10 +1261,12 @@ describe('desktop renderer', () => {
     const dialog = screen.getByRole('dialog', { name: '彻底清空回收站（2 项）' });
     expect(dialog).toHaveTextContent('D:\\Bilibili\\download');
     expect(dialog).toHaveTextContent('48.0 MB');
+    fireEvent.change(screen.getByLabelText('输入确认文字'), { target: { value: '永久删除' } });
     fireEvent.click(screen.getByRole('button', { name: '确认' }));
     await waitFor(() => expect(api.purgeTrash).toHaveBeenCalledWith(
       'D:\\Bilibili\\download',
       ['trash-entry-100', 'trash-entry-101'],
+      '永久删除',
     ));
   });
 

@@ -19,4 +19,5 @@ public sealed record CacheTrashEntry(
     int FileCount,
     long TotalBytes,
     bool IsRestorable,
-    string? UnavailableReason);
+    string? UnavailableReason,
+    int? PageIndex = null);

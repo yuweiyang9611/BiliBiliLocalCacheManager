@@ -2,6 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { HostProgressTracker } from './host-progress';
 
 describe('monotonic request progress', () => {
+  it('renews export verification only for increasing bytes within each fixed phase', () => {
+    const tracker = new HostProgressTracker();
+    const phases = ['source-hash', 'source-verify', 'artifact-verify', 'export-copy', 'final-source-verify', 'final-artifact-verify', 'final-output-verify'];
+    const progress = (phase: string, bytesProcessed: number) => ({ operation: 'export', stage: phase, phase, current: 1, details: { bytesProcessed } });
+    for (const phase of phases) {
+      expect(tracker.advance(progress(phase, 100), 'export')).toBe(true);
+      expect(tracker.advance(progress(phase, 100), 'export')).toBe(false);
+      expect(tracker.advance(progress(phase, 50), 'export')).toBe(false);
+    }
+    for (const phase of phases) {
+      expect(tracker.advance(progress(phase, 100), 'export')).toBe(false);
+      expect(tracker.advance(progress(phase, 101), 'export')).toBe(true);
+    }
+  });
+
   it('tracks unknown-length bootstrap bytes independently for fixed phases', () => {
     const tracker = new HostProgressTracker();
     const progress = (phase: string, bytesProcessed: number) => ({ operation: 'play', stage: phase, phase, current: 1, details: { bytesProcessed } });

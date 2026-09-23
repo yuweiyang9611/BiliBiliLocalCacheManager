@@ -185,7 +185,7 @@ public sealed partial class DesktopHostContractTests
         var application = new DesktopHostApplication(trashService: service);
 
         var result = await DispatchAsync(application, "trash.purge",
-            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, entryIds, confirmed = true }), cancellation.Token);
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, entryIds, confirmed = true, confirmationText = "永久删除" }), cancellation.Token);
 
         Assert.True(cancellation.IsCancellationRequested);
         Assert.False(result.GetProperty("cancelled").GetBoolean());

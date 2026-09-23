@@ -32,19 +32,6 @@ function Assert-NonEmptyFile {
     }
 }
 
-function Invoke-CliSmokeTest {
-    param([Parameter(Mandatory = $true)][string]$ExecutablePath)
-
-    if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
-        throw "Published CLI executable is missing: $ExecutablePath"
-    }
-
-    $output = @(& $ExecutablePath --help 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Published CLI smoke test failed with exit code $LASTEXITCODE.`n$($output -join [Environment]::NewLine)"
-    }
-}
-
 function Invoke-HostSmokeTest {
     param([Parameter(Mandatory = $true)][string]$ExecutablePath)
 
@@ -265,9 +252,7 @@ if (Test-Path -LiteralPath $hostPublishPath) {
     Remove-Item -LiteralPath $hostPublishPath -Recurse -Force
 }
 
-$stagingRoot = Join-Path $outputPath "staging"
-$cliStage = Join-Path $stagingRoot "cli-$runtimeIdentifier"
-New-Item -ItemType Directory -Path $cliStage -Force | Out-Null
+New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
 
 dotnet restore BiliBiliLocalCacheManager.slnx --nologo
 Assert-NativeCommandSucceeded "dotnet restore"
@@ -331,23 +316,13 @@ $commonPublish = @(
     "-p:DebugSymbols=false"
 )
 
-dotnet publish BiliBiliLocalCacheManager.Cli/BiliBiliLocalCacheManager.Cli.csproj `
-    @commonPublish `
-    --output $cliStage
-Assert-NativeCommandSucceeded "dotnet publish CLI"
-
 dotnet publish BiliBiliLocalCacheManager.Desktop.Host/BiliBiliLocalCacheManager.Desktop.Host.csproj `
     @commonPublish `
     --output $hostPublishPath
 Assert-NativeCommandSucceeded "dotnet publish Desktop Host"
 
-$cliExecutable = Join-Path $cliStage "BiliBiliLocalCacheManager.Cli$executableExtension"
 $hostExecutable = Join-Path $hostPublishPath "BiliBiliLocalCacheManager.Desktop.Host$executableExtension"
-Invoke-CliSmokeTest $cliExecutable
 Invoke-HostSmokeTest $hostExecutable
-
-Copy-Item -LiteralPath README.md, CHANGELOG.md, LICENSE -Destination $cliStage
-Copy-Item -LiteralPath docs -Destination $cliStage -Recurse
 
 Push-Location -LiteralPath $desktopPath
 try {
@@ -394,14 +369,6 @@ if (-not $SkipElectronSmoke) {
 
 $releaseFiles = New-Object System.Collections.Generic.List[string]
 if ($isWindowsPlatform) {
-    $cliArchive = Join-Path $outputPath "BiliBiliLocalCacheManager-cli-v$Version-win-x64.zip"
-    Compress-Archive `
-        -Path (Join-Path $cliStage "*") `
-        -DestinationPath $cliArchive `
-        -CompressionLevel Optimal
-    Assert-NonEmptyFile $cliArchive
-    $releaseFiles.Add($cliArchive)
-
     foreach ($extension in @("exe", "zip")) {
         $desktopPackagePath = Join-Path $desktopReleasePath "BiliBiliLocalCacheManager-$Version-windows-x64.$extension"
         Assert-NonEmptyFile $desktopPackagePath
@@ -411,12 +378,6 @@ if ($isWindowsPlatform) {
     }
 }
 else {
-    $cliArchive = Join-Path $outputPath "BiliBiliLocalCacheManager-cli-v$Version-linux-x64.tar.gz"
-    tar -czf $cliArchive -C $cliStage .
-    Assert-NativeCommandSucceeded "tar CLI archive"
-    Assert-NonEmptyFile $cliArchive
-    $releaseFiles.Add($cliArchive)
-
     foreach ($extension in @("deb", "rpm")) {
         $desktopPackagePath = Join-Path $desktopReleasePath "BiliBiliLocalCacheManager-$Version-linux-x64.$extension"
         Assert-NonEmptyFile $desktopPackagePath
@@ -432,8 +393,6 @@ $checksumLines = foreach ($releaseFile in $releaseFiles) {
 }
 $checksumPath = Join-Path $outputPath "SHA256SUMS-$runtimeIdentifier.txt"
 [IO.File]::WriteAllLines($checksumPath, $checksumLines, [Text.UTF8Encoding]::new($false))
-
-Remove-Item -LiteralPath $stagingRoot -Recurse -Force
 
 Write-Host "Release artifacts created for $runtimeIdentifier in $outputPath"
 Get-ChildItem -LiteralPath $outputPath | Select-Object Name, Length

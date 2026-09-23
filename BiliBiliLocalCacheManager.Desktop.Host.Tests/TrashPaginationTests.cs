@@ -54,11 +54,11 @@ public sealed partial class DesktopHostContractTests
         var first = await DispatchAsync(application, "trash.page", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, pageSize = 1 }));
         var token = first.GetProperty("snapshotToken").GetString();
         service.Entries.RemoveAt(0);
-        var stale = await Assert.ThrowsAsync<RpcException>(() => DispatchAsync(application, "trash.purgeSnapshot", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, snapshotToken = token, confirmed = true })));
+        var stale = await Assert.ThrowsAsync<RpcException>(() => DispatchAsync(application, "trash.purgeSnapshot", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, snapshotToken = token, confirmed = true, confirmationText = "永久删除" })));
         Assert.Equal("stale_trash", stale.Code);
         Assert.Equal(10_999, service.Entries.Count);
         var refreshed = await DispatchAsync(application, "trash.page", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, pageSize = 1 }));
-        var result = await DispatchAsync(application, "trash.purgeSnapshot", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, snapshotToken = refreshed.GetProperty("snapshotToken").GetString(), confirmed = true }));
+        var result = await DispatchAsync(application, "trash.purgeSnapshot", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, snapshotToken = refreshed.GetProperty("snapshotToken").GetString(), confirmed = true, confirmationText = "永久删除" }));
         Assert.Equal(10_999, result.GetProperty("purged").GetArrayLength());
         Assert.Empty(service.Entries);
     }
