@@ -41,16 +41,16 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "6.1.0",
-    "concurrently": "10.0.5",
+    "concurrently": "10.0.6",
     "cross-env": "10.1.0",
-    "electron": "44.0.0",
+    "electron": "44.9.1",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.2",
     "jsdom": "30.0.1",
     "playwright": "1.64.1",
     "typescript": "7.0.2",
-    "vite": "8.2.2",
-    "vitest": "4.1.11",
+    "vite": "8.3.5",
+    "vitest": "4.1.12",
     "wait-on": "9.1.0"
   }
 }
