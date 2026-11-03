@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { DesktopHostBridge } from './host-bridge';
 import { AppShutdown } from './app-shutdown';
 import { registerIpc } from './ipc';
+import { TaskHistoryStore } from './task-history';
+import { channels } from '../shared/channels';
 import {
   packagedRendererUrl,
   rendererScheme,
@@ -121,14 +123,22 @@ if (supported && !singleInstance) {
 
 let mainWindow: BrowserWindow | null = null;
 let unregisterIpc: (() => void) | null = null;
+const taskHistory = new TaskHistoryStore(path.join(app.getPath('userData'), 'task-history.json'));
+taskHistory.on('changed', () => {
+  try {
+    if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(channels.taskHistoryChanged);
+  } catch { /* A closing renderer must not turn a recorded task result into a failure. */ }
+});
 const bridge = new DesktopHostBridge({
   trustedEnvOverrides: trustedHostEnvironmentOverrides,
+  taskHistory,
 });
 const shutdown = new AppShutdown(async () => {
   try { unregisterIpc?.(); }
   finally {
     unregisterIpc = null;
-    await bridge.dispose();
+    try { await bridge.dispose(); }
+    finally { await taskHistory.flush(); }
   }
 }, () => app.quit(), error => console.error('[shutdown]', error));
 const dirname = __dirname;
@@ -276,7 +286,7 @@ if (supported && singleInstance) {
     registerRendererProtocol();
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.defaultSession.setPermissionCheckHandler(() => false);
-    unregisterIpc = registerIpc(bridge, () => mainWindow);
+    unregisterIpc = registerIpc(bridge, () => mainWindow, taskHistory);
     mainWindow = createWindow();
   });
 

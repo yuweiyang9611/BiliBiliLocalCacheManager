@@ -197,15 +197,19 @@ internal sealed partial class DesktopHostApplication
         long? expectedGeneration = null,
         bool persistScanSettings = false,
         CancellationToken cancellationToken = default,
-        Action<int>? partCaptureProgress = null)
+        Action<int>? partCaptureProgress = null,
+        CurrentIndexSnapshot? previous = null,
+        IReadOnlySet<long>? changedAvids = null)
     {
         var orderedIndex = new CacheIndex(index.VideoCaches.OrderByDescending(GetLastUpdatedUtc).ThenBy(cache => cache.Avid));
         var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, issues ?? []);
-        snapshot.CaptureTrashPartTargets(_trashService, cancellationToken, partCaptureProgress);
+        snapshot.CaptureTrashPartTargets(_trashService, cancellationToken, partCaptureProgress, previous, changedAvids);
         lock (_stateSync)
         {
             if (expectedGeneration is { } generation && generation != _indexGeneration) throw StaleIndexException();
             _indexSnapshot?.Invalidate();
+            _mutationRefresh = null;
+            _lastScanReport = null;
             _indexSnapshot = snapshot;
             _currentIndex = orderedIndex;
             _currentIndexToken = snapshot.IndexToken;

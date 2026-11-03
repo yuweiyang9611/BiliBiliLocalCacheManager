@@ -3,6 +3,9 @@ import type { AppSettings, CacheDetailsRequest, CacheManagerApi, HostProgress, S
 import { channels } from '../shared/channels';
 
 const api: CacheManagerApi = {
+  getTaskHistory: () => ipcRenderer.invoke(channels.taskHistory),
+  onTaskHistoryChanged: (listener) => subscribe(channels.taskHistoryChanged, listener),
+  reloadWhenIdle: () => ipcRenderer.invoke(channels.reloadWhenIdle),
   getTrashPage: (rootPath, options) => ipcRenderer.invoke(channels.trashPage, rootPath, options),
   purgeTrashSnapshot: (rootPath, token, confirmationText) => ipcRenderer.invoke(channels.trashPurgeSnapshot, rootPath, token, confirmationText),
   health: () => ipcRenderer.invoke(channels.health),

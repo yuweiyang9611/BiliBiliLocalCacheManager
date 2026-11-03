@@ -75,12 +75,19 @@ internal sealed partial class DesktopHostApplication
             Summaries = index.VideoCaches.ToDictionary(cache => cache.Avid, MapCacheSummary);
         }
 
-        public void CaptureTrashPartTargets(ICacheTrashService trashService, CancellationToken cancellationToken, Action<int>? progress)
+        public void CaptureTrashPartTargets(ICacheTrashService trashService, CancellationToken cancellationToken, Action<int>? progress,
+            CurrentIndexSnapshot? previous = null, IReadOnlySet<long>? changedAvids = null)
         {
             var processed = 0;
             foreach (var cache in Index.VideoCaches)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (previous is not null && changedAvids is not null && !changedAvids.Contains(cache.Avid))
+                {
+                    foreach (var page in cache.Segments.Select(segment => segment.PageIndex).Distinct())
+                        _trashParts[(cache.Avid, page)] = previous.GetTrashPart(cache.Avid, page);
+                    continue;
+                }
                 var overlapping = cache.Segments.GroupBy(segment => segment.SegmentDirectory, PathComparer)
                     .Where(group => group.Select(segment => segment.PageIndex).Distinct().Skip(1).Any())
                     .Select(group => group.Key).ToHashSet(PathComparer);

@@ -126,8 +126,14 @@ public sealed partial class DesktopHostContractTests
     {
         var requested = new[] { "101", "202", "303" };
         if (!restore) return requested;
-        foreach (var avid in requested) service.MoveToTrash(root, long.Parse(avid));
-        return service.ListEntries(root).OrderBy(entry => entry.Avid).Select(entry => entry.TrashPath).ToArray();
+        foreach (var avid in requested)
+        {
+            var prepared = service.MoveToTrash(root, long.Parse(avid));
+            Assert.True(prepared.Succeeded, $"Could not prepare trash fixture {avid}: {prepared.ErrorMessage}");
+        }
+        var entries = service.ListEntries(root).OrderBy(entry => entry.Avid).ToArray();
+        Assert.Equal(new[] { 101L, 202L, 303L }, entries.Select(entry => entry.Avid));
+        return entries.Select(entry => entry.TrashPath).ToArray();
     }
 
     [Theory]
@@ -147,8 +153,13 @@ public sealed partial class DesktopHostContractTests
         var requested = new[] { "101", "202" };
         if (restore)
         {
-            foreach (var avid in requested) service.MoveToTrash(workspace.CacheRoot, long.Parse(avid));
+            foreach (var avid in requested)
+            {
+                var prepared = service.MoveToTrash(workspace.CacheRoot, long.Parse(avid));
+                Assert.True(prepared.Succeeded, $"Could not prepare trash fixture {avid}: {prepared.ErrorMessage}");
+            }
             requested = service.ListEntries(workspace.CacheRoot).Select(entry => entry.TrashPath).ToArray();
+            Assert.Equal(2, requested.Length);
         }
         var scan = await DispatchAsync(application, "scan", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
         var mutationCount = 0;
@@ -159,6 +170,7 @@ public sealed partial class DesktopHostContractTests
             : JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, avids = requested });
         var result = await DispatchAsync(application, restore ? "trash.restore" : "trash.move", parameters, cancellation.Token);
 
+        Assert.True(!result.GetProperty("failed").EnumerateArray().Any(), result.GetRawText());
         Assert.Equal(requested.Take(cancelAfter), result.GetProperty(restore ? "restored" : "moved").EnumerateArray().Select(item => item.GetString()));
         Assert.Empty(result.GetProperty("failed").EnumerateArray());
         Assert.Equal(requested.Skip(cancelAfter), result.GetProperty("unprocessed").EnumerateArray().Select(item => item.GetString()));

@@ -18,6 +18,7 @@ vi.mock('node:child_process', () => ({ spawn: hostMocks.spawn }));
 vi.mock('node:fs', () => ({ existsSync: hostMocks.existsSync }));
 
 import { createHostEnvironment, DesktopHostBridge, hostTimeoutPolicy } from './host-bridge';
+import type { TaskHistoryStore } from './task-history';
 
 const originalHostPath = process.env.CACHE_MANAGER_HOST_PATH;
 
@@ -634,6 +635,48 @@ describe('Host lifecycle and confirmed cancellation', () => {
     expect(vi.getTimerCount()).toBe(0);
     expect(fake.child.kill).not.toHaveBeenCalled();
     await bridge.dispose();
+  });
+});
+
+describe('task history lifecycle', () => {
+  it('records the start before sending a task and records its result before resolving it', async () => {
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    let allowStart!: () => void, allowFinish!: () => void;
+    const start = vi.fn(() => new Promise<void>(resolve => { allowStart = resolve; }));
+    const finish = vi.fn(() => new Promise<void>(resolve => { allowFinish = resolve; }));
+    const bridge = new DesktopHostBridge({ taskHistory: { start, finish } as unknown as TaskHistoryStore });
+    try {
+      const call = bridge.call('play', { rootPath: 'C:\\fixture' });
+      let resolved = false;
+      void call.promise.then(() => { resolved = true; });
+      expect(start).toHaveBeenCalledWith(call.id, 'play', { rootPath: 'C:\\fixture' });
+      expect(fake.writes).toEqual([]);
+      allowStart();
+      await vi.waitFor(() => expect(fake.writes).toHaveLength(1));
+      const result = { queued: 2, failures: [] };
+      fake.child.stdout.emit('data', JSON.stringify({ id: call.id, result }) + '\n');
+      await vi.waitFor(() => expect(finish).toHaveBeenCalledWith(call.id, 'play', result));
+      expect(resolved).toBe(false);
+      allowFinish();
+      expect(await call.promise).toEqual(result);
+      expect(resolved).toBe(true);
+    } finally { await bridge.dispose(); }
+  });
+
+  it('records a lost Host result without changing the original transport error', async () => {
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const history = { start: vi.fn().mockResolvedValue(undefined), finish: vi.fn().mockResolvedValue(undefined) };
+    const bridge = new DesktopHostBridge({ taskHistory: history as unknown as TaskHistoryStore });
+    try {
+      const call = bridge.call('export');
+      const failed = expect(call.promise).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
+      await vi.waitFor(() => expect(fake.writes).toHaveLength(1));
+      fake.child.emit('exit', 1, null); fake.child.emit('close', 1, null);
+      await failed;
+      expect(history.finish).toHaveBeenCalledWith(call.id, 'export', undefined, expect.objectContaining({ code: 'OUTCOME_UNKNOWN' }));
+    } finally { await bridge.dispose(); }
   });
 });
 

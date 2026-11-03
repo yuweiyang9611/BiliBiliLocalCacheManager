@@ -19,6 +19,10 @@ import { StoragePage } from './pages/StoragePage';
 import { TrashPage } from './pages/TrashPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
+import { RenderBoundary, RendererRecovery } from './components/RenderBoundary';
+import { observeOperationStates } from './operation-state-observer';
+import { projectOperationResult } from '../shared/operation-result';
+import type { TrashMoveResult, TrashRestoreResult, TrashPurgeResult } from '../shared/contracts';
 
 type UndoDeleteBatch = { rootPath: string; entryIds: string[] };
 type RootBoundState<T> = { rootPath: string | null; value: T };
@@ -86,7 +90,6 @@ export function App() {
   const inspectionInFlight = useRef(false);
   const [searching, setSearching] = useState(false);
   const [operationStates, setOperationStates] = useState<Record<string, OperationState>>({});
-  const operationStatesRef = useRef<Record<string, OperationState>>({});
   const blockedOperations = useRef(false);
   const unresolved = Object.values(operationStates);
   const operationsBlocked = unresolved.some(state => state.sideEffects);
@@ -265,23 +268,14 @@ export function App() {
       : { restored: [], failed: [], cancelled: false, unprocessed: [] };
     if (result.restored.length > 0) invalidateIndex();
     const scanResult = result.restored.length && !result.cancelled
-      ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete, persistSettings: false, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
+      ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete, persistSettings: false, incremental: true, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
       : null;
     return { result, scanResult };
   }, [invalidateIndex, refreshAfterMutation]);
 
   useEffect(() => {
     let disposed = false;
-    let restoringStates = true;
-    const stateUpdates = new Map<string, OperationState>();
-    const unsubscribeState = cacheManager.onOperationState((value) => {
-      if (disposed) return;
-      if (value.operation === 'search' || value.operation === 'cache.details') return;
-      if (restoringStates) stateUpdates.set(value.requestId, value);
-      const next = { ...operationStatesRef.current };
-      if (value.state === 'settled') delete next[value.requestId];
-      else next[value.requestId] = value;
-      operationStatesRef.current = next;
+    const observedStates = observeOperationStates(next => {
       blockedOperations.current = Object.values(next).some(state => state.sideEffects);
       setOperationStates(next);
     });
@@ -292,21 +286,8 @@ export function App() {
     });
     void (async () => {
       try {
-        const snapshot = await cacheManager.getOperationStates();
+        await observedStates.ready;
         if (disposed) return;
-        // Events received while the snapshot was in flight take precedence,
-        // including settled events that must not resurrect an old restriction.
-        const restored: Record<string, OperationState> = {};
-        for (const value of [...snapshot, ...stateUpdates.values()]) {
-          if (value.operation === 'search' || value.operation === 'cache.details') continue;
-          if (value.state === 'settled') delete restored[value.requestId];
-          else restored[value.requestId] = value;
-        }
-        restoringStates = false;
-        stateUpdates.clear();
-        blockedOperations.current = Object.values(restored).some(state => state.sideEffects);
-        operationStatesRef.current = restored;
-        setOperationStates(restored);
         const [initial, info] = await Promise.all([
           cacheManager.getInitialState(),
           cacheManager.getDesktopInfo(),
@@ -376,7 +357,7 @@ export function App() {
       }
     })();
     return () => {
-      disposed = true; unsubscribeUnavailable(); unsubscribeState();
+      disposed = true; unsubscribeUnavailable(); observedStates.dispose();
       void cacheManager.cancelSearch().catch(() => undefined);
     };
   }, [applyScanResult, invalidateIndex, notify, replaceLibraryItems]);
@@ -589,14 +570,15 @@ export function App() {
       }
     }, true);
     if (result) {
-      const failures = result.failures;
+      const facts = projectOperationResult(result);
+      const failures = facts.failures;
       let retryTargets: SelectionTarget[] = [];
       let retryUnavailable: string | undefined;
       try { retryTargets = buildPlaybackRetryTargets(failures); }
       catch (error) { retryUnavailable = describeError(error); }
       setBatchReport({ ...context, targets: retryTargets, retryUnavailable,
-        status: result.queued === 0 ? 'failed' : failures.length ? 'partial' : 'success', succeeded: result.queued, failures });
-      notify(result.queued === 0 ? 'error' : failures.length ? 'info' : 'success', `已将 ${result.queued} 个页面交给播放器，失败 ${failures.length} 项。`);
+        status: facts.status === 'succeeded' ? 'success' : facts.status, succeeded: facts.succeeded, failures });
+      notify(facts.status === 'failed' ? 'error' : facts.status === 'partial' ? 'info' : 'success', `已将 ${facts.succeeded} 个页面交给播放器，失败 ${facts.failed} 项。`);
     }
   }, [activeRootPath, indexBinding?.indexToken, notify, run, settings.includeIncomplete, settings.playerPreference, targets]);
 
@@ -620,12 +602,14 @@ export function App() {
       }
     }, true);
     if (result) {
+      const facts = projectOperationResult(result);
       const needsConfirmation = Boolean(result.confirmationId && result.transcodeRequirements?.length);
-      setBatchReport({ ...context, status: result.published ? 'success' : needsConfirmation ? 'confirmation' : 'failed',
+      const status = facts.status === 'confirmation' && !needsConfirmation ? 'failed' : facts.status;
+      setBatchReport({ ...context, status: status === 'succeeded' ? 'success' : status,
         confirmationId: result.confirmationId, transcodeRequirements: result.transcodeRequirements,
-        succeeded: result.exportedCount, failures: result.failures });
-      notify(result.published ? 'success' : needsConfirmation ? 'info' : 'error', result.published ? `已导出：${result.outputPath}`
-        : needsConfirmation ? '本批尚未发布，需要确认转码。' : '本批导出未发布，请查看失败明细。');
+        succeeded: facts.succeeded, failures: facts.failures });
+      notify(status === 'succeeded' ? 'success' : needsConfirmation || status === 'cancelled' ? 'info' : 'error', status === 'succeeded' ? `已导出：${facts.outputPath}`
+        : needsConfirmation ? '本批尚未发布，需要确认转码。' : status === 'cancelled' ? '本批导出已取消。' : '本批导出未发布，请查看失败明细。');
     } else if (result === null) {
       setBatchReport({ ...context, status: 'cancelled', succeeded: 0, failures: [] });
     }
@@ -652,7 +636,7 @@ export function App() {
           const result = await cacheManager.moveToTrash(rootPath, indexToken, requestedTargets);
           if (result.moved.length > 0) invalidateIndex();
           const scanResult = result.moved.length > 0 && !result.cancelled
-            ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete: settings.includeIncomplete, persistSettings: false, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
+            ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete: settings.includeIncomplete, persistSettings: false, incremental: true, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
             : null;
           return { result, scanResult };
         });
@@ -809,6 +793,7 @@ export function App() {
   }, [applyScanResult, restoreAndRescan, invalidateIndex, invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, reportScan, run]);
 
   useShortcuts((event) => {
+    if (event.defaultPrevented || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
     const uiBusy = Boolean(busy) || Boolean(inspectionBusy) || detailsLoading || searching || operationsBlocked;
       if (event.key === 'F5') { event.preventDefault(); if (!uiBusy) void scan(); }
       if (event.key === 'Escape' && uiBusy) { event.preventDefault(); void cancelCurrentOperation(); }
@@ -839,7 +824,7 @@ export function App() {
         <Icon name="warning" />
         <h1>桌面端初始化失败</h1>
         <p>{bootstrapError || 'Desktop Host 返回了无法使用的初始化数据。'}</p>
-        <button className="button primary" onClick={() => window.location.reload()}>重试初始化</button>
+        <RendererRecovery label="重试初始化" />
       </div>
     </div>;
   }
@@ -893,6 +878,7 @@ export function App() {
         <OperationProgress revision={progressRevision} />
 
         <section className="page-content">
+          <RenderBoundary scope="page" key={page}>
           {(page === 'library' || page === 'settings') && scanReport && <section className="result-panel" aria-label="扫描结果">
             <div className="panel-heading"><h2>扫描结果</h2><span>损坏 {scanReport.invalidEntries ?? 0} · 无法访问 {scanReport.inaccessibleDirectories ?? 0} · 跳过未完成 {scanReport.skippedIncompleteEntries ?? 0}</span></div>
             {scanReport.issues.length > 0 && <details><summary>问题明细（{scanReport.issues.length}）</summary><ul className="result-list">
@@ -1057,6 +1043,7 @@ export function App() {
             const value = await run('正在导出诊断报告…', () => cacheManager.exportDiagnostics(`BLCM-diagnostics-${dateStamp()}.zip`, activeRootPath || undefined));
             if (value) notify('success', `诊断报告已导出：${value.outputPath}`);
           }} busy={uiBusy} />}
+          </RenderBoundary>
         </section>
 
         <footer className="statusbar"><span>{inspectionBusy ?? busy ?? (detailsLoading ? '正在加载分段详情…' : items.length ? `当前显示 ${cachePage.offset + 1}–${cachePage.offset + items.length} / ${cachePage.totalItems} 条缓存，${selection.label} · ${formatBytes(selection.bytes)}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
@@ -1074,10 +1061,8 @@ export function App() {
 function isUnknownOutcome(error: unknown): boolean {
   return errorCode(error) === 'OUTCOME_UNKNOWN';
 }
-function diskFailureDetails(result: { failed: string[]; items?: { succeeded: boolean; avid?: string; pageIndex?: number; entryId?: string; error?: string }[] }): MediaFailure[] {
-  const details = result.items?.filter(item => !item.succeeded).map(item => ({ avid: item.avid ?? '', pageIndex: item.pageIndex ?? null,
-    title: item.entryId ?? (item.avid ? `av${item.avid}` : '操作失败'), message: item.error ?? '操作失败' }));
-  return details?.length ? details : result.failed.map(id => ({ avid: '', pageIndex: null, title: id, message: '操作失败，请核对条目状态。' }));
+function diskFailureDetails(result: TrashMoveResult | TrashRestoreResult | TrashPurgeResult): MediaFailure[] {
+  return projectOperationResult(result).failures;
 }
 
 function isCancellationError(error: unknown): boolean {

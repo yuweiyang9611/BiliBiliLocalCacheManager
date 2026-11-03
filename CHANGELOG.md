@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Reliability
+
+- Keep modal focus contained, restore the invoking control, and suspend background shortcuts; expose keyboard navigation to part details across virtualized rows.
+- Refresh only AVs changed by successful local trash operations when the prior scan is complete and clean, retaining original identities for unchanged parts and invalidating old tokens. Fall back to full scans for incomplete baselines; explicit refresh always scans the whole library.
+- Validate and hash the same bounded metadata bytes in one read during part identity checks.
+- Preserve UTF-8 BOM compatibility when parsing part metadata while hashing the complete original bytes; cover capture, move and restore with a BOM regression.
+- Share operation result facts between live reports and persisted history while keeping retention limits and retry authorization separate.
+- Run portable recovery, restart-history and keyboard Electron E2E tests from project-pinned dependencies in Windows/Ubuntu CI, with isolated fixtures and failure artifacts.
+
+- Contain page rendering failures while preserving selections and in-flight task guards. Whole-renderer and initialization recovery now wait for main-process IPC calls and native dialogs to finish; unknown outcomes still require explicit verification after recovery.
+- Isolate operation-state snapshot/event reconciliation from the application component without replaying completed or uncertain tasks.
+
+### Diagnostics
+
+- Preserve the latest 100 playback, export and application-trash task records for 30 days in the local profile. Show confirmed results, published output paths and bounded failure details after restart; interrupted records remain uncertain and never replay automatically. Preserve unreadable/future history files and report persistence failures without changing task results.
+- Keep explicitly confirmed cancellation distinct from unknown outcomes in persisted task history.
+- Preserve specific trash move/restore failure reasons and AV/part identities in task history across restarts, with bounded details and legacy-response fallbacks.
+- Show readable scan and part-identity verification counts, with indeterminate progress when no percentage is available.
+- Include scan gate wait, index construction, snapshot/identity capture, and first-page timings in diagnostic events. Add isolated renderer-recovery verification and a synthetic-fixture Host scan measurement script.
+
 ## [0.4.1] - 2026-09-24
 
 This release is initially a public preview. Automated checks do not replace the real desktop acceptance matrix required before promotion.

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
@@ -11,10 +12,12 @@ internal sealed partial class DesktopHostApplication
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
+        var scanStarted = Stopwatch.GetTimestamp();
         var generation = ReadIndexGeneration();
         await _indexBuildGate.WaitAsync(cancellationToken);
         try
         {
+            var gateWaitMilliseconds = Stopwatch.GetElapsedTime(scanStarted).TotalMilliseconds;
             EnsureIndexGeneration(generation);
             var pagination = ParsePagination(parameters);
             var settings = _settingsStore.GetState().Settings;
@@ -30,11 +33,13 @@ internal sealed partial class DesktopHostApplication
                     "maxReportedIssues must be between 0 and 10000.");
             }
 
+            var refresh = parameters.OptionalBoolean("incremental") == true ? GetMutationRefresh(root, includeIncomplete) : null;
             var options = new CacheIndexBuildOptions
             {
                 IncludeIncompleteEntries = includeIncomplete,
                 MaxReportedIssues = maxReportedIssues,
-                MaximumCacheBytes = MaximumWireBytes
+                MaximumCacheBytes = MaximumWireBytes,
+                AvidFilter = refresh?.Avids
             };
             var progress = new InlineProgress<CacheScanProgress>(value =>
                 ReportProgress(new HostProgressEvent(
@@ -50,6 +55,7 @@ internal sealed partial class DesktopHostApplication
                         value.IncludedEntries
                     }, Phase: "scan")));
 
+            var buildStarted = Stopwatch.GetTimestamp();
             var report = await Task.Run(
                 () => _cacheManager.BuildIndexWithReport(
                     root,
@@ -58,11 +64,22 @@ internal sealed partial class DesktopHostApplication
                     progress),
                 cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
+            var buildMilliseconds = Stopwatch.GetElapsedTime(buildStarted).TotalMilliseconds;
+            var readEntries = report.IncludedEntries;
+            if (refresh is not null) report = MergeMutationRefresh(refresh, report);
 
             var completedAt = DateTimeOffset.UtcNow;
+            var snapshotStarted = Stopwatch.GetTimestamp();
             var snapshot = SetCurrentIndex(report.Index, root, includeIncomplete, completedAt,
                 report.Issues, generation, persistSettings, cancellationToken,
-                count => ReportPartCaptureProgress(requestId, "scan", count));
+                count => ReportPartCaptureProgress(requestId, "scan", count), refresh?.Snapshot, refresh?.Avids);
+            lock (_stateSync)
+            {
+                EnsureIndexStillCurrent(snapshot);
+                _lastScanReport = report;
+            }
+            var snapshotMilliseconds = Stopwatch.GetElapsedTime(snapshotStarted).TotalMilliseconds;
+            var pageStarted = Stopwatch.GetTimestamp();
             var page = CreateCachePage(
                 snapshot,
                 snapshot.Index.VideoCaches,
@@ -70,6 +87,9 @@ internal sealed partial class DesktopHostApplication
                 pagination.PageSize,
                 cancellationToken);
             EnsureIndexStillCurrent(snapshot);
+            var pageMilliseconds = Stopwatch.GetElapsedTime(pageStarted).TotalMilliseconds;
+            _eventRecorder.Record("ScanTiming", "Information", FormattableString.Invariant(
+                $"request={requestId}; waitMs={gateWaitMilliseconds:F2}; buildMs={buildMilliseconds:F2}; snapshotMs={snapshotMilliseconds:F2}; pageMs={pageMilliseconds:F2}; totalMs={Stopwatch.GetElapsedTime(scanStarted).TotalMilliseconds:F2}; videos={page.TotalItems}; segments={report.IncludedEntries}; incremental={refresh is not null}; readEntries={readEntries}"));
             ReportProgress(new HostProgressEvent(
                 requestId,
                 "scan",

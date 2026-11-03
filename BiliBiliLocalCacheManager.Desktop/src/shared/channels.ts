@@ -1,4 +1,7 @@
 export const channels = Object.freeze({
+  taskHistory: 'cache-manager:task-history',
+  taskHistoryChanged: 'cache-manager:task-history-changed',
+  reloadWhenIdle: 'cache-manager:reload-when-idle',
   trashPage: 'cache-manager:trash:page',
   trashPurgeSnapshot: 'cache-manager:trash:purge-snapshot',
   searchCancel: 'cache-manager:search-cancel',

@@ -88,7 +88,7 @@ internal sealed partial class DesktopHostApplication
                         moved.Add(target.Id);
                         if (item.TrashPath is not null) entryIds.Add(item.TrashPath);
                         items.Add(new(avidText, target.PageIndex, true, item.TrashPath, BoundTrashError(item.ErrorMessage)));
-                        ClearCurrentIndex();
+                        InvalidateAfterMutation(root, target.Avid);
                     }
                     else
                     {
@@ -210,7 +210,7 @@ internal sealed partial class DesktopHostApplication
                         restored.Add(entryId);
                         items.Add(new(entryId, entry.Avid.ToString(System.Globalization.CultureInfo.InvariantCulture),
                             entry.PageIndex, true, BoundTrashError(operation.ErrorMessage)));
-                        ClearCurrentIndex();
+                        InvalidateAfterMutation(root, entry.Avid);
                     }
                     else
                     {

@@ -44,7 +44,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         var state = new ScanAccumulator(effectiveOptions.MaxReportedIssues);
         var segments = new List<BiliSegment>();
         var avidDirectories = new List<(string Path, long Avid)>();
-        foreach (var path in EnumerateDirectories(root, state, cancellationToken))
+        foreach (var path in EnumerateDirectories(root, state, cancellationToken, effectiveOptions.AvidFilter))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (TryGetDirectoryAvid(path, out var avid))
@@ -165,7 +165,8 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
     private static IReadOnlyList<string> EnumerateDirectories(
         string path,
         ScanAccumulator state,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlySet<long>? avidFilter = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try
@@ -175,6 +176,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                          .OrderBy(item => item, StringComparer.OrdinalIgnoreCase))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (avidFilter is not null && (!TryGetDirectoryAvid(directory, out var avid) || !avidFilter.Contains(avid))) continue;
                 if (TryValidatePhysicalDirectory(directory, state))
                 {
                     directories.Add(directory);

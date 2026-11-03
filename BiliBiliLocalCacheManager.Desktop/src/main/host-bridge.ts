@@ -9,6 +9,7 @@ import type { JsonObject, JsonValue, OperationState } from '../shared/contracts'
 import { JsonLineDecoder, type HostMessage } from './protocol';
 
 import { HostProgressTracker } from './host-progress';
+import { isRecordedTask, type TaskHistoryStore } from './task-history';
 
 interface HostContext {
   child: ChildProcessWithoutNullStreams;
@@ -107,6 +108,7 @@ export function createHostEnvironment(
 
 export interface DesktopHostBridgeOptions {
   trustedEnvOverrides?: NodeJS.ProcessEnv;
+  taskHistory?: TaskHistoryStore;
 }
 
 export interface HostCall<T> {
@@ -135,10 +137,12 @@ export class DesktopHostBridge extends EventEmitter {
   #disposal: Promise<void> | null = null;
   #states = new Map<string, OperationState>();
   readonly #trustedEnvOverrides: NodeJS.ProcessEnv;
+  readonly #taskHistory?: TaskHistoryStore;
 
   constructor(options: DesktopHostBridgeOptions = {}) {
     super();
     this.#trustedEnvOverrides = { ...(options.trustedEnvOverrides ?? {}) };
+    this.#taskHistory = options.taskHistory;
   }
 
   acknowledgeUncertain(id: string): boolean {
@@ -158,13 +162,19 @@ export class DesktopHostBridge extends EventEmitter {
     const id = randomUUID();
     let settled = false;
     let cancelRequested = false;
-    const promise = (async () => {
+    const recordedOperation = isRecordedTask(method) ? method : undefined;
+    let recording = false;
+    const response = (async () => {
       this.#assertCanCall(method);
       let request: string;
       try { request = JSON.stringify({ id, method, params }); }
       catch { throw new DesktopHostError('无法序列化 Desktop Host 请求。', 'INVALID_REQUEST'); }
       if (Buffer.byteLength(request, 'utf8') > MAX_HOST_REQUEST_BYTES)
         throw new DesktopHostError('Desktop Host 请求超过 1 MiB 安全上限。请减少一次操作中的项目或分段数量。', 'REQUEST_TOO_LARGE');
+      if (recordedOperation && this.#taskHistory) {
+        await this.#taskHistory.start(id, recordedOperation, params);
+        recording = true;
+      }
       const context = await this.#start();
       if (cancelRequested) throw new DesktopHostError('操作已取消。', 'CANCELLED');
       this.#assertCanCall(method);
@@ -197,6 +207,13 @@ export class DesktopHostBridge extends EventEmitter {
         });
       });
     })();
+    const promise = this.#taskHistory && recordedOperation ? response.then(async result => {
+      if (recording) await this.#taskHistory!.finish(id, recordedOperation, result);
+      return result;
+    }, async error => {
+      if (recording) await this.#taskHistory!.finish(id, recordedOperation, undefined, error);
+      throw error;
+    }) : response;
     promise.then(() => { settled = true; }, () => { settled = true; });
     return {
       id, promise,

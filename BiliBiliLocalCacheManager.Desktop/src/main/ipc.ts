@@ -38,6 +38,7 @@ import {
 } from './host-contract-validation';
 import { packagedRendererUrl } from './renderer-protocol';
 import { ipcFailure } from '../shared/ipc-result';
+import type { TaskHistoryStore } from './task-history';
 import { boundedString as assertString, booleanValue as assertBoolean, boundedInteger as assertInteger } from './ipc-validation';
 
 const allowedSettingKeys = new Set<keyof AppSettings>([
@@ -47,7 +48,7 @@ const allowedSettingKeys = new Set<keyof AppSettings>([
   'transcodeCacheRetentionDays', 'transcodeCacheMaxSizeGigabytes',
 ]);
 
-export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserWindow | null): () => void {
+export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserWindow | null, history?: TaskHistoryStore): () => void {
   type SenderState = {
     sender: IpcMainInvokeEvent['sender'];
     calls: Map<string, HostCall<unknown>>;
@@ -79,13 +80,26 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     exportSessions.delete(senderId);
   };
   const handlers: Array<[string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown]> = [];
+  // Include the entire IPC invocation, including native dialogs before a Host
+  // call starts. Host-call tracking alone leaves a reload race in those gaps.
+  const pendingInvocations = new Map<number, number>();
   const handle = (channel: string, listener: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) => {
     handlers.push([channel, listener]);
     ipcMain.handle(channel, (event, ...args) => {
+      const tracked = channel !== channels.reloadWhenIdle;
+      if (tracked) pendingInvocations.set(event.sender.id, (pendingInvocations.get(event.sender.id) ?? 0) + 1);
+      const finish = () => {
+        if (!tracked) return;
+        const remaining = (pendingInvocations.get(event.sender.id) ?? 1) - 1;
+        if (remaining) pendingInvocations.set(event.sender.id, remaining);
+        else pendingInvocations.delete(event.sender.id);
+      };
       try {
         const result = listener(event, ...args);
-        return result instanceof Promise ? result.catch(ipcFailure) : result;
-      } catch (error) { return ipcFailure(error); }
+        if (result instanceof Promise) return result.catch(ipcFailure).finally(finish);
+        finish();
+        return result;
+      } catch (error) { finish(); return ipcFailure(error); }
     });
   };
   const host = <T>(method: string, params: JsonObject = {}, timeoutMs?: number) => bridge.call<T>(method, params, timeoutMs);
@@ -126,6 +140,19 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     }
   };
 
+  handle(channels.reloadWhenIdle, (event) => {
+    assertTrusted(event);
+    if (pendingInvocations.get(event.sender.id) || activeRequests.get(event.sender.id)?.calls.size) return false;
+    // Unknown outcomes remain in activeRequests and are restored after reload.
+    // Reload must never acknowledge them or replay the original operation.
+    clearExportSession(event.sender.id);
+    event.sender.reload();
+    return true;
+  });
+  handle(channels.taskHistory, event => {
+    assertTrusted(event);
+    return history?.snapshot() ?? { entries: [] };
+  });
   handle(channels.health, async (event) => {
     assertTrusted(event);
     return validateHostHealth(await track(event, host<unknown>('health', {}, 15_000)));
@@ -155,6 +182,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     const request = {
       rootPath: assertPath(options.rootPath, 'rootPath'),
       includeIncomplete: assertBoolean(options.includeIncomplete, 'includeIncomplete'),
+      ...(options.incremental === undefined ? {} : { incremental: assertBoolean(options.incremental, 'incremental') }),
       ...(options.persistSettings === undefined
         ? {}
         : { persistSettings: assertBoolean(options.persistSettings, 'persistSettings') }),

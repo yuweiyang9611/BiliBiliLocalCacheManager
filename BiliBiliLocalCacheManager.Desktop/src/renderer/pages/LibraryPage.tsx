@@ -94,6 +94,7 @@ export const VirtualizedCacheTable = memo(function VirtualizedCacheTable(props: 
   const rowHeight = 54;
   const overscan = 5;
   const viewport = useRef<HTMLDivElement>(null);
+  const keyboardFocus = useRef<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(420);
   useLayoutEffect(() => {
@@ -114,10 +115,33 @@ export const VirtualizedCacheTable = memo(function VirtualizedCacheTable(props: 
   const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
   const last = Math.min(props.items.length, first + visibleCount);
   const visibleItems = useMemo(() => props.items.slice(first, last), [props.items, first, last]);
+  useLayoutEffect(() => {
+    if (keyboardFocus.current === null) return;
+    const button = [...(viewport.current?.querySelectorAll<HTMLButtonElement>('[data-cache-details]') ?? [])]
+      .find(element => element.dataset.cacheDetails === keyboardFocus.current);
+    if (button) { button.focus(); keyboardFocus.current = null; }
+  }, [visibleItems]);
   return <div
     ref={viewport}
     className="table-scroll cache-table"
     data-virtualized="true"
+    onKeyDown={event => {
+      const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-cache-details]');
+      if (!target || !['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const index = props.items.findIndex(item => item.id === target.dataset.cacheDetails);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? props.items.length - 1
+        : Math.max(0, Math.min(props.items.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
+      keyboardFocus.current = props.items[next].id;
+      const mounted = [...(viewport.current?.querySelectorAll<HTMLButtonElement>('[data-cache-details]') ?? [])]
+        .find(element => element.dataset.cacheDetails === keyboardFocus.current);
+      if (mounted) { mounted.focus(); keyboardFocus.current = null; }
+      else {
+        const position = Math.max(0, next * rowHeight - (viewportHeight - rowHeight) / 2);
+        if (viewport.current) viewport.current.scrollTop = position;
+        setScrollTop(position);
+      }
+    }}
     onScroll={(event) => {
       setScrollTop(event.currentTarget.scrollTop);
       setViewportHeight(event.currentTarget.clientHeight || 420);
@@ -136,5 +160,5 @@ export function SegmentRow({ item, checked, toggle, play }: { item: CacheSegment
 }
 
 const CacheRow = memo(function CacheRow({ item, focused, checked, focus, play, toggle }: { item: CacheEntry; focused: boolean; checked: boolean; focus(item: CacheEntry): void; play(item: CacheEntry): void; toggle(id: string): void }) {
-  return <tr data-cache-row="true" className={focused ? 'focused cache-row' : 'cache-row'} onClick={() => focus(item)} onDoubleClick={() => { play(item); }}><td className="check-cell" onClick={(event) => event.stopPropagation()}><input aria-label={`选择 ${item.title}`} type="checkbox" checked={checked} onChange={() => toggle(item.id)} /></td><td><strong className="title-cell">{item.title || '未命名缓存'}</strong><small>av{item.avid}</small></td><td>{item.ownerName || '—'}</td><td><code>{item.bvid || '—'}</code></td><td>{formatDuration(item.durationSeconds)}</td><td>{item.segmentCount}</td><td>{formatBytes(item.sizeBytes)}</td><td><span className={item.isAllCompleted ? 'badge success' : 'badge warning'}>{item.isAllCompleted ? '完整' : '未完成'}</span></td><td>{formatDate(item.lastUpdated)}</td></tr>;
+  return <tr data-cache-row="true" className={focused ? 'focused cache-row' : 'cache-row'} onClick={() => focus(item)} onDoubleClick={() => { play(item); }}><td className="check-cell" onClick={(event) => event.stopPropagation()}><input aria-label={`选择 ${item.title}`} type="checkbox" checked={checked} onChange={() => toggle(item.id)} /></td><td><button className="cache-title-button" data-cache-details={item.id} aria-label={`查看 ${item.title || '未命名缓存'} 的分 P`} title="Enter 查看分 P；方向键浏览，Home/End 跳转" onClick={event => { event.stopPropagation(); focus(item); }}><strong className="title-cell">{item.title || '未命名缓存'}</strong></button><small>av{item.avid}</small></td><td>{item.ownerName || '—'}</td><td><code>{item.bvid || '—'}</code></td><td>{formatDuration(item.durationSeconds)}</td><td>{item.segmentCount}</td><td>{formatBytes(item.sizeBytes)}</td><td><span className={item.isAllCompleted ? 'badge success' : 'badge warning'}>{item.isAllCompleted ? '完整' : '未完成'}</span></td><td>{formatDate(item.lastUpdated)}</td></tr>;
 });

@@ -13,6 +13,16 @@ import type {
 import { defaultSettings, emptyStorage } from '../shared/contracts';
 import { App } from './App';
 import { IpcError } from '../shared/ipc-result';
+import type { LibraryProps } from './pages/LibraryPage';
+
+const renderFault = vi.hoisted(() => ({ library: false }));
+vi.mock('./pages/LibraryPage', async importOriginal => {
+  const original = await importOriginal<typeof import('./pages/LibraryPage')>();
+  return { ...original, LibraryPage: (props: LibraryProps) => {
+    if (renderFault.library) throw new Error('Injected page render failure');
+    return <original.LibraryPage {...props} />;
+  } };
+});
 
 const indexToken = 'index-token';
 const initialSegments: CacheSegment[] = [{
@@ -84,6 +94,9 @@ function createCacheDetails(
 
 function createApi(): CacheManagerApi {
   const api: CacheManagerApi = {
+    getTaskHistory: vi.fn().mockResolvedValue({ entries: [] }),
+    onTaskHistoryChanged: vi.fn().mockReturnValue(() => undefined),
+    reloadWhenIdle: vi.fn().mockResolvedValue(true),
     getTrashPage: vi.fn().mockImplementation(async (rootPath, options) => {
       const items = await api.listTrash(rootPath);
       const offset = options?.offset ?? 0;
@@ -142,6 +155,26 @@ function deferred<T>() {
 }
 
 describe('desktop renderer', () => {
+  it('keeps global action shortcuts behind an open confirmation and restores them after closing', async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByLabelText('选择 测试缓存'));
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    vi.mocked(api.scan).mockClear();
+    fireEvent.keyDown(window, { key: 'F5' });
+    fireEvent.keyDown(window, { key: 'e', ctrlKey: true });
+    await act(async () => {});
+    expect(api.scan).not.toHaveBeenCalled();
+    expect(api.exportMedia).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '取消' }));
+    fireEvent.keyDown(window, { key: 'F5' });
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+  });
+
   it('keeps bootstrap usable when advisory health times out', async () => {
     vi.mocked(api.health).mockRejectedValue(new IpcError('slow health', 'HOST_TIMEOUT'));
     const { container } = render(<App />);
@@ -185,6 +218,7 @@ describe('desktop renderer', () => {
   let hostUnavailableListener: ((message: string) => void) | null;
 
   beforeEach(() => {
+    renderFault.library = false;
     api = createApi();
     hostUnavailableListener = null;
     vi.mocked(api.onHostUnavailable).mockImplementation((listener) => {
@@ -194,7 +228,31 @@ describe('desktop renderer', () => {
     Object.defineProperty(window, 'cacheManager', { configurable: true, value: api });
   });
 
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+  it('recovers a failed page during export without replaying the task or losing its guard', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const exporting = deferred<Awaited<ReturnType<CacheManagerApi['exportMedia']>>>();
+    vi.mocked(api.exportMedia).mockReturnValue(exporting.promise);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: '选择 测试缓存' }));
+    renderFault.library = true;
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    expect(await screen.findByRole('heading', { name: '当前页面显示异常' })).toBeInTheDocument();
+    expect(api.exportMedia).toHaveBeenCalledOnce();
+    renderFault.library = false;
+    fireEvent.click(screen.getByRole('button', { name: '重试显示此页' }));
+    expect(screen.getByRole('checkbox', { name: '选择 测试缓存' })).toBeChecked();
+    expect(screen.getByRole('button', { name: '导出' })).toBeDisabled();
+    expect(api.getInitialState).toHaveBeenCalledOnce();
+    expect(api.reloadWhenIdle).not.toHaveBeenCalled();
+    await act(async () => exporting.resolve({ published: true, outputPath: 'batch', exportedCount: 1, failures: [] }));
+    expect(await screen.findByText('导出结果：全部成功')).toBeInTheDocument();
+    expect(api.exportMedia).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: '导出' })).not.toBeDisabled();
+  });
 
   it('keeps selected videos when paging and submits the complete selection', async () => {
     const second = { ...initialItem, id: '200', avid: '200', title: 'Second page video' };
@@ -612,7 +670,8 @@ describe('desktop renderer', () => {
     act(() => vi.mocked(api.onProgress).mock.calls[0][0]({
       requestId: 'startup', operation: 'scan', stage: 'scanning', message: 'Startup progress',
     }));
-    expect(screen.getByText('Startup progress')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: '正在扫描缓存' })).toBeInTheDocument();
+    expect(screen.getByTitle('Startup progress')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
     await waitFor(() => expect(api.cancel).toHaveBeenCalledOnce());
     await act(async () => pending.reject(new IpcError('cancelled', 'cancelled')));
@@ -621,7 +680,7 @@ describe('desktop renderer', () => {
     expect(shell).toHaveAttribute('data-renderer-bootstrap', 'ready');
     expect(shell).toHaveAttribute('data-startup-scan', 'cancelled');
     expect(shell).toHaveAttribute('data-bootstrap-error', '');
-    expect(screen.queryByText('Startup progress')).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
     expect(await screen.findByText('测试缓存')).toBeInTheDocument();

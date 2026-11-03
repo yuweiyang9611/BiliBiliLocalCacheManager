@@ -236,6 +236,9 @@ export interface DesktopInfo {
 }
 
 export interface CacheManagerApi {
+  getTaskHistory(): Promise<TaskHistorySnapshot>;
+  onTaskHistoryChanged(listener: () => void): () => void;
+  reloadWhenIdle(): Promise<boolean>;
   getTrashPage(rootPath: string, options?: { snapshotToken?: string; offset?: number; pageSize?: number }): Promise<TrashPage>;
   purgeTrashSnapshot(rootPath: string, snapshotToken: string, confirmationText: string): Promise<TrashPurgeResult | null>;
   cancelSearch(): Promise<boolean>;
@@ -246,7 +249,7 @@ export interface CacheManagerApi {
   getInitialState(): Promise<InitialState>;
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
   chooseRootDirectory(defaultPath?: string): Promise<string | null>;
-  scan(options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; offset?: number; pageSize?: number }): Promise<ScanResult>;
+  scan(options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; incremental?: boolean; offset?: number; pageSize?: number }): Promise<ScanResult>;
   cancel(): Promise<boolean>;
   locateScanIssue(indexToken: string, issueId: number): Promise<boolean>;
   search(request: SearchRequest): Promise<CachePage>;
@@ -274,6 +277,24 @@ export interface OperationState {
   state: 'cancelling' | 'unconfirmed' | 'unknown' | 'settled';
   sideEffects: boolean;
 }
+
+export type TaskOperation = 'play' | 'export' | 'trash.move' | 'trash.restore' | 'trash.purge' | 'trash.purgeSnapshot';
+export type TaskOutcome = 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled' | 'confirmation' | 'unknown';
+export interface TaskHistoryEntry {
+  id: string;
+  operation: TaskOperation;
+  status: TaskOutcome;
+  startedAt: string;
+  recordedAt?: string;
+  rootPath?: string;
+  outputPath?: string;
+  summary: string;
+  succeeded: number;
+  failed: number;
+  unprocessed: number;
+  failures: MediaFailure[];
+}
+export interface TaskHistorySnapshot { entries: TaskHistoryEntry[]; warning?: string }
 
 export interface TrashPage {
   snapshotToken: string;

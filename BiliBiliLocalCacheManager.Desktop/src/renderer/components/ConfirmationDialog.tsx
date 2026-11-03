@@ -19,7 +19,7 @@ export function ConfirmationDialog({ value, close }: { value: Confirmation; clos
     {value.requiredText && <label className="field">输入确认文字：{value.requiredText}
       <input aria-label="输入确认文字" autoComplete="off" value={text} onChange={event => setText(event.target.value)} />
     </label>}
-    <div className="modal-actions"><button className="button ghost" onClick={close}>取消</button>
+    <div className="modal-actions"><button className="button ghost" data-modal-initial-focus onClick={close}>取消</button>
       <button className={value.destructive ? 'button danger' : 'button primary'} disabled={Boolean(value.requiredText && text !== value.requiredText)}
         onClick={() => { close(); value.action(text); }}>确认</button>
     </div>
