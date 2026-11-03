@@ -597,6 +597,64 @@ describe('IPC trash root safety', () => {
   });
 });
 
+describe('renderer recovery', () => {
+  it('waits for Host calls to settle before reloading', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const owner = trustedEvent(901);
+    const call = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false, 'index-1');
+    expect(await invoke(channels.reloadWhenIdle, owner)).toBe(false);
+    expect(owner.sender.reload).not.toHaveBeenCalled();
+    fake.pending.get(fake.calls[0].id)!.resolve({ queued: 1, failures: [] });
+    await call;
+    expect(await invoke(channels.reloadWhenIdle, owner)).toBe(true);
+    expect(owner.sender.reload).toHaveBeenCalledOnce();
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('includes native dialog waits before a Host request exists', async () => {
+    const fake = createImmediateBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const owner = trustedEvent(902);
+    const dialog = deferred();
+    electronMocks.showOpenDialog.mockReturnValue(dialog.promise);
+    const exporting = invoke(channels.exportMedia, owner, path.resolve('cache'), [{ avid: '100' }], 'batch', false, undefined, 'index-1');
+    expect(fake.calls).toHaveLength(0);
+    expect(await invoke(channels.reloadWhenIdle, owner)).toBe(false);
+    dialog.resolve({ canceled: true, filePaths: [] });
+    await exporting;
+    expect(await invoke(channels.reloadWhenIdle, owner)).toBe(true);
+  });
+
+  it('preserves unknown outcomes for the recovered renderer to acknowledge', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const owner = trustedEvent(903);
+    const call = invoke(channels.play, owner, path.resolve('cache'), [{ avid: '100' }], 'system', false, 'index-1');
+    const rejected = expect(call).rejects.toThrow('Host exited');
+    const id = fake.calls[0].id;
+    const state = { requestId: id, operation: 'play', state: 'unknown', sideEffects: true };
+    fake.bridge.emit('operation-state', state);
+    fake.pending.get(id)!.reject(new Error('Host exited'));
+    await rejected;
+    expect(await invoke(channels.reloadWhenIdle, owner)).toBe(true);
+    expect(await invoke(channels.operationStates, owner)).toEqual([state]);
+  });
+
+  it('rejects untrusted recovery requests and releases failed invocation guards', async () => {
+    const fake = createImmediateBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const untrusted = trustedEvent(904);
+    Object.assign(untrusted.senderFrame!, { url: 'https://untrusted.invalid/' });
+    expect(() => invoke(channels.reloadWhenIdle, untrusted)).toThrow();
+    expect(untrusted.sender.reload).not.toHaveBeenCalled();
+    const owner = trustedEvent(905);
+    electronMocks.showOpenDialog.mockRejectedValue(new Error('dialog failed'));
+    await expect(invoke(channels.chooseRoot, owner)).rejects.toThrow('dialog failed');
+    expect(await invoke(channels.reloadWhenIdle, owner)).toBe(true);
+  });
+});
+
 function createDeferredBridge(): {
   bridge: DesktopHostBridge;
   calls: Array<{ id: string; method: string; params: JsonObject }>;
@@ -676,6 +734,7 @@ function trustedEvent(senderId: number): IpcMainInvokeEvent {
   const sender = Object.assign(new EventEmitter(), {
     id: senderId,
     send: vi.fn(),
+    reload: vi.fn(),
     isDestroyed: () => false,
   });
   return {

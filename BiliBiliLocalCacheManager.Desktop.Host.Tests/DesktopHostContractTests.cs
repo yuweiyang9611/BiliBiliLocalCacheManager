@@ -238,6 +238,14 @@ public sealed partial class DesktopHostContractTests
             entry => entry.FullName == "diagnostics.json");
         using var diagnosticsStream = diagnosticsEntry.Open();
         using var diagnostics = await JsonDocument.ParseAsync(diagnosticsStream);
+        using var eventsStream = archive.GetEntry("recent-events.json")!.Open();
+        using var events = await JsonDocument.ParseAsync(eventsStream);
+        var timing = Assert.Single(events.RootElement.EnumerateArray(),
+            item => item.GetProperty("category").GetString() == "ScanTiming");
+        var timingMessage = timing.GetProperty("message").GetString()!;
+        foreach (var phase in new[] { "waitMs=", "buildMs=", "snapshotMs=", "pageMs=", "totalMs=" })
+            Assert.Contains(phase, timingMessage);
+        Assert.DoesNotContain(workspace.CacheRoot, timingMessage, StringComparison.OrdinalIgnoreCase);
         Assert.True(
             diagnostics.RootElement
                 .GetProperty("session")

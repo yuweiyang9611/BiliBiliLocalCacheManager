@@ -126,8 +126,14 @@ public sealed partial class DesktopHostContractTests
     {
         var requested = new[] { "101", "202", "303" };
         if (!restore) return requested;
-        foreach (var avid in requested) service.MoveToTrash(root, long.Parse(avid));
-        return service.ListEntries(root).OrderBy(entry => entry.Avid).Select(entry => entry.TrashPath).ToArray();
+        foreach (var avid in requested)
+        {
+            var prepared = service.MoveToTrash(root, long.Parse(avid));
+            Assert.True(prepared.Succeeded, $"Could not prepare trash fixture {avid}: {prepared.ErrorMessage}");
+        }
+        var entries = service.ListEntries(root).OrderBy(entry => entry.Avid).ToArray();
+        Assert.Equal(new[] { 101L, 202L, 303L }, entries.Select(entry => entry.Avid));
+        return entries.Select(entry => entry.TrashPath).ToArray();
     }
 
     [Theory]

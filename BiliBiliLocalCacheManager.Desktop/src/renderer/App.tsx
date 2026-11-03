@@ -19,6 +19,8 @@ import { StoragePage } from './pages/StoragePage';
 import { TrashPage } from './pages/TrashPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
+import { RenderBoundary, RendererRecovery } from './components/RenderBoundary';
+import { observeOperationStates } from './operation-state-observer';
 
 type UndoDeleteBatch = { rootPath: string; entryIds: string[] };
 type RootBoundState<T> = { rootPath: string | null; value: T };
@@ -86,7 +88,6 @@ export function App() {
   const inspectionInFlight = useRef(false);
   const [searching, setSearching] = useState(false);
   const [operationStates, setOperationStates] = useState<Record<string, OperationState>>({});
-  const operationStatesRef = useRef<Record<string, OperationState>>({});
   const blockedOperations = useRef(false);
   const unresolved = Object.values(operationStates);
   const operationsBlocked = unresolved.some(state => state.sideEffects);
@@ -272,16 +273,7 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
-    let restoringStates = true;
-    const stateUpdates = new Map<string, OperationState>();
-    const unsubscribeState = cacheManager.onOperationState((value) => {
-      if (disposed) return;
-      if (value.operation === 'search' || value.operation === 'cache.details') return;
-      if (restoringStates) stateUpdates.set(value.requestId, value);
-      const next = { ...operationStatesRef.current };
-      if (value.state === 'settled') delete next[value.requestId];
-      else next[value.requestId] = value;
-      operationStatesRef.current = next;
+    const observedStates = observeOperationStates(next => {
       blockedOperations.current = Object.values(next).some(state => state.sideEffects);
       setOperationStates(next);
     });
@@ -292,21 +284,8 @@ export function App() {
     });
     void (async () => {
       try {
-        const snapshot = await cacheManager.getOperationStates();
+        await observedStates.ready;
         if (disposed) return;
-        // Events received while the snapshot was in flight take precedence,
-        // including settled events that must not resurrect an old restriction.
-        const restored: Record<string, OperationState> = {};
-        for (const value of [...snapshot, ...stateUpdates.values()]) {
-          if (value.operation === 'search' || value.operation === 'cache.details') continue;
-          if (value.state === 'settled') delete restored[value.requestId];
-          else restored[value.requestId] = value;
-        }
-        restoringStates = false;
-        stateUpdates.clear();
-        blockedOperations.current = Object.values(restored).some(state => state.sideEffects);
-        operationStatesRef.current = restored;
-        setOperationStates(restored);
         const [initial, info] = await Promise.all([
           cacheManager.getInitialState(),
           cacheManager.getDesktopInfo(),
@@ -376,7 +355,7 @@ export function App() {
       }
     })();
     return () => {
-      disposed = true; unsubscribeUnavailable(); unsubscribeState();
+      disposed = true; unsubscribeUnavailable(); observedStates.dispose();
       void cacheManager.cancelSearch().catch(() => undefined);
     };
   }, [applyScanResult, invalidateIndex, notify, replaceLibraryItems]);
@@ -839,7 +818,7 @@ export function App() {
         <Icon name="warning" />
         <h1>桌面端初始化失败</h1>
         <p>{bootstrapError || 'Desktop Host 返回了无法使用的初始化数据。'}</p>
-        <button className="button primary" onClick={() => window.location.reload()}>重试初始化</button>
+        <RendererRecovery label="重试初始化" />
       </div>
     </div>;
   }
@@ -893,6 +872,7 @@ export function App() {
         <OperationProgress revision={progressRevision} />
 
         <section className="page-content">
+          <RenderBoundary scope="page" key={page}>
           {(page === 'library' || page === 'settings') && scanReport && <section className="result-panel" aria-label="扫描结果">
             <div className="panel-heading"><h2>扫描结果</h2><span>损坏 {scanReport.invalidEntries ?? 0} · 无法访问 {scanReport.inaccessibleDirectories ?? 0} · 跳过未完成 {scanReport.skippedIncompleteEntries ?? 0}</span></div>
             {scanReport.issues.length > 0 && <details><summary>问题明细（{scanReport.issues.length}）</summary><ul className="result-list">
@@ -1057,6 +1037,7 @@ export function App() {
             const value = await run('正在导出诊断报告…', () => cacheManager.exportDiagnostics(`BLCM-diagnostics-${dateStamp()}.zip`, activeRootPath || undefined));
             if (value) notify('success', `诊断报告已导出：${value.outputPath}`);
           }} busy={uiBusy} />}
+          </RenderBoundary>
         </section>
 
         <footer className="statusbar"><span>{inspectionBusy ?? busy ?? (detailsLoading ? '正在加载分段详情…' : items.length ? `当前显示 ${cachePage.offset + 1}–${cachePage.offset + items.length} / ${cachePage.totalItems} 条缓存，${selection.label} · ${formatBytes(selection.bytes)}` : '就绪')}</span><span>F5 扫描 · Ctrl+F 搜索 · Ctrl+Z 撤销 · Ctrl+E 导出 · Esc 取消</span></footer>
