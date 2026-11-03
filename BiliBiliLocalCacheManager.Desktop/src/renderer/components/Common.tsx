@@ -1,14 +1,12 @@
-import type { ReactNode } from 'react';
 import { Icon, type IconName } from './Icon';
 import type { CachePageState } from '../ui-types';
+export { Modal } from './Modal';
 
 export function Metric({ label, value, detail, color }: { label: string; value: string; detail: string; color: string }) { return <div className={`metric-card ${color}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
 
 export function Check({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange(value: boolean): void }) { return <label className="check"><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>; }
 
 export function Empty({ icon, title, body, compact = false }: { icon: IconName; title: string; body: string; compact?: boolean }) { return <div className={compact ? 'empty compact' : 'empty'}><Icon name={icon} /><h3>{title}</h3><p>{body}</p></div>; }
-
-export function Modal({ title, onClose, children, closable = true }: { title: string; onClose(): void; children: ReactNode; closable?: boolean }) { return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (closable && event.target === event.currentTarget) onClose(); }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-header"><h2 id="modal-title">{title}</h2>{closable && <button className="icon-button" aria-label="关闭" onClick={onClose}>×</button>}</div>{children}</div></div>; }
 
 export function Description({ rows }: { rows: Array<[string, string | undefined]> }) { return <dl>{rows.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value || '—'}</dd></div>)}</dl>; }
 

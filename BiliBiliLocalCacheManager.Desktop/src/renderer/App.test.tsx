@@ -155,6 +155,26 @@ function deferred<T>() {
 }
 
 describe('desktop renderer', () => {
+  it('keeps global action shortcuts behind an open confirmation and restores them after closing', async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    fireEvent.click(screen.getByLabelText('选择 测试缓存'));
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    vi.mocked(api.scan).mockClear();
+    fireEvent.keyDown(window, { key: 'F5' });
+    fireEvent.keyDown(window, { key: 'e', ctrlKey: true });
+    await act(async () => {});
+    expect(api.scan).not.toHaveBeenCalled();
+    expect(api.exportMedia).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '取消' }));
+    fireEvent.keyDown(window, { key: 'F5' });
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+  });
+
   it('keeps bootstrap usable when advisory health times out', async () => {
     vi.mocked(api.health).mockRejectedValue(new IpcError('slow health', 'HOST_TIMEOUT'));
     const { container } = render(<App />);

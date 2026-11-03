@@ -21,6 +21,8 @@ import { SettingsPage } from './pages/SettingsPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { RenderBoundary, RendererRecovery } from './components/RenderBoundary';
 import { observeOperationStates } from './operation-state-observer';
+import { projectOperationResult } from '../shared/operation-result';
+import type { TrashMoveResult, TrashRestoreResult, TrashPurgeResult } from '../shared/contracts';
 
 type UndoDeleteBatch = { rootPath: string; entryIds: string[] };
 type RootBoundState<T> = { rootPath: string | null; value: T };
@@ -266,7 +268,7 @@ export function App() {
       : { restored: [], failed: [], cancelled: false, unprocessed: [] };
     if (result.restored.length > 0) invalidateIndex();
     const scanResult = result.restored.length && !result.cancelled
-      ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete, persistSettings: false, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
+      ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete, persistSettings: false, incremental: true, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
       : null;
     return { result, scanResult };
   }, [invalidateIndex, refreshAfterMutation]);
@@ -568,14 +570,15 @@ export function App() {
       }
     }, true);
     if (result) {
-      const failures = result.failures;
+      const facts = projectOperationResult(result);
+      const failures = facts.failures;
       let retryTargets: SelectionTarget[] = [];
       let retryUnavailable: string | undefined;
       try { retryTargets = buildPlaybackRetryTargets(failures); }
       catch (error) { retryUnavailable = describeError(error); }
       setBatchReport({ ...context, targets: retryTargets, retryUnavailable,
-        status: result.queued === 0 ? 'failed' : failures.length ? 'partial' : 'success', succeeded: result.queued, failures });
-      notify(result.queued === 0 ? 'error' : failures.length ? 'info' : 'success', `已将 ${result.queued} 个页面交给播放器，失败 ${failures.length} 项。`);
+        status: facts.status === 'succeeded' ? 'success' : facts.status, succeeded: facts.succeeded, failures });
+      notify(facts.status === 'failed' ? 'error' : facts.status === 'partial' ? 'info' : 'success', `已将 ${facts.succeeded} 个页面交给播放器，失败 ${facts.failed} 项。`);
     }
   }, [activeRootPath, indexBinding?.indexToken, notify, run, settings.includeIncomplete, settings.playerPreference, targets]);
 
@@ -599,12 +602,14 @@ export function App() {
       }
     }, true);
     if (result) {
+      const facts = projectOperationResult(result);
       const needsConfirmation = Boolean(result.confirmationId && result.transcodeRequirements?.length);
-      setBatchReport({ ...context, status: result.published ? 'success' : needsConfirmation ? 'confirmation' : 'failed',
+      const status = facts.status === 'confirmation' && !needsConfirmation ? 'failed' : facts.status;
+      setBatchReport({ ...context, status: status === 'succeeded' ? 'success' : status,
         confirmationId: result.confirmationId, transcodeRequirements: result.transcodeRequirements,
-        succeeded: result.exportedCount, failures: result.failures });
-      notify(result.published ? 'success' : needsConfirmation ? 'info' : 'error', result.published ? `已导出：${result.outputPath}`
-        : needsConfirmation ? '本批尚未发布，需要确认转码。' : '本批导出未发布，请查看失败明细。');
+        succeeded: facts.succeeded, failures: facts.failures });
+      notify(status === 'succeeded' ? 'success' : needsConfirmation || status === 'cancelled' ? 'info' : 'error', status === 'succeeded' ? `已导出：${facts.outputPath}`
+        : needsConfirmation ? '本批尚未发布，需要确认转码。' : status === 'cancelled' ? '本批导出已取消。' : '本批导出未发布，请查看失败明细。');
     } else if (result === null) {
       setBatchReport({ ...context, status: 'cancelled', succeeded: 0, failures: [] });
     }
@@ -631,7 +636,7 @@ export function App() {
           const result = await cacheManager.moveToTrash(rootPath, indexToken, requestedTargets);
           if (result.moved.length > 0) invalidateIndex();
           const scanResult = result.moved.length > 0 && !result.cancelled
-            ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete: settings.includeIncomplete, persistSettings: false, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
+            ? await refreshAfterMutation(() => cacheManager.scan({ rootPath, includeIncomplete: settings.includeIncomplete, persistSettings: false, incremental: true, offset: 0, pageSize: DEFAULT_CACHE_PAGE_SIZE }))
             : null;
           return { result, scanResult };
         });
@@ -788,6 +793,7 @@ export function App() {
   }, [applyScanResult, restoreAndRescan, invalidateIndex, invalidateRootViews, invalidateStorage, legacySettingsMigration, notify, replaceLibraryItems, reportScan, run]);
 
   useShortcuts((event) => {
+    if (event.defaultPrevented || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
     const uiBusy = Boolean(busy) || Boolean(inspectionBusy) || detailsLoading || searching || operationsBlocked;
       if (event.key === 'F5') { event.preventDefault(); if (!uiBusy) void scan(); }
       if (event.key === 'Escape' && uiBusy) { event.preventDefault(); void cancelCurrentOperation(); }
@@ -1055,10 +1061,8 @@ export function App() {
 function isUnknownOutcome(error: unknown): boolean {
   return errorCode(error) === 'OUTCOME_UNKNOWN';
 }
-function diskFailureDetails(result: { failed: string[]; items?: { succeeded: boolean; avid?: string; pageIndex?: number; entryId?: string; error?: string }[] }): MediaFailure[] {
-  const details = result.items?.filter(item => !item.succeeded).map(item => ({ avid: item.avid ?? '', pageIndex: item.pageIndex ?? null,
-    title: item.entryId ?? (item.avid ? `av${item.avid}` : '操作失败'), message: item.error ?? '操作失败' }));
-  return details?.length ? details : result.failed.map(id => ({ avid: '', pageIndex: null, title: id, message: '操作失败，请核对条目状态。' }));
+function diskFailureDetails(result: TrashMoveResult | TrashRestoreResult | TrashPurgeResult): MediaFailure[] {
+  return projectOperationResult(result).failures;
 }
 
 function isCancellationError(error: unknown): boolean {

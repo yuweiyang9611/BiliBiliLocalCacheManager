@@ -182,6 +182,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     const request = {
       rootPath: assertPath(options.rootPath, 'rootPath'),
       includeIncomplete: assertBoolean(options.includeIncomplete, 'includeIncomplete'),
+      ...(options.incremental === undefined ? {} : { incremental: assertBoolean(options.incremental, 'incremental') }),
       ...(options.persistSettings === undefined
         ? {}
         : { persistSettings: assertBoolean(options.persistSettings, 'persistSettings') }),

@@ -139,7 +139,7 @@ jobs:
 
       - name: Install Electron runtime
         working-directory: BiliBiliLocalCacheManager.Desktop
-        run: node -e "require('electron')"
+        run: npm run setup:e2e
 
       - name: Configure Electron SUID sandbox for source smoke
         if: runner.os == 'Linux'
@@ -154,6 +154,30 @@ jobs:
       - name: Check Electron
         working-directory: BiliBiliLocalCacheManager.Desktop
         run: npm run check
+
+      - name: Test recovery, task history and keyboard E2E on Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        run: npm run test:e2e -- --skip-build
+
+      - name: Test recovery, task history and keyboard E2E on Ubuntu Xvfb
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        working-directory: BiliBiliLocalCacheManager.Desktop
+        run: xvfb-run --auto-servernum npm run test:e2e -- --skip-build
+
+      - name: Upload desktop E2E reports and failure screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-e2e-${{ matrix.rid }}
+          path: |
+            artifacts/e2e/**/results.json
+            artifacts/e2e/**/*.log
+            artifacts/e2e/**/*.png
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Test release acceptance validation
         run: node --test scripts/validate-desktop-acceptance.test.mjs

@@ -19,11 +19,10 @@
 
 真实 Electron 44 渲染器通过隔离的故障数据触发页面/根错误边界，在 1440×900 和 1080×720 两种窗口尺寸下检查：无横向溢出、恢复按钮在视口内且可获得焦点、页面失败后可切换至设置、根恢复遭拒时显示等待原因。四张截图与 JSON 保留于本地 `artifacts/renderer-recovery-1790495976405/`。此脚本使用夹具 API，不执行真实 Host、播放器或磁盘变更；Host/原生对话框恢复保护另由 IPC 测试覆盖。
 
-复现界面验证（先完成前端生产构建，再通过 Electron 执行；运行环境不能设置 `ELECTRON_RUN_AS_NODE`）：
+复现界面验证（2026-11-04 已改为 Node + 项目锁定的 Playwright 入口；先完成前端生产构建）：
 
 ```powershell
-$env:ELECTRON_RUN_AS_NODE = $null
-Start-Process ./BiliBiliLocalCacheManager.Desktop/node_modules/electron/dist/electron.exe -ArgumentList './scripts/verify-renderer-recovery.cjs' -WindowStyle Hidden -Wait
+node scripts/verify-renderer-recovery.cjs
 ```
 
 ## 扫描观察
@@ -126,3 +125,21 @@ node scripts/measure-host-scan.cjs artifacts/desktop-requirements-<timestamp>/is
 本次 `npm run check` 通过：237 项前端测试、类型检查及生产构建。Host 全量 108 项契约测试及三个新增验证脚本的 `node --check` 通过；本次 Host 测试使用 .NET SDK 10.0.403，不替代上文精确 SDK 的发布验证。
 
 本次未重新打包或执行真实 Electron 窗口验收。上文 `verification-win-2026-09-27-final` 候选包早于此次修正，不包含新的失败明细修复；其历史哈希和验收范围保持原记录。
+
+## 2026-11-04 后续桌面完善
+
+本轮完成键盘弹窗交互、项目自包含 E2E 测试入口、已知本地变更的增量刷新，以及实时结果/任务历史的共享事实投影。Linux 真实媒体处理与完整桌面发布验收继续暂缓，CI 新增的 Ubuntu/Xvfb 测试仅覆盖交互与历史，不代替媒体和真实桌面验收。
+
+弹窗保持焦点、隔离背景并阻止后台快捷键；缓存标题支持键盘打开详情和跨虚拟行导航。历史只在持久化时裁剪明细，当前界面使用完整失败集合；重试和转码许可独立管理。
+
+增量刷新仅重扫成功移动/恢复涉及的 AV；异常或不完整基线回退全库扫描，手动刷新仍发现外部变化。10 项针对性契约覆盖统计一致性、回退、取消、设置变更与原始物理身份复用；其中相同 metadata 的替换目录仍拒绝删除。Core 身份校验现在从同一份有界字节解析和哈希，避免第二次文件读取。500 视频/1000 分 P 的可复现测量见 [性能记录](../query-performance.md)。
+
+本轮前端 `npm run check` 的 261 项测试、类型检查和生产构建通过；Core 176、Playback 129、Host 118 项非 FFmpeg 回归通过。新的统一入口 `npm --prefix BiliBiliLocalCacheManager.Desktop run test:e2e -- --skip-build` 在 Windows 验证真实 Electron 恢复、主进程原生对话框未结束时拒绝重载、任务落盘及完整重启后的恢复，以及两个尺寸下的实际键盘交互；最终日志与截图保留于 `artifacts/e2e/run-8OzaDW/`。键盘检查覆盖 Home/End 跨虚拟行、Enter 加载分 P、Tab 环绕、背景快捷键隔离、Esc 返回焦点和关闭弹窗后恢复 F5，渲染错误为零。CI 中 Windows/Ubuntu 的入口已接入，远端执行结果待提交后观察。
+
+## 2026-11-04 提交前审查
+
+审查复现一项 UTF-8 BOM 兼容性回归：`JsonDocument.Parse(Stream)` 接受的 BOM 在改为字节解析后被拒绝，使正常扫描的分 P 无法捕获删除身份。现在仅在解析时跳过 BOM，哈希仍覆盖全部原始字节。新增回归先观察 `0xEF is an invalid start of a value`，再验证捕获身份、完整字节哈希、移入回收站及恢复成功；分 P 回收站 14 项定向测试通过。
+
+一次全量运行中，既有取消用例的首个整视频移动未成功，原断言只报告空成功集合。该路径使用未修改的整视频移动服务，新增的增量失效逻辑尚未执行；本次未取得原始失败原因，不认定为已修复的生产缺陷。补充夹具准备断言与完整失败结果诊断后，4 项取消用例连续 10 轮（40 次）通过，最终完整组合也通过。没有增加重试、跳过断言或放宽文件安全检查。
+
+最终 .NET 非 FFmpeg 回归为 Core 177、Playback 129、Host 118，共 424 项通过；前端代码与已通过 261 项的构建保持一致。修复后真实 Electron 恢复、重启历史和键盘套件再次全部通过，证据位于 `artifacts/e2e/run-jIN9MX/`。规范与需求符合性复查未发现其它可确认的新增缺陷。

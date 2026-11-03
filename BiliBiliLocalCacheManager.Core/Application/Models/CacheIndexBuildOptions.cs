@@ -46,6 +46,9 @@ public sealed class CacheIndexBuildOptions
     /// </summary>
     public long? MaximumCacheBytes { get; set; }
 
+    /// <summary>Optional AV scope for refreshing known local mutations; null scans the whole root.</summary>
+    public IReadOnlySet<long>? AvidFilter { get; set; }
+
     public CacheIndexBuildOptions Clone()
     {
         var copy = new CacheIndexBuildOptions
@@ -54,7 +57,8 @@ public sealed class CacheIndexBuildOptions
             IncludeIncompleteEntries = IncludeIncompleteEntries,
             ThrowOnInvalidEntry = ThrowOnInvalidEntry,
             MaxReportedIssues = Math.Max(0, MaxReportedIssues),
-            MaximumCacheBytes = MaximumCacheBytes
+            MaximumCacheBytes = MaximumCacheBytes,
+            AvidFilter = AvidFilter is null ? null : new HashSet<long>(AvidFilter)
         };
 
         copy.VideoFileExtensions.Clear();

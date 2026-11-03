@@ -124,15 +124,22 @@ public sealed partial class FileSystemCacheTrashService
     {
         if (stream.Length > 4 * 1024 * 1024) throw new InvalidDataException("Part metadata is too large.");
         stream.Position = 0;
-        using var document = JsonDocument.Parse(stream);
+        // Validate and hash the same bounded bytes, avoiding a second filesystem read.
+        var bytes = new byte[checked((int)stream.Length)];
+        stream.ReadExactly(bytes);
+        if (stream.ReadByte() != -1) throw new InvalidDataException("Part metadata changed while reading.");
+        // The stream parser accepted UTF-8 BOMs. Strip one for parsing only;
+        // the identity hash must still cover every original byte.
+        var jsonBytes = bytes.AsMemory();
+        if (bytes.AsSpan().StartsWith("\uFEFF"u8)) jsonBytes = jsonBytes[3..];
+        using var document = JsonDocument.Parse(jsonBytes);
         var root = document.RootElement;
         if (!root.TryGetProperty("avid", out var avidValue) || !avidValue.TryGetInt64(out var actualAvid) || actualAvid != avid ||
             !root.TryGetProperty("page_data", out var page) ||
             !page.TryGetProperty("page", out var number) || !number.TryGetInt32(out var actualPage) || actualPage != pageIndex ||
             (cid is { } expectedCid && (!page.TryGetProperty("cid", out var cidValue) || !cidValue.TryGetInt64(out var actualCid) || actualCid != expectedCid)))
             throw new InvalidDataException("Part metadata no longer matches the indexed selection.");
-        stream.Position = 0;
-        return Convert.ToHexString(SHA256.HashData(stream));
+        return Convert.ToHexString(SHA256.HashData(bytes));
     }
 
     private static PartTrashMetadata? ReadPartMetadata(string directory)

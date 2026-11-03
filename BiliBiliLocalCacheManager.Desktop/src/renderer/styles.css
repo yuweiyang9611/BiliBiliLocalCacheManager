@@ -126,6 +126,8 @@ tbody tr { cursor: default; transition: background .1s; }
 tbody tr:hover, tbody tr.focused { background: rgba(80, 139, 235, .08); }
 tbody tr.focused { box-shadow: inset 2px 0 var(--accent); }
 .cache-row td { height: 54px; }
+.cache-title-button { display: block; width: 100%; padding: 0; color: inherit; text-align: left; background: none; border: 0; cursor: pointer; }
+.cache-title-button:hover { color: var(--accent); }
 .virtual-spacer, .virtual-spacer:hover { background: transparent; box-shadow: none; }
 .virtual-spacer td { padding: 0; border: 0; }
 td strong { display: block; max-width: 360px; color: #dfe8f7; font-weight: 560; overflow: hidden; text-overflow: ellipsis; }

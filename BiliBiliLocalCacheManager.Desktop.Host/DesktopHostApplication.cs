@@ -580,6 +580,8 @@ internal sealed partial class DesktopHostApplication
         lock (_stateSync)
         {
             _indexGeneration++;
+            _mutationRefresh = null;
+            _lastScanReport = null;
             _indexSnapshot?.Invalidate();
             _indexSnapshot = null;
             _currentIndex = null;

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { JsonObject, TaskHistoryEntry, TaskHistorySnapshot, TaskOperation, TaskOutcome } from '../shared/contracts';
 import { validateExportBatchResult, validatePlaybackBatchResult, validateTrashMoveResult,
   validateTrashRestoreResult, validateTrashPurgeResult, validateTrashSnapshotPurgeResult } from './host-contract-validation';
+import { projectOperationResult } from '../shared/operation-result';
 
 const operations = new Set<TaskOperation>(['play', 'export', 'trash.move', 'trash.restore', 'trash.purge', 'trash.purgeSnapshot']);
 const statuses = new Set<TaskOutcome>(['running', 'succeeded', 'partial', 'failed', 'cancelled', 'confirmation', 'unknown']);
@@ -118,50 +119,19 @@ export class TaskHistoryStore extends EventEmitter {
 }
 
 function summarize(operation: TaskOperation, result: unknown): Pick<TaskHistoryEntry, 'status' | 'summary' | 'succeeded' | 'failed' | 'unprocessed' | 'failures' | 'outputPath'> {
-  let succeeded = 0, failed = 0, unprocessed = 0, cancelled = false, confirmation = false;
-  let outputPath: string | undefined;
-  let failures: TaskHistoryEntry['failures'] = [];
-  if (operation === 'play' || operation === 'export') {
-    const response = operation === 'play' ? validatePlaybackBatchResult(result) : validateExportBatchResult(result);
-    succeeded = 'queued' in response ? response.queued : response.published ? response.exportedCount : 0;
-    failed = response.failures.length;
-    failures = response.failures.slice(0, 20).map(item => ({ avid: item.avid, pageIndex: item.pageIndex,
-      title: bounded(item.title, 512)!, message: bounded(item.message, 1024)! }));
-    if ('published' in response) {
-      confirmation = Boolean(response.transcodeRequirements?.length);
-      cancelled = !response.published && !confirmation && failed === 0;
-      // A staging/destination path in an unpublished result is not usable output.
-      if (response.published) outputPath = bounded(response.outputPath);
-    }
-  } else {
-    const response = operation === 'trash.move' ? validateTrashMoveResult(result)
-      : operation === 'trash.restore' ? validateTrashRestoreResult(result)
-        : operation === 'trash.purgeSnapshot' ? validateTrashSnapshotPurgeResult(result) : validateTrashPurgeResult(result);
-    succeeded = 'moved' in response ? response.moved.length : 'restored' in response ? response.restored.length : response.purged.length;
-    failed = response.failed.length; unprocessed = response.unprocessed?.length ?? 0; cancelled = Boolean(response.cancelled);
-    const details = new Map<string, { avid?: string; pageIndex?: number; error?: string }>();
-    if ('moved' in response) {
-      for (const item of response.items ?? []) {
-        if (!item.succeeded) details.set(item.pageIndex === undefined ? item.avid : `${item.avid}:P${item.pageIndex}`, item);
-      }
-    } else if ('restored' in response) {
-      for (const item of response.items ?? []) {
-        if (!item.succeeded) details.set(item.entryId, item);
-      }
-    }
-    failures = response.failed.slice(0, 20).map(id => {
-      const item = details.get(id);
-      return { avid: item?.avid ?? '', pageIndex: item?.pageIndex ?? null,
-        title: bounded(item?.avid ? `av${item.avid}` : id, 512)!,
-        message: bounded(item?.error, 1024) || '该项未成功，请在回收站或当前操作结果中核对。' };
-    });
-  }
-  const status: TaskOutcome = confirmation ? 'confirmation' : cancelled ? 'cancelled'
-    : failed || unprocessed ? succeeded ? 'partial' : 'failed' : 'succeeded';
+  const response = operation === 'play' ? validatePlaybackBatchResult(result)
+    : operation === 'export' ? validateExportBatchResult(result)
+      : operation === 'trash.move' ? validateTrashMoveResult(result)
+        : operation === 'trash.restore' ? validateTrashRestoreResult(result)
+          : operation === 'trash.purgeSnapshot' ? validateTrashSnapshotPurgeResult(result) : validateTrashPurgeResult(result);
+  const facts = projectOperationResult(response);
+  const { status, succeeded } = facts;
   const summary = operation === 'play' ? `已交给播放器 ${succeeded} 项；这不代表播放完成。`
-    : operation === 'export' ? confirmation ? '本批未发布，等待转码确认。请从缓存库重新选择并核对。'
+    : operation === 'export' ? status === 'confirmation' ? '本批未发布，等待转码确认。请从缓存库重新选择并核对。'
       : `已发布 ${succeeded} 项。` : `已完成 ${succeeded} 项。`;
-  return { status, summary, succeeded, failed, unprocessed, failures, outputPath };
+  return { ...facts, summary, outputPath: bounded(facts.outputPath),
+    failures: facts.failures.slice(0, 20).map(item => ({ avid: item.avid, pageIndex: item.pageIndex,
+      title: bounded(item.title, 512)!, message: bounded(item.message, 1024)! })) };
 }
 
 function validateEntry(value: unknown): TaskHistoryEntry {

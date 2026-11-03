@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { Profiler } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { CacheEntry, CacheManagerApi, HostProgress } from '../../shared/contracts';
@@ -7,6 +7,27 @@ import { VirtualizedCacheTable } from './LibraryPage';
 import { OperationProgress } from '../components/OperationProgress';
 
 afterEach(cleanup);
+
+it('offers keyboard details actions and preserves focus when navigating beyond mounted rows', () => {
+  const items = Array.from({ length: 1000 }, (_, n): CacheEntry => ({ id: String(n), avid: String(n + 1), bvid: '', title: `Item ${n}`,
+    ownerName: '', durationSeconds: 1, segmentCount: 1, sizeBytes: 1, isAllCompleted: true, lastUpdated: null }));
+  const focus = vi.fn(), play = vi.fn();
+  const { container } = render(<VirtualizedCacheTable items={items} selectedIds={new Set()} setSelectedIds={vi.fn()}
+    focusedId={null} focus={focus} busy={false} play={play} />);
+  const first = screen.getByRole('button', { name: '查看 Item 0 的分 P' });
+  first.focus();
+  fireEvent.keyDown(first, { key: 'End' });
+  const last = screen.getByRole('button', { name: '查看 Item 999 的分 P' });
+  expect(last).toHaveFocus();
+  fireEvent.click(last);
+  expect(focus).toHaveBeenLastCalledWith(items[999]);
+  expect(play).not.toHaveBeenCalled();
+  expect(container.querySelectorAll('[data-cache-row]').length).toBeLessThan(25);
+  fireEvent.keyDown(last, { key: 'ArrowUp' });
+  expect(screen.getByRole('button', { name: '查看 Item 998 的分 P' })).toHaveFocus();
+  fireEvent.keyDown(document.activeElement!, { key: 'Home' });
+  expect(screen.getByRole('button', { name: '查看 Item 0 的分 P' })).toHaveFocus();
+});
 
 it('keeps the mounted row count bounded while scrolling a large page', () => {
   const items = Array.from({ length: 1000 }, (_, n): CacheEntry => ({ id: String(n), avid: String(n + 1), bvid: '', title: `Item ${n}`,

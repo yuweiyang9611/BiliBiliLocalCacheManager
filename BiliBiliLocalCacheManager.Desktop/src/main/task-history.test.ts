@@ -3,11 +3,35 @@ import path from 'node:path';
 import os from 'node:os';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { TaskHistoryStore } from './task-history';
+import type { TaskOperation } from '../shared/contracts';
+import { projectOperationResult, type OperationResult } from '../shared/operation-result';
 
 let directory: string;
 let file: string;
 beforeEach(async () => { directory = await mkdtemp(path.join(os.tmpdir(), 'blcm-history-')); file = path.join(directory, 'tasks.json'); });
 afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
+
+it.each<{ operation: TaskOperation; result: OperationResult }>([
+  { operation: 'play', result: { queued: 0, failures: [] } },
+  { operation: 'play', result: { queued: 1, failures: [{ avid: '123', pageIndex: 2, title: 'Part two', message: 'Missing media' }] } },
+  { operation: 'export', result: { published: true, exportedCount: 1, outputPath: 'D:\\exports\\batch', failures: [] } },
+  { operation: 'export', result: { published: false, exportedCount: 0, outputPath: null, failures: [],
+    confirmationId: 'must-not-persist', transcodeRequirements: [{ avid: '123', pageIndex: 2, title: 'Part two',
+      approvalToken: 'a'.repeat(64), processingKind: 'audio-aac', reason: 'Conversion needed', impact: 'Audio reencoding' }] } },
+  { operation: 'trash.move', result: { moved: [], failed: ['123:P2'],
+    items: [{ avid: '123', pageIndex: 2, succeeded: false, error: 'Identity changed' }] } },
+  { operation: 'trash.restore', result: { restored: ['one'], failed: ['two'], cancelled: true, unprocessed: ['three'],
+    items: [{ entryId: 'two', avid: '123', pageIndex: 2, succeeded: false, error: 'Conflict' }] } },
+  { operation: 'trash.purgeSnapshot', result: { purged: ['one'], failed: ['two'], unprocessed: [] } },
+])('persists the same $operation facts used by the live result view', async ({ operation, result }) => {
+  const history = new TaskHistoryStore(file);
+  await history.start('shared-facts', operation, { indexToken: 'must-not-persist' });
+  await history.finish('shared-facts', operation, result);
+  const reopened = await new TaskHistoryStore(file).snapshot();
+  expect(reopened.warning).toBeUndefined();
+  expect(reopened.entries[0]).toMatchObject(projectOperationResult(result));
+  expect(await readFile(file, 'utf8')).not.toMatch(/must-not-persist|approvalToken|confirmationId/);
+});
 
 it('persists published results and failure details across restart without authorization tokens', async () => {
   const history = new TaskHistoryStore(file);

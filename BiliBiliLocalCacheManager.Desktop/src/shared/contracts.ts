@@ -249,7 +249,7 @@ export interface CacheManagerApi {
   getInitialState(): Promise<InitialState>;
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
   chooseRootDirectory(defaultPath?: string): Promise<string | null>;
-  scan(options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; offset?: number; pageSize?: number }): Promise<ScanResult>;
+  scan(options: { rootPath: string; includeIncomplete: boolean; persistSettings?: boolean; incremental?: boolean; offset?: number; pageSize?: number }): Promise<ScanResult>;
   cancel(): Promise<boolean>;
   locateScanIssue(indexToken: string, issueId: number): Promise<boolean>;
   search(request: SearchRequest): Promise<CachePage>;

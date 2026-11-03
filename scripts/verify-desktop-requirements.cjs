@@ -8,6 +8,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { performance } = require('node:perf_hooks');
 const { execFileSync } = require('node:child_process');
+const { projectRequire, electronExecutable, electronEnvironment, inside } = require('./desktop-e2e-support.cjs');
 
 const repository = path.resolve(__dirname, '..');
 const desktop = path.join(repository, 'BiliBiliLocalCacheManager.Desktop');
@@ -17,9 +18,10 @@ const options = new Map(process.argv.slice(2).map(argument => {
 }));
 const count = Number(options.get('--count') ?? 10_000);
 assert(Number.isInteger(count) && count >= 6_000 && count <= 50_000, '--count must be 6000..50000 to measure five filtered page transitions.');
+assert(!options.has('--playwright-modules'), 'Playwright is now provided by the project lockfile; remove --playwright-modules.');
 const artifactRoot = path.join(repository, 'artifacts');
-const output = path.resolve(String(options.get('--output') ?? path.join(artifactRoot, `desktop-requirements-${Date.now()}`)));
-assert(output.startsWith(artifactRoot + path.sep), 'Output must be a child of repository artifacts/.');
+const output = path.resolve(repository, String(options.get('--output') ?? path.join(process.env.BLCM_E2E_ARTIFACTS_DIR ?? artifactRoot, `desktop-requirements-${Date.now()}`)));
+assert(inside(artifactRoot, output), 'Output must be a child of repository artifacts/.');
 const fixtureRoot = path.join(output, 'isolated-fixture');
 const cacheRoot = path.join(fixtureRoot, 'cache');
 const settingsPath = path.join(fixtureRoot, 'settings.json');
@@ -47,6 +49,9 @@ function distribution(values) {
 async function buildFixture() {
   // Refuse reuse so a previous run or arbitrary user data cannot be overwritten.
   await fs.mkdir(path.dirname(output), { recursive: true });
+  const physicalParent = await fs.realpath(path.dirname(output));
+  const physicalArtifacts = await fs.realpath(artifactRoot);
+  assert(physicalParent === physicalArtifacts || inside(physicalArtifacts, physicalParent), 'Output parent cannot escape artifacts/ through a link.');
   await fs.mkdir(output);
   ownsOutput = true;
   await fs.mkdir(fixtureRoot);
@@ -106,13 +111,11 @@ async function waitForResults(page, keyword, expectedCount) {
 }
 
 async function runUi(electron) {
-  const launchEnvironment = { ...process.env,
+  const launchEnvironment = electronEnvironment({
     CACHE_MANAGER_HOST_PATH: hostPath,
     BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH: settingsPath,
     BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT: path.join(fixtureRoot, 'transcode'),
-  };
-  delete launchEnvironment.ELECTRON_RUN_AS_NODE;
-  delete launchEnvironment.VITE_DEV_SERVER_URL;
+  });
   const wrapper = path.join(output, 'isolated-entry.cjs');
   await fs.writeFile(wrapper, `const {app}=require('electron');
 if(app.isPackaged) throw new Error('Only an unpackaged development build is allowed.');
@@ -120,9 +123,9 @@ app.setPath('userData',${JSON.stringify(path.join(fixtureRoot, 'electron-profile
 app.disableHardwareAcceleration();
 require(${JSON.stringify(mainPath)});
 `);
-  const electronExecutable = require(path.join(desktop, 'node_modules', 'electron'));
   const started = performance.now();
-  const application = await electron.launch({ executablePath: electronExecutable, args: [wrapper], env: launchEnvironment, timeout: 60_000 });
+  const application = await electron.launch({ executablePath: electronExecutable(), args: [wrapper], env: launchEnvironment,
+    cwd: desktop, chromiumSandbox: true, timeout: 60_000 });
   let page;
   try {
     report.source = { baseCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim(),
@@ -226,8 +229,7 @@ require(${JSON.stringify(mainPath)});
         'Get-PhysicalDisk | Select-Object FriendlyName,MediaType,BusType,Size | ConvertTo-Json -Compress'], { encoding: 'utf8' })); }
       catch { report.machine.disks = 'Unavailable'; }
     }
-    const runtimeModules = path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'node', 'node_modules');
-    const playwright = require(require.resolve('playwright', { paths: [String(options.get('--playwright-modules') ?? runtimeModules), desktop] }));
+    const playwright = projectRequire('playwright');
     await buildFixture();
     await runUi(playwright._electron);
     report.status = 'completed';

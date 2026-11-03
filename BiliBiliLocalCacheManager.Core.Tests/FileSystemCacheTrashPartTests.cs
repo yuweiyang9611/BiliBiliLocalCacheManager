@@ -9,6 +9,22 @@ public sealed class FileSystemCacheTrashPartTests : IDisposable
     private readonly string _root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"part-trash-{Guid.NewGuid():N}")).FullName;
 
     [Fact]
+    public void Capture_Utf8BomMetadataPreservesByteHashAndCanMovePart()
+    {
+        var directory = CreatePart(100, "c1", 1);
+        var entryPath = Path.Combine(directory, "entry.json");
+        var json = File.ReadAllText(entryPath);
+        File.WriteAllText(entryPath, json, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        var service = new FileSystemCacheTrashService();
+        var segment = Assert.Single(new FileSystemCacheIndexBuilder().BuildIndex(_root).ByAvid[100].Segments);
+        var target = service.CapturePartTarget(_root, segment);
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(entryPath))), target.EntryHash);
+        var moved = service.MovePartToTrash(_root, target);
+        Assert.True(moved.Succeeded, moved.ErrorMessage);
+        Assert.True(service.Restore(_root, 100, moved.TrashPath!).Succeeded);
+    }
+
+    [Fact]
     public void Part_RoundTripsWhileSiblingAndParentRemain()
     {
         var first = CreatePart(100, "c1", 1);

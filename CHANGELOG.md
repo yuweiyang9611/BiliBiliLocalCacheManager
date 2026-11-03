@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Reliability
 
+- Keep modal focus contained, restore the invoking control, and suspend background shortcuts; expose keyboard navigation to part details across virtualized rows.
+- Refresh only AVs changed by successful local trash operations when the prior scan is complete and clean, retaining original identities for unchanged parts and invalidating old tokens. Fall back to full scans for incomplete baselines; explicit refresh always scans the whole library.
+- Validate and hash the same bounded metadata bytes in one read during part identity checks.
+- Preserve UTF-8 BOM compatibility when parsing part metadata while hashing the complete original bytes; cover capture, move and restore with a BOM regression.
+- Share operation result facts between live reports and persisted history while keeping retention limits and retry authorization separate.
+- Run portable recovery, restart-history and keyboard Electron E2E tests from project-pinned dependencies in Windows/Ubuntu CI, with isolated fixtures and failure artifacts.
+
 - Contain page rendering failures while preserving selections and in-flight task guards. Whole-renderer and initialization recovery now wait for main-process IPC calls and native dialogs to finish; unknown outcomes still require explicit verification after recovery.
 - Isolate operation-state snapshot/event reconciliation from the application component without replaying completed or uncertain tasks.
 
