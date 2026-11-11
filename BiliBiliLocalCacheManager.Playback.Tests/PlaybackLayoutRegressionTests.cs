@@ -84,6 +84,27 @@ public sealed class PlaybackLayoutRegressionTests
     }
 
     [Theory]
+    [InlineData(".mp4", "1", 0)]
+    [InlineData(".blv", "2", 16)]
+    [InlineData(".mp4", "00", 16)]
+    public void LegacyLayout_RejectsAnIncompleteVariantBeforeRanking(string extension, string badPart, int length)
+    {
+        using var fixture = new CacheDirectoryFixture("1");
+        var prefix = extension == ".mp4" ? "lua.mp4.bapi." : "lua.flv.bili2api.";
+        fixture.WriteFile(Path.Combine(prefix + "80", "0" + extension), 24);
+        fixture.WriteFile(Path.Combine(prefix + "80", badPart + extension), length);
+        Assert.False(fixture.BuildPlan().IsPlayable);
+
+        // Some legacy downloads number their fragments starting at one.
+        fixture.WriteFile(Path.Combine(prefix + "64", "1" + extension), 12);
+        fixture.WriteFile(Path.Combine(prefix + "64", "2" + extension), 12);
+        var plan = fixture.BuildPlan();
+        Assert.Equal(CachePlaybackMaterialKind.OrderedPair, plan.MaterialKind);
+        Assert.Equal(new[] { "1" + extension, "2" + extension }, plan.MediaFiles.Select(Path.GetFileName));
+        Assert.All(plan.MediaFiles, path => Assert.Equal(prefix + "64", Path.GetFileName(Path.GetDirectoryName(path))));
+    }
+
+    [Theory]
     [InlineData("1", "MidDash")]
     [InlineData("c_1", "NewDash")]
     public void DashLayout_RemainsPlayableWithEmptyLegacyMedia(string segment, string structure)
@@ -111,8 +132,8 @@ public sealed class PlaybackLayoutRegressionTests
         var secondFile = Path.Combine(secondDirectory, "1.mp4");
         // Keep the enumerated spellings in the probe even on a case-insensitive test volume.
         var probe = new CachePlaybackProbe(segment, [], [firstDirectory, secondDirectory], [firstFile, secondFile]);
-        Assert.Equal(firstFile, Assert.Single(PlaybackPathHelpers.GetFilesUnderDirectory(probe, first, ".mp4")));
-        Assert.Equal(secondFile, Assert.Single(PlaybackPathHelpers.GetFilesUnderDirectory(probe, second, ".mp4")));
+        Assert.Equal(firstFile, Assert.Single(PlaybackPathHelpers.GetCompleteLegacyFragments(probe, first, ".mp4")));
+        Assert.Equal(secondFile, Assert.Single(PlaybackPathHelpers.GetCompleteLegacyFragments(probe, second, ".mp4")));
         Assert.Equal(firstFile, Assert.Single(LegacyLayoutPlanBuilder.Build(probe, isHybrid: false).MediaFiles));
     }
 

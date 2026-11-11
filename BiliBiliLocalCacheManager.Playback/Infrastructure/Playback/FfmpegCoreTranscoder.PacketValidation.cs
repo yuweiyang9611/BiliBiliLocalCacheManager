@@ -52,16 +52,20 @@ public sealed partial class FfmpegCoreTranscoder
                 else if (fields.Length >= 7 && fields[0] == "stream" && fields[3] is "video" or "audio")
                 {
                     long.TryParse(fields[6], out var readPackets);
-                    // MOV/MP4 video and AAC store one coded sample per demuxed packet.
-                    if ((fields[3] == "video" || fields[2] == "aac") &&
-                        long.TryParse(fields[5], out var declaredPackets) && readPackets < declaredPackets)
-                        throw new InvalidDataException("The MP4 ends before all declared media packets.");
-                    // PCM packets aggregate many individual samples. Durations on both
-                    // sides use the track's timescale, independent of that grouping.
-                    if (fields[2].StartsWith("pcm_", StringComparison.Ordinal) &&
-                        int.TryParse(fields[1], out var stream) && long.TryParse(fields[4], out var declaredDuration) &&
-                        packetDurations.TryGetValue(stream, out var duration) && duration < declaredDuration)
-                        throw new InvalidDataException("The MP4 ends before the declared PCM audio duration.");
+                    var hasSamples = long.TryParse(fields[5], out var declaredSamples) && declaredSamples > 0;
+                    var hasDuration = long.TryParse(fields[4], out var declaredDuration) && declaredDuration > 0;
+                    var coversDuration = hasDuration && int.TryParse(fields[1], out var stream)
+                        && packetDurations.GetValueOrDefault(stream) >= declaredDuration;
+                    if (hasSamples && readPackets < declaredSamples)
+                    {
+                        // Video and AAC have one packet per coded sample. Audio demuxers
+                        // can group samples (e.g. PCM); then verify the entire track in its
+                        // own timescale instead of accepting an unexplained sample deficit.
+                        if (fields[3] == "video" || fields[2] == "aac" || !coversDuration)
+                            throw new InvalidDataException("The MP4 ends before all declared media samples.");
+                    }
+                    else if (!hasSamples && hasDuration && fields[3] == "audio" && !coversDuration)
+                        throw new InvalidDataException("The MP4 ends before the declared audio duration.");
                     sawMediaPackets |= readPackets > 0;
                 }
             }

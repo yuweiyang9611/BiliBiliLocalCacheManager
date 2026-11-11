@@ -15,7 +15,7 @@ import type {
   SearchRequest,
   SelectionTarget,
 } from '../shared/contracts';
-import { DEFAULT_CACHE_PAGE_SIZE, MAXIMUM_CACHE_PAGE_SIZE } from '../shared/contracts';
+import { DEFAULT_CACHE_PAGE_SIZE, MAXIMUM_CACHE_PAGE_SIZE, MAXIMUM_SEARCH_KEYWORD_LENGTH } from '../shared/contracts';
 import { channels } from '../shared/channels';
 import { DesktopHostBridge, type HostCall } from './host-bridge';
 import { isRecord } from './protocol';
@@ -294,7 +294,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     assertTrusted(event);
     return validateStorageSnapshot(await track(event, host<unknown>(
       'storage.get',
-      rootPath === undefined || rootPath === '' ? {} : { rootPath: assertPath(rootPath, 'rootPath') },
+      rootPath === undefined ? {} : { rootPath: rootPath === '' ? '' : assertPath(rootPath, 'rootPath') },
     )));
   });
   handle(channels.artifactsCleanup, async (event) => {
@@ -322,7 +322,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   });
   handle(channels.artifactsOpen, async (event) => {
     assertTrusted(event);
-    const storage = validateStorageSnapshot(await track(event, host<unknown>('storage.get')));
+    const storage = validateStorageSnapshot(await track(event, host<unknown>('storage.get', { rootPath: '' })));
     const managedPath = storage.transcodeCache.path;
     if (!managedPath || !path.isAbsolute(managedPath)) {
       throw new Error('Desktop Host 未返回有效的受管转码缓存目录。');
@@ -588,7 +588,7 @@ function validateSettingsPatch(value: unknown): Partial<AppSettings> {
   const patch: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
     if (!allowedSettingKeys.has(key as keyof AppSettings)) throw new TypeError(`不允许修改设置：${key}`);
-    if (key === 'rootPath' || key === 'keyword') patch[key] = assertString(item, key, key === 'rootPath' ? 32_768 : 500);
+    if (key === 'rootPath' || key === 'keyword') patch[key] = assertString(item, key, key === 'rootPath' ? 32_768 : MAXIMUM_SEARCH_KEYWORD_LENGTH);
     else if (key === 'matchMode') {
       if (item !== 'contains' && item !== 'prefix' && item !== 'exact') throw new TypeError('无效匹配模式。');
       patch[key] = item;
@@ -608,7 +608,7 @@ function validateSearchRequest(value: unknown): SearchRequest {
     indexToken: assertNonEmptyString(value.indexToken, 'indexToken', 128),
     offset: assertInteger(value.offset, 'offset', 0, 2_147_483_647),
     pageSize: assertInteger(value.pageSize, 'pageSize', 1, MAXIMUM_CACHE_PAGE_SIZE),
-    keyword: assertString(value.keyword, 'keyword', 500),
+    keyword: assertString(value.keyword, 'keyword', MAXIMUM_SEARCH_KEYWORD_LENGTH),
     matchMode,
     splitKeywords: assertBoolean(value.splitKeywords, 'splitKeywords'),
     anyKeywords: assertBoolean(value.anyKeywords, 'anyKeywords'),

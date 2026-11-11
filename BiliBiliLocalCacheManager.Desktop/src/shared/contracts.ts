@@ -8,6 +8,7 @@ export type PlayerPreference = 'system' | 'mpv' | 'vlc';
 export const DESKTOP_HOST_PROTOCOL_VERSION = 3 as const;
 export const DEFAULT_CACHE_PAGE_SIZE = 100;
 export const MAXIMUM_CACHE_PAGE_SIZE = 200;
+export const MAXIMUM_SEARCH_KEYWORD_LENGTH = 500;
 
 export interface AppSettings {
   rootPath: string;
@@ -262,6 +263,7 @@ export interface CacheManagerApi {
   search(request: SearchRequest): Promise<CachePage>;
   getCacheDetails(request: CacheDetailsRequest): Promise<CacheDetails>;
   cancelCacheDetails(): Promise<boolean>;
+  /** An empty root measures only global artifacts. Omitting the root uses the saved directory. */
   getStorage(rootPath?: string): Promise<StorageSnapshot>;
   cleanupTranscodeCache(): Promise<ArtifactCleanupResult>;
   clearTranscodeCache(): Promise<ArtifactCleanupResult | null>;

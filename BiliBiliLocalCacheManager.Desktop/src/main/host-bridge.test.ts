@@ -680,6 +680,71 @@ describe('task history lifecycle', () => {
   });
 });
 
+describe('large trash restores', () => {
+  const limit = 1024 * 1024;
+  const rootPath = 'D:/cache';
+  function exactLimitIds() {
+    const ids = Array.from({ length: 260 }, (_, i) => String(i));
+    const padding = limit - Buffer.byteLength(JSON.stringify({ id: '0'.repeat(36), method: 'trash.restore', params: { rootPath, entryIds: ids } }));
+    return ids.map((id, i) => id + 'x'.repeat(Math.floor(padding / ids.length) + Number(i < padding % ids.length)));
+  }
+
+  it('sends the ordinary request at the byte limit and prepares the exact selection one byte above it', async () => {
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const respond = (id: string, result: unknown) => fake.child.stdout.emit('data', JSON.stringify({ id, result }) + '\n');
+    try {
+      const entryIds = exactLimitIds();
+      const ordinary = bridge.call('trash.restore', { rootPath, entryIds });
+      await vi.waitFor(() => expect(fake.writes).toHaveLength(1));
+      expect(Buffer.byteLength(JSON.stringify(fake.writes[0]))).toBe(limit);
+      expect(fake.writes[0].method).toBe('trash.restore');
+      respond(ordinary.id, { restored: entryIds, failed: [] });
+      await ordinary.promise;
+
+      entryIds[0] += 'x';
+      const prepared = bridge.call('trash.restore', { rootPath, entryIds });
+      const sentIds: unknown[] = [];
+      for (const index of [1, 2]) {
+        await vi.waitFor(() => expect(fake.writes).toHaveLength(index + 1));
+        const chunk = fake.writes[index];
+        expect(chunk).toMatchObject({ method: 'trash.prepareRestore', params: { rootPath, restoreRequestId: prepared.id, offset: sentIds.length, total: entryIds.length } });
+        expect(Buffer.byteLength(JSON.stringify(chunk))).toBeLessThanOrEqual(limit);
+        sentIds.push(...chunk.params.entryIds as string[]);
+        respond(chunk.id, { receivedCount: sentIds.length });
+      }
+      expect(sentIds).toEqual(entryIds);
+      await vi.waitFor(() => expect(fake.writes).toHaveLength(4));
+      expect(fake.writes[3]).toEqual({ id: prepared.id, method: 'trash.restore', params: { rootPath, preparedCount: entryIds.length } });
+      const outcome = { restored: [entryIds[0], entryIds[2]], failed: [entryIds[1]], unprocessed: entryIds.slice(3), cancelled: true };
+      respond(prepared.id, outcome);
+      await expect(prepared.promise).resolves.toEqual(outcome);
+    } finally { await bridge.dispose(); }
+  });
+
+  it.each(['cancel', 'timeout', 'bad acknowledgment'])('never commits the selected page after %s during preparation', async reason => {
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const bridge = new DesktopHostBridge();
+    const root = 'D:/' + ('缓存目录'.repeat(45) + '/').repeat(20);
+    const entryIds = Array.from({ length: 100 }, (_, i) => root + '.BiliBiliLocalCacheManager-Trash/v1_' + i);
+    try {
+      const call = bridge.call('trash.restore', { rootPath: root, entryIds }, reason === 'timeout' ? 100 : undefined);
+      const rejected = expect(call.promise).rejects.toMatchObject({
+        code: reason === 'cancel' ? 'CANCELLED' : reason === 'timeout' ? 'HOST_TIMEOUT' : 'INVALID_RESPONSE',
+      });
+      await vi.waitFor(() => expect(fake.writes[0]?.method).toBe('trash.prepareRestore'));
+      const first = fake.writes[0];
+      if (reason === 'cancel') expect(call.cancel()).toBe(true);
+      if (reason !== 'timeout') fake.child.stdout.emit('data', JSON.stringify({ id: first.id,
+        result: { receivedCount: reason === 'cancel' ? (first.params.entryIds as string[]).length : 0 } }) + '\n');
+      await rejected;
+      expect(fake.writes.some(request => request.method === 'trash.restore')).toBe(false);
+    } finally { await bridge.dispose(); }
+  });
+});
+
 function createFakeHostProcess(): {
   child: ReturnType<typeof createFakeChild>;
   writes: Array<{ id: string; method: string; params: Record<string, unknown> }>;

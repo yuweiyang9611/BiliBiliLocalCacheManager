@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+- Reject incomplete numbered fragment sets when selecting export quality. Verify compressed audio tails in open-ended MP4s and losslessly remux compatible QuickTime material before publishing.
+- Preserve explicit directory clears across restarts and session-only storage reads. Keep search text within the desktop protocol limit when editing or reading newer settings.
+- Transfer oversized trash restore selections in bounded messages and restore the confirmed set in a single operation, including Ctrl+Z.
+
 - Isolate per-part identity failures during scans, report ambiguous AV directory names, and support searching the displayed AV number.
 - Select a playable candidate from the requested page, concatenate only one quality's fragments, and fall back to complete DASH media when legacy directories are empty. Validate single-file MP4 exports before publishing a batch.
 - Preserve compatible fields from newer read-only settings and load UTF-8 BOM settings. Redact request-specific cache roots before retaining diagnostic events.

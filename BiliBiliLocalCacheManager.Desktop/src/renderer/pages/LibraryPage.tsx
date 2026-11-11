@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AppSettings, CacheEntry, CacheDetails, CacheSegment, SelectionTarget } from '../../shared/contracts';
+import { MAXIMUM_SEARCH_KEYWORD_LENGTH } from '../../shared/contracts';
 import type { CachePageState } from '../ui-types';
 import { Icon } from '../components/Icon';
 import { Check, Empty, PageControls } from '../components/Common';
@@ -48,7 +49,10 @@ export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
       <label className="toggle"><input type="checkbox" disabled={props.busy} checked={settings.includeIncomplete} onChange={(event) => updateSetting('includeIncomplete', event.target.checked)} /><span />包含未完成缓存</label>
     </section>
     <section className="card search-card">
-      <div className="search-box"><Icon name="search" /><input ref={props.searchInput} value={settings.keyword} onChange={(event) => updateSetting('keyword', event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !props.readBusy) void props.search(); }} placeholder="搜索标题、UP 主、BV 号或 AV 号" /></div>
+      <div className="search-box"><Icon name="search" /><input ref={props.searchInput} value={settings.keyword}
+        maxLength={MAXIMUM_SEARCH_KEYWORD_LENGTH} title={`搜索词最多 ${MAXIMUM_SEARCH_KEYWORD_LENGTH} 个字符`}
+        onChange={(event) => updateSetting('keyword', event.target.value.slice(0, MAXIMUM_SEARCH_KEYWORD_LENGTH).replace(/[\uD800-\uDBFF]$/, ''))}
+        onKeyDown={(event) => { if (event.key === 'Enter' && !props.readBusy) void props.search(); }} placeholder="搜索标题、UP 主、BV 号或 AV 号" /></div>
       <select aria-label="匹配方式" value={settings.matchMode} onChange={(event) => updateSetting('matchMode', event.target.value as AppSettings['matchMode'])}><option value="contains">包含</option><option value="prefix">前缀</option><option value="exact">精确</option></select>
       <button className="button secondary" onClick={() => void props.search()} disabled={props.readBusy}>筛选</button>
       <details className="filter-menu"><summary>高级筛选</summary><div className="filter-popover">

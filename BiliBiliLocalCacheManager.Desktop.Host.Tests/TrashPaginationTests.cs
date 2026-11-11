@@ -166,6 +166,49 @@ public sealed partial class DesktopHostContractTests
         return service;
     }
 
+    [Fact]
+    public async Task PreparedRestore_ConsumesExactMoveIdsOnceAndRechecksLiveRestoreStatus()
+    {
+        using var workspace = new HostTestWorkspace();
+        var rootPath = workspace.CacheRoot;
+        var application = workspace.CreateApplication();
+        foreach (var avid in new[] { 10, 20, 30, 40 }) workspace.CreateCache(avid, $"Video {avid}");
+        var moved = await RefreshDispatchAsync(application, "trash.move", new { rootPath, avids = new[] { "10", "20", "30", "40" } });
+        var ids = moved.GetProperty("entryIds").EnumerateArray().Select(entry => entry.GetString()!).ToArray();
+        Assert.Equal(4, ids.Length);
+        var restoreRequestId = Guid.NewGuid().ToString("D");
+        Task<JsonElement> Prepare(int offset, string[] entryIds) => RefreshDispatchAsync(application, "trash.prepareRestore",
+            new { rootPath, restoreRequestId, offset, total = ids.Length, entryIds });
+        Task<object?> Commit(string id, string root, CancellationToken token = default) => application.DispatchAsync(id, "trash.restore",
+            JsonSerializer.SerializeToElement(new { rootPath = root, preparedCount = ids.Length }), token);
+
+        Assert.Equal(2, (await Prepare(0, ids[..2])).GetProperty("receivedCount").GetInt32());
+        await Assert.ThrowsAsync<RpcException>(() => Commit(restoreRequestId, rootPath));
+        await Assert.ThrowsAsync<RpcException>(() => Prepare(0, ids[..2]));
+        Assert.Equal(4, (await Prepare(2, ids[2..])).GetProperty("receivedCount").GetInt32());
+        await Assert.ThrowsAsync<RpcException>(() => Commit(Guid.NewGuid().ToString("D"), rootPath));
+        await Assert.ThrowsAsync<RpcException>(() => Commit(restoreRequestId, workspace.Root));
+        Assert.All(ids, id => Assert.True(Directory.Exists(id)));
+
+        Directory.CreateDirectory(Path.Combine(rootPath, "20")); // A destination became occupied after preparation.
+        using var cancellation = new CancellationTokenSource();
+        application.ProgressReported += (_, value) =>
+        {
+            if (value.RequestId == restoreRequestId && value.Current == 3) cancellation.Cancel();
+        };
+        var result = JsonSerializer.SerializeToElement(await Commit(restoreRequestId, rootPath, cancellation.Token), WireOptions);
+        string?[] Ids(string field) => result.GetProperty(field).EnumerateArray().Select(entry => entry.GetString()).ToArray();
+        Assert.Equal(new[] { ids[0], ids[2] }, Ids("restored"));
+        Assert.Equal(new[] { ids[1] }, Ids("failed"));
+        Assert.Equal(new[] { ids[3] }, Ids("unprocessed"));
+        Assert.True(result.GetProperty("cancelled").GetBoolean());
+        await Assert.ThrowsAsync<RpcException>(() => Commit(restoreRequestId, rootPath));
+        Assert.True(File.Exists(Path.Combine(rootPath, "10", "c_1", "entry.json")));
+        Assert.True(File.Exists(Path.Combine(rootPath, "30", "c_1", "entry.json")));
+        Assert.True(Directory.Exists(ids[1]));
+        Assert.True(Directory.Exists(ids[3]));
+    }
+
     private sealed class SnapshotTrashService(string root, int count) : ICacheTrashService
     {
         public List<CacheTrashEntry> Entries { get; } = Enumerable.Range(1, count).Select(avid => new CacheTrashEntry(
