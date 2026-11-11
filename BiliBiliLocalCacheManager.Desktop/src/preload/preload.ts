@@ -4,6 +4,7 @@ import { channels } from '../shared/channels';
 
 const api: CacheManagerApi = {
   getTaskHistory: () => ipcRenderer.invoke(channels.taskHistory),
+  accessExportOutput: (taskId, action) => ipcRenderer.invoke(channels.exportOutput, taskId, action),
   onTaskHistoryChanged: (listener) => subscribe(channels.taskHistoryChanged, listener),
   reloadWhenIdle: () => ipcRenderer.invoke(channels.reloadWhenIdle),
   getTrashPage: (rootPath, options) => ipcRenderer.invoke(channels.trashPage, rootPath, options),

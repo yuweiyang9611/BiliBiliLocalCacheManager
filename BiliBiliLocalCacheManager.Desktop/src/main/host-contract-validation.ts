@@ -52,7 +52,7 @@ export function validateInitialState(value: unknown): InitialState {
     settingsState: settingsState(source.settingsState),
     items: array(source.items, 'initialState.items', MAXIMUM_CACHE_PAGE_SIZE).map((item, index) =>
       cacheEntry(item, `initialState.items[${index}]`)),
-    storage: storageSnapshot(source.storage),
+    storage: validateStorageSnapshot(source.storage, 'initialState.storage'),
     trash: array(source.trash, 'initialState.trash', 10_000).map((item, index) =>
       trashEntry(item, `initialState.trash[${index}]`)),
     capabilities: capabilities(source.capabilities),
@@ -334,16 +334,20 @@ function assertPaginationInvariants(
   }
 }
 
-function storageSnapshot(value: unknown): StorageSnapshot {
-  const source = record(value, 'initialState.storage');
+export function validateStorageSnapshot(value: unknown, label = 'storage.get'): StorageSnapshot {
+  const source = record(value, label);
   return {
-    originalCache: storageArea(source.originalCache, 'initialState.storage.originalCache'),
-    transcodeCache: storageArea(source.transcodeCache, 'initialState.storage.transcodeCache'),
-    trash: storageArea(source.trash, 'initialState.storage.trash'),
-    totalBytes: integer(source.totalBytes, 'initialState.storage.totalBytes', 0, Number.MAX_SAFE_INTEGER),
+    originalCache: storageArea(source.originalCache, `${label}.originalCache`),
+    transcodeCache: storageArea(source.transcodeCache, `${label}.transcodeCache`),
+    trash: storageArea(source.trash, `${label}.trash`),
+    totalBytes: integer(source.totalBytes, `${label}.totalBytes`, 0, Number.MAX_SAFE_INTEGER),
+    ...(source.policyReclaimableBytes == null ? {} : {
+      policyReclaimableBytes: integer(source.policyReclaimableBytes, `${label}.policyReclaimableBytes`, 0, Number.MAX_SAFE_INTEGER),
+    }),
+    ...(source.measurementWarning == null ? {} : { measurementWarning: string(source.measurementWarning, `${label}.measurementWarning`) }),
     ...(source.lastMaintenanceSummary === undefined || source.lastMaintenanceSummary === null
       ? {}
-      : { lastMaintenanceSummary: string(source.lastMaintenanceSummary, 'initialState.storage.lastMaintenanceSummary') }),
+      : { lastMaintenanceSummary: string(source.lastMaintenanceSummary, `${label}.lastMaintenanceSummary`) }),
   };
 }
 
@@ -376,6 +380,10 @@ export function validateTrashSnapshotPurgeResult(value: unknown): import('../sha
   return { purged: diskIds(source.purged, 'trash.purgeSnapshot.purged', 200_000), ...trashOutcome(source, 'trash.purgeSnapshot', 200_000) };
 }
 
+export function validateTrashList(value: unknown): TrashEntry[] {
+  return array(value, 'trash.list', 1000).map((item, index) => trashEntry(item, `trash.list[${index}]`));
+}
+
 function trashEntry(value: unknown, label: string): TrashEntry {
   const source = record(value, label);
   return {
@@ -384,6 +392,8 @@ function trashEntry(value: unknown, label: string): TrashEntry {
     title: string(source.title, `${label}.title`),
     sizeBytes: integer(source.sizeBytes, `${label}.sizeBytes`, 0, Number.MAX_SAFE_INTEGER),
     deletedAt: nullableString(source.deletedAt, `${label}.deletedAt`),
+    ...(source.isRestorable === undefined ? {} : { isRestorable: boolean(source.isRestorable, `${label}.isRestorable`) }),
+    ...(source.unavailableReason == null ? {} : { unavailableReason: string(source.unavailableReason, `${label}.unavailableReason`) }),
     ...(source.pageIndex == null ? {} : { pageIndex: integer(source.pageIndex, `${label}.pageIndex`) }),
     ...(source.originalPath === undefined || source.originalPath === null
       ? {}

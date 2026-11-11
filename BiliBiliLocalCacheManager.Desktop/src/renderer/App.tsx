@@ -7,6 +7,7 @@ import { cacheManager } from './cache-manager';
 import { errorCode } from '../shared/ipc-result';
 import { OperationProgress } from './components/OperationProgress';
 import { FailureList } from './components/FailureList';
+import { ExportOutputActions } from './components/ExportOutputActions';
 import { SelectionList } from './components/SelectionList';
 import { ConfirmationDialog, type Confirmation } from './components/ConfirmationDialog';
 import { useShortcuts } from './hooks/useShortcuts';
@@ -38,6 +39,8 @@ type BatchReport = {
   indexToken?: string;
   confirmationId?: string;
   transcodeRequirements?: ExportTranscodeRequirement[];
+  outputPath?: string;
+  taskId?: string;
   retryUnavailable?: string;
 };
 
@@ -125,6 +128,8 @@ export function App() {
   const hasActiveIndex = indexBinding?.rootPath === activeRootPath &&
     indexBinding.includeIncomplete === settings.includeIncomplete &&
     Boolean(indexBinding.indexToken);
+  const currentIndexToken = hasActiveIndex ? indexBinding.indexToken : null;
+  const reportHasCurrentIndex = batchReport?.indexToken === currentIndexToken;
   const currentSearchRequest: SearchRequest = {
     indexToken: indexBinding?.indexToken ?? '',
     offset: 0,
@@ -553,10 +558,11 @@ export function App() {
   }, [clearSelection]);
 
   const play = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport) => {
+    if (retry && retry.indexToken !== currentIndexToken) return;
     const requestedTargets = explicitTargets ?? targets;
     if (requestedTargets.length === 0) { notify('info', '请先选择缓存或分段。'); return; }
     if (!activeRootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
-    const context = { kind: 'play' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets, indexToken: retry?.indexToken ?? indexBinding?.indexToken,
+    const context = { kind: 'play' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets, indexToken: currentIndexToken ?? undefined,
       playerPreference: retry?.playerPreference ?? settings.playerPreference, includeIncomplete: retry?.includeIncomplete ?? settings.includeIncomplete };
     setBatchReport(null);
     const result = await run('正在准备播放…', async () => {
@@ -580,14 +586,15 @@ export function App() {
         status: facts.status === 'succeeded' ? 'success' : facts.status, succeeded: facts.succeeded, failures });
       notify(facts.status === 'failed' ? 'error' : facts.status === 'partial' ? 'info' : 'success', `已将 ${facts.succeeded} 个页面交给播放器，失败 ${facts.failed} 项。`);
     }
-  }, [activeRootPath, indexBinding?.indexToken, notify, run, settings.includeIncomplete, settings.playerPreference, targets]);
+  }, [activeRootPath, currentIndexToken, notify, run, settings.includeIncomplete, settings.playerPreference, targets]);
 
   const exportMedia = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport, confirmation?: ExportConfirmation) => {
+    if (retry && retry.indexToken !== currentIndexToken) return;
     const requestedTargets = explicitTargets ?? targets;
     if (requestedTargets.length === 0) { notify('info', '请先选择要导出的缓存或分段。'); return; }
     if (!activeRootPath) { notify('error', '当前没有有效的缓存根目录。'); return; }
     const title = targets.length === 1 && focusedItem ? safeName(focusedItem.title) : `缓存导出-${dateStamp()}`;
-    const context = { kind: 'export' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets, indexToken: retry?.indexToken ?? indexBinding?.indexToken,
+    const context = { kind: 'export' as const, rootPath: retry?.rootPath ?? activeRootPath, targets: requestedTargets, indexToken: currentIndexToken ?? undefined,
       includeIncomplete: retry?.includeIncomplete ?? settings.includeIncomplete, playerPreference: settings.playerPreference };
     setBatchReport(null);
     const result = await run('正在导出 MP4…', async () => {
@@ -607,13 +614,14 @@ export function App() {
       const status = facts.status === 'confirmation' && !needsConfirmation ? 'failed' : facts.status;
       setBatchReport({ ...context, status: status === 'succeeded' ? 'success' : status,
         confirmationId: result.confirmationId, transcodeRequirements: result.transcodeRequirements,
+        outputPath: facts.outputPath, taskId: result.taskId,
         succeeded: facts.succeeded, failures: facts.failures });
       notify(status === 'succeeded' ? 'success' : needsConfirmation || status === 'cancelled' ? 'info' : 'error', status === 'succeeded' ? `已导出：${facts.outputPath}`
         : needsConfirmation ? '本批尚未发布，需要确认转码。' : status === 'cancelled' ? '本批导出已取消。' : '本批导出未发布，请查看失败明细。');
     } else if (result === null) {
       setBatchReport({ ...context, status: 'cancelled', succeeded: 0, failures: [] });
     }
-  }, [activeRootPath, focusedItem, indexBinding?.indexToken, notify, run, settings.includeIncomplete, targets]);
+  }, [activeRootPath, currentIndexToken, focusedItem, notify, run, settings.includeIncomplete, targets]);
 
   const moveToTrash = useCallback(() => {
     const requestedTargets = targets.map(target => ({ ...target, ...(target.pageIndexes ? { pageIndexes: [...target.pageIndexes] } : {}) }));
@@ -892,17 +900,21 @@ export function App() {
             <div className="panel-heading"><h2>{batchReport.kind === 'play' ? '播放' : '导出'}结果：{{ success: '全部成功', partial: '部分失败', failed: '失败', cancelled: '已取消', unknown: '结果无法确认', confirmation: '待确认转码' }[batchReport.status]}</h2>
               <button className="icon-button" title="关闭结果" aria-label="关闭操作结果" onClick={() => setBatchReport(null)}><Icon name="close" /></button></div>
             <p>{batchReport.kind === 'play' ? `已交给播放器 ${batchReport.succeeded} 项` : `已发布 ${batchReport.succeeded} 项`}，失败 {batchReport.failures.length} 项。</p>
-            {batchReport.kind === 'export' && batchReport.status !== 'success' && batchReport.status !== 'unknown' && <p>本批导出未发布。重试将重新执行完整批次，并复用已生成的转码缓存。</p>}
+            {batchReport.kind === 'export' && batchReport.status === 'success' && batchReport.outputPath &&
+              <ExportOutputActions key={batchReport.taskId ?? batchReport.outputPath} taskId={batchReport.taskId} outputPath={batchReport.outputPath} />}
+            {!reportHasCurrentIndex && batchReport.status !== 'success' && batchReport.targets.length > 0 &&
+              <p>此报告对应的缓存索引已失效。请在当前缓存库重新选择目标。</p>}
+            {reportHasCurrentIndex && batchReport.kind === 'export' && batchReport.status !== 'success' && batchReport.status !== 'unknown' && <p>本批导出未发布。重试将重新执行完整批次，并复用已生成的转码缓存。</p>}
             {batchReport.status === 'unknown' && <p>操作可能已经完成，请先核对输出文件或缓存状态。</p>}
             {batchReport.retryUnavailable && <p>{batchReport.retryUnavailable}</p>}
             {batchReport.failures.length > 0 && <FailureList failures={batchReport.failures} />}
             {batchReport.status === 'confirmation' && <>
               <SelectionList label="转码需求" items={(batchReport.transcodeRequirements ?? []).map(item => ({ id: item.approvalToken,
                 title: `${item.title} · av${item.avid} P${item.pageIndex}`, detail: `${item.reason}；${item.impact}` }))} />
-              <button className="button primary" disabled={uiBusy} onClick={() => void exportMedia(batchReport.targets, batchReport,
+              <button className="button primary" disabled={uiBusy || !reportHasCurrentIndex} onClick={() => void exportMedia(batchReport.targets, batchReport,
                 { id: batchReport.confirmationId!, approvals: batchReport.transcodeRequirements!.map(item => item.approvalToken) })}><Icon name="check" />确认转码并重试整批</button>
             </>}
-            {batchReport.status !== 'success' && batchReport.status !== 'confirmation' && batchReport.targets.length > 0 && <button className="button secondary" disabled={uiBusy}
+            {batchReport.status !== 'success' && batchReport.status !== 'confirmation' && batchReport.targets.length > 0 && <button className="button secondary" disabled={uiBusy || !reportHasCurrentIndex}
               onClick={() => void (batchReport.kind === 'play' ? play(batchReport.targets, batchReport) : exportMedia(batchReport.targets, batchReport))}><Icon name="refresh" />{batchReport.kind === 'play' ? '重试未成功项目' : '重试完整批次'}</button>}
           </section>}
           {diskReport?.rootPath === activeRootPath && diskReport.failures.length > 0 && <section className="result-panel" aria-label="磁盘操作问题">
@@ -940,7 +952,7 @@ export function App() {
             if (!selectedTrashIds.size) return notify('info', '请选择要恢复的条目。');
             const rootPath = trashState.rootPath;
             if (!rootPath || rootPath !== activeRootPath) return notify('error', '回收站内容与当前缓存目录不一致，请刷新后重试。');
-            const entryIds = trash.filter((entry) => selectedTrashIds.has(entry.id)).map((entry) => entry.id);
+            const entryIds = trash.filter((entry) => entry.isRestorable !== false && selectedTrashIds.has(entry.id)).map((entry) => entry.id);
             if (!entryIds.length) return notify('info', '请选择要恢复的条目。');
             void (async () => {
               const completed = await run('正在恢复缓存…', () => restoreAndRescan(rootPath, entryIds, settings.includeIncomplete));

@@ -236,5 +236,5 @@ dl { margin: 0; } dl > div { display: flex; justify-content: space-between; padd
 .history-entry summary > * { margin-inline-end: 16px; }
 .history-entry summary time { display: inline-block; font-size: 12px; }
 .history-entry p { margin: 8px 0; }
-.history-entry code { font-size: 12px; white-space: normal; overflow-wrap: anywhere; user-select: text; }
+.history-entry code, .export-output code { font-size: 12px; white-space: normal; overflow-wrap: anywhere; user-select: text; }
 .history-entry ul { padding-inline-start: 22px; }

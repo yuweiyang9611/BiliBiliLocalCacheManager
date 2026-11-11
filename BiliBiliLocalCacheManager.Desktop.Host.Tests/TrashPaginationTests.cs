@@ -8,6 +8,30 @@ namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 public sealed partial class DesktopHostContractTests
 {
     [Fact]
+    public async Task TrashPages_ShowRestoreAvailabilityAndRevalidateBeforeRestoring()
+    {
+        using var workspace = new HostTestWorkspace();
+        var service = new SnapshotTrashService(workspace.CacheRoot, 2);
+        service.Entries[1] = service.Entries[1] with { IsRestorable = false, UnavailableReason = "清理日志待恢复。" };
+        var application = new DesktopHostApplication(trashService: service);
+        var parameters = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot });
+        var page = await DispatchAsync(application, "trash.page", parameters);
+        var entries = page.GetProperty("items");
+        Assert.Equal(2, page.GetProperty("totalItems").GetInt32());
+        Assert.True(entries[0].GetProperty("isRestorable").GetBoolean());
+        Assert.False(entries[1].GetProperty("isRestorable").GetBoolean());
+        Assert.Equal("清理日志待恢复。", entries[1].GetProperty("unavailableReason").GetString());
+
+        service.Entries[0] = service.Entries[0] with { IsRestorable = false, UnavailableReason = "身份已变化。" };
+        var restore = await DispatchAsync(application, "trash.restore", JsonSerializer.Serialize(new
+        {
+            rootPath = workspace.CacheRoot, entryIds = new[] { entries[0].GetProperty("id").GetString() }
+        }));
+        Assert.Empty(restore.GetProperty("restored").EnumerateArray());
+        Assert.Equal("身份已变化。", restore.GetProperty("items")[0].GetProperty("error").GetString());
+    }
+
+    [Fact]
     public async Task TrashPages_ReuseSnapshotAndBoundLegacyResponse()
     {
         using var workspace = new HostTestWorkspace();

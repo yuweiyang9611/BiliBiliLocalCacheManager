@@ -70,14 +70,8 @@ internal sealed partial class DesktopHostApplication
 
             var completedAt = DateTimeOffset.UtcNow;
             var snapshotStarted = Stopwatch.GetTimestamp();
-            var snapshot = SetCurrentIndex(report.Index, root, includeIncomplete, completedAt,
-                report.Issues, generation, persistSettings, cancellationToken,
+            var snapshot = CreateIndexSnapshot(report, root, cancellationToken,
                 count => ReportPartCaptureProgress(requestId, "scan", count), refresh?.Snapshot, refresh?.Avids);
-            lock (_stateSync)
-            {
-                EnsureIndexStillCurrent(snapshot);
-                _lastScanReport = report;
-            }
             var snapshotMilliseconds = Stopwatch.GetElapsedTime(snapshotStarted).TotalMilliseconds;
             var pageStarted = Stopwatch.GetTimestamp();
             var page = CreateCachePage(
@@ -86,8 +80,10 @@ internal sealed partial class DesktopHostApplication
                 pagination.Offset,
                 pagination.PageSize,
                 cancellationToken);
-            EnsureIndexStillCurrent(snapshot);
             var pageMilliseconds = Stopwatch.GetElapsedTime(pageStarted).TotalMilliseconds;
+            var publishStarted = Stopwatch.GetTimestamp();
+            PublishIndexSnapshot(snapshot, includeIncomplete, completedAt, generation, cancellationToken, report, persistSettings);
+            snapshotMilliseconds += Stopwatch.GetElapsedTime(publishStarted).TotalMilliseconds;
             _eventRecorder.Record("ScanTiming", "Information", FormattableString.Invariant(
                 $"request={requestId}; waitMs={gateWaitMilliseconds:F2}; buildMs={buildMilliseconds:F2}; snapshotMs={snapshotMilliseconds:F2}; pageMs={pageMilliseconds:F2}; totalMs={Stopwatch.GetElapsedTime(scanStarted).TotalMilliseconds:F2}; videos={page.TotalItems}; segments={report.IncludedEntries}; incremental={refresh is not null}; readEntries={readEntries}"));
             ReportProgress(new HostProgressEvent(

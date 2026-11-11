@@ -1,10 +1,13 @@
 import { EventEmitter } from 'node:events';
+import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { IpcMainInvokeEvent } from 'electron';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JsonObject } from '../shared/contracts';
 import { channels } from '../shared/channels';
 import type { DesktopHostBridge } from './host-bridge';
+import { TaskHistoryStore } from './task-history';
 
 const electronMocks = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
@@ -20,6 +23,7 @@ const electronMocks = vi.hoisted(() => ({
   showSaveDialog: vi.fn(),
   showMessageBox: vi.fn(),
   openPath: vi.fn(),
+  writeText: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -38,6 +42,7 @@ vi.mock('electron', () => ({
     removeHandler: electronMocks.removeHandler,
   },
   shell: { openPath: electronMocks.openPath },
+  clipboard: { writeText: electronMocks.writeText },
 }));
 
 import { registerIpc } from './ipc';
@@ -382,6 +387,63 @@ describe('IPC Host contract wiring', () => {
 });
 
 describe('IPC export destinations', () => {
+  it('opens the published batch by task ID without a history store and copies the original path after a move', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'blcm-export-actions-'));
+    try {
+      const batch = path.join(directory, '新批次');
+      await mkdir(batch);
+      const fake = createImmediateBridge({ export: { published: true, outputPath: batch, exportedCount: 2, failures: [] } });
+      unregister = registerIpc(fake.bridge, () => null);
+      const event = trustedEvent(911);
+      electronMocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [directory] });
+      electronMocks.openPath.mockResolvedValue('');
+      const result = await invoke(channels.exportMedia, event, path.resolve('cache'), [{ avid: '100' }], '', false, undefined, 'index-1');
+      const id = fake.calls[0].id;
+      expect(result).toMatchObject({ taskId: id, outputPath: batch });
+      await expect(invoke(channels.exportOutput, event, batch, 'open')).rejects.toThrow('发布记录');
+      await expect(invoke(channels.exportOutput, trustedEvent(912), id, 'open')).rejects.toThrow('发布记录');
+      await expect(invoke(channels.exportOutput, event, id, 'delete')).rejects.toThrow('操作无效');
+      const untrusted = trustedEvent(913);
+      Object.assign(untrusted.senderFrame!, { url: 'https://untrusted.invalid/' });
+      await expect(invoke(channels.exportOutput, untrusted, id, 'open')).rejects.toThrow();
+      expect(electronMocks.openPath).not.toHaveBeenCalled();
+      await invoke(channels.exportOutput, event, id, 'open');
+      expect(electronMocks.openPath).toHaveBeenCalledWith(batch + path.sep);
+      await rename(batch, path.join(directory, 'moved'));
+      await expect(invoke(channels.exportOutput, event, id, 'open')).rejects.toThrow('已移动或删除');
+      await invoke(channels.exportOutput, event, id, 'copy');
+      expect(electronMocks.writeText).toHaveBeenCalledWith(batch);
+      await writeFile(batch, 'replacement');
+      await expect(invoke(channels.exportOutput, event, id, 'open')).rejects.toThrow('已被替换');
+      expect(electronMocks.openPath).toHaveBeenCalledTimes(1);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('resolves a published export after reopening history, excluding unsuccessful and non-export tasks', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'blcm-export-history-'));
+    try {
+      const batch = path.join(directory, 'batch');
+      await mkdir(batch);
+      const file = path.join(directory, 'tasks.json');
+      const store = new TaskHistoryStore(file);
+      await store.start('done', 'export', {});
+      await store.finish('done', 'export', { published: true, outputPath: batch, exportedCount: 2, failures: [] });
+      await store.start('unfinished', 'export', {});
+      await store.start('play', 'play', {});
+      await store.finish('play', 'play', { queued: 1, failures: [] });
+      const fake = createImmediateBridge();
+      unregister = registerIpc(fake.bridge, () => null, new TaskHistoryStore(file));
+      electronMocks.openPath.mockResolvedValue('');
+      const event = trustedEvent(914);
+      await invoke(channels.exportOutput, event, 'done', 'open');
+      expect(electronMocks.openPath).toHaveBeenCalledWith(batch + path.sep);
+      for (const id of ['unfinished', 'play', 'missing'])
+        await expect(invoke(channels.exportOutput, event, id, 'copy')).rejects.toThrow('发布记录');
+      expect(electronMocks.writeText).not.toHaveBeenCalled();
+      expect(fake.calls).toHaveLength(0);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('rejects unbound media operations before opening dialogs or calling the Host', async () => {
     const fake = createImmediateBridge();
     unregister = registerIpc(fake.bridge, () => null);

@@ -97,9 +97,6 @@ internal sealed partial class DesktopHostApplication
         var managedTotal = SaturatingAdd(
             SaturatingAdd(originalCache?.TotalBytes ?? 0, trash?.TotalBytes ?? 0),
             transcodeCache?.TotalBytes ?? 0);
-        var reclaimable = SaturatingAdd(
-            trash?.TotalBytes ?? 0,
-            transcodePreview?.ReclaimableBytes ?? 0);
         return new
         {
             originalCache = new
@@ -121,9 +118,8 @@ internal sealed partial class DesktopHostApplication
                 path = trash?.TrashDirectory
             },
             totalBytes = managedTotal,
-            lastMaintenanceSummary = errors.Count == 0
-                ? $"Policy can reclaim {reclaimable} bytes."
-                : string.Join("; ", errors)
+            policyReclaimableBytes = transcodePreview?.ReclaimableBytes,
+            measurementWarning = errors.Count == 0 ? null : BoundWireString(string.Join("; ", errors))
         };
     }
 

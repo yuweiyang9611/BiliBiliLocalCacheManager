@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { TaskHistorySnapshot, TaskOperation, TaskOutcome } from '../../shared/contracts';
 import { cacheManager } from '../cache-manager';
+import { ExportOutputActions } from './ExportOutputActions';
 
 const names: Record<TaskOperation, string> = { play: '播放', export: '导出', 'trash.move': '移入回收站',
   'trash.restore': '恢复缓存', 'trash.purge': '永久删除', 'trash.purgeSnapshot': '清空回收站' };
@@ -40,7 +41,8 @@ export function TaskHistoryPanel() {
       <p>{entry.summary}</p>
       {entry.status !== 'running' && entry.status !== 'unknown' && <p>成功 {entry.succeeded} 项 · 失败 {entry.failed} 项 · 未处理 {entry.unprocessed} 项</p>}
       {entry.rootPath && <p>缓存目录：<code>{entry.rootPath}</code></p>}
-      {entry.outputPath && <p>已发布到：<code>{entry.outputPath}</code></p>}
+      {entry.operation === 'export' && entry.status === 'succeeded' && entry.succeeded > 0 && entry.outputPath &&
+        <ExportOutputActions taskId={entry.id} outputPath={entry.outputPath} />}
       {entry.failures.length > 0 && <ul>{entry.failures.map((failure, index) => <li key={index}>
         <strong>{failure.title || failure.avid}{failure.pageIndex !== null ? ` · P${failure.pageIndex}` : ''}</strong><p>{failure.message}</p>
       </li>)}</ul>}

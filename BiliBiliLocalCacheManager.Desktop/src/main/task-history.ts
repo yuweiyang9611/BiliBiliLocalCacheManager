@@ -116,6 +116,12 @@ export class TaskHistoryStore extends EventEmitter {
     return { entries: structuredClone(this.#entries), warning: this.#warning };
   }
   async flush(): Promise<void> { await this.#queue; }
+
+  async publishedExportPath(id: string): Promise<string | undefined> {
+    await this.#queue;
+    return this.#entries.find(entry => entry.id === id && entry.operation === 'export' &&
+      entry.status === 'succeeded' && entry.succeeded > 0 && Date.parse(entry.startedAt) >= this.now() - retention)?.outputPath;
+  }
 }
 
 function summarize(operation: TaskOperation, result: unknown): Pick<TaskHistoryEntry, 'status' | 'summary' | 'succeeded' | 'failed' | 'unprocessed' | 'failures' | 'outputPath'> {

@@ -1,5 +1,5 @@
-import { BrowserWindow, app, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
-import { mkdir } from 'node:fs/promises';
+import { BrowserWindow, app, clipboard, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
+import { lstat, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
@@ -14,8 +14,6 @@ import type {
   PlayerPreference,
   SearchRequest,
   SelectionTarget,
-  StorageSnapshot,
-  TrashEntry,
 } from '../shared/contracts';
 import { DEFAULT_CACHE_PAGE_SIZE, MAXIMUM_CACHE_PAGE_SIZE } from '../shared/contracts';
 import { channels } from '../shared/channels';
@@ -34,6 +32,8 @@ import {
   validateTrashRestoreResult,
   validateTrashPurgeResult,
   validateTrashPage,
+  validateStorageSnapshot,
+  validateTrashList,
   validateTrashSnapshotPurgeResult,
 } from './host-contract-validation';
 import { packagedRendererUrl } from './renderer-protocol';
@@ -73,6 +73,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     onDestroyed(): void;
   };
   const exportSessions = new Map<number, ExportSession>();
+  const latestPublishedExport = new WeakMap<IpcMainInvokeEvent['sender'], { id: string; path: string }>();
   const clearExportSession = (senderId: number) => {
     const session = exportSessions.get(senderId);
     if (!session) return;
@@ -152,6 +153,26 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   handle(channels.taskHistory, event => {
     assertTrusted(event);
     return history?.snapshot() ?? { entries: [] };
+  });
+  handle(channels.exportOutput, async (event, taskId, action) => {
+    assertTrusted(event);
+    const id = assertNonEmptyString(taskId, 'taskId', 128);
+    if (action !== 'copy' && action !== 'open') throw new TypeError('导出目录操作无效。');
+    const recent = latestPublishedExport.get(event.sender);
+    const directory = recent?.id === id ? recent.path : await history?.publishedExportPath(id);
+    if (!directory || !path.isAbsolute(directory) || directory.includes('\0')) throw new Error('无法找到这次导出的发布记录。');
+    if (action === 'copy') {
+      clipboard.writeText(directory);
+      return;
+    }
+    const info = await lstat(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw new Error('导出目录已移动或删除。可复制原路径进行查找。');
+      throw new Error('无法访问导出目录，请检查读取权限。');
+    });
+    if (!info.isDirectory()) throw new Error('原导出路径已被替换。可复制原路径进行查找。');
+    // Keep directory semantics if the path is replaced after the check.
+    const openError = await shell.openPath(path.join(directory, path.sep));
+    if (openError) throw new Error('无法打开导出目录：' + openError);
   });
   handle(channels.health, async (event) => {
     assertTrusted(event);
@@ -269,12 +290,12 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     }
     return cancelled;
   });
-  handle(channels.storageGet, (event, rootPath) => {
+  handle(channels.storageGet, async (event, rootPath) => {
     assertTrusted(event);
-    return track(event, host<StorageSnapshot>(
+    return validateStorageSnapshot(await track(event, host<unknown>(
       'storage.get',
       rootPath === undefined || rootPath === '' ? {} : { rootPath: assertPath(rootPath, 'rootPath') },
-    ));
+    )));
   });
   handle(channels.artifactsCleanup, async (event) => {
     assertTrusted(event);
@@ -301,7 +322,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
   });
   handle(channels.artifactsOpen, async (event) => {
     assertTrusted(event);
-    const storage = await track(event, host<StorageSnapshot>('storage.get'));
+    const storage = validateStorageSnapshot(await track(event, host<unknown>('storage.get')));
     const managedPath = storage.transcodeCache.path;
     if (!managedPath || !path.isAbsolute(managedPath)) {
       throw new Error('Desktop Host 未返回有效的受管转码缓存目录。');
@@ -321,9 +342,9 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
         ...(target.pageIndexes ? { pageIndexes: target.pageIndexes } : {}) })),
     })));
   });
-  handle(channels.trashList, (event, rootPath) => {
+  handle(channels.trashList, async (event, rootPath) => {
     assertTrusted(event);
-    return track(event, host<TrashEntry[]>('trash.list', { rootPath: assertPath(rootPath, 'rootPath') }));
+    return validateTrashList(await track(event, host<unknown>('trash.list', { rootPath: assertPath(rootPath, 'rootPath') })));
   });
   handle(channels.trashRestore, async (event, rootPath, entryIds) => {
     assertTrusted(event);
@@ -434,18 +455,20 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
         }
         session.outputPath = outputPath;
       }
-      const result = validateExportBatchResult(await track(event, host<unknown>('export', {
+      const call = host<unknown>('export', {
         rootPath: session.rootPath,
         indexToken: session.indexToken,
         targets: session.targets.map(target => ({ avid: target.avid, ...(target.pageIndexes ? { pageIndexes: target.pageIndexes } : {}) })),
         outputPath: session.outputPath,
         includeIncomplete: session.includeIncomplete,
         transcodeApprovals: [...session.approved],
-      })));
+      });
+      const result = validateExportBatchResult(await track(event, call));
       if (exportSessions.get(senderId) !== session) return result;
-      if (result.published) {
+      if (result.published && result.outputPath) {
+        latestPublishedExport.set(event.sender, { id: call.id, path: result.outputPath });
         clearExportSession(senderId);
-        return result;
+        return { ...result, taskId: call.id };
       }
       session.requested = new Set(result.transcodeRequirements?.map(item => item.approvalToken) ?? []);
       return { ...result, confirmationId: session.id };

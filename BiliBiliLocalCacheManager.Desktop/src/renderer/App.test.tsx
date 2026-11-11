@@ -95,6 +95,7 @@ function createCacheDetails(
 function createApi(): CacheManagerApi {
   const api: CacheManagerApi = {
     getTaskHistory: vi.fn().mockResolvedValue({ entries: [] }),
+    accessExportOutput: vi.fn().mockResolvedValue(undefined),
     onTaskHistoryChanged: vi.fn().mockReturnValue(() => undefined),
     reloadWhenIdle: vi.fn().mockResolvedValue(true),
     getTrashPage: vi.fn().mockImplementation(async (rootPath, options) => {
@@ -155,6 +156,40 @@ function deferred<T>() {
 }
 
 describe('desktop renderer', () => {
+  async function renderScannedLibrary() {
+    render(<App />);
+    const scan = screen.getByRole('button', { name: /扫描缓存/ });
+    await waitFor(() => expect(scan).not.toBeDisabled());
+    fireEvent.click(scan);
+    await waitFor(() => expect(api.scan).toHaveBeenCalledOnce());
+    await waitFor(() => expect(scan).not.toBeDisabled());
+  }
+
+  it.each(['play', 'export', 'confirmation'] as const)('keeps a %s report read-only after F5 publishes another index', async kind => {
+    const failure = { avid: '100', pageIndex: 1, title: '失败分 P', message: '原媒体不可读' };
+    vi.mocked(api.play).mockResolvedValue({ queued: 0, failures: [failure] });
+    vi.mocked(api.exportMedia).mockResolvedValue(kind === 'confirmation' ? {
+      published: false, outputPath: null, exportedCount: 0, failures: [], confirmationId: 'old-session',
+      transcodeRequirements: [{ avid: '100', pageIndex: 1, title: '测试缓存', approvalToken: 'a'.repeat(64),
+        processingKind: 'audio-aac', reason: '旧音轨需要转换', impact: '音频将重新编码' }],
+    } : { published: false, outputPath: null, exportedCount: 0, failures: [failure] });
+    await renderScannedLibrary();
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: kind === 'play' ? '播放' : '导出' }));
+    const action = await screen.findByRole('button', { name: kind === 'play' ? '重试未成功项目'
+      : kind === 'confirmation' ? '确认转码并重试整批' : '重试完整批次' });
+    expect(action).toBeEnabled();
+
+    vi.mocked(api.scan).mockResolvedValue(createCachePage([{ ...initialItem, title: '刷新后的缓存' }], { indexToken: 'new-token' }));
+    fireEvent.keyDown(window, { key: 'F5' });
+    await screen.findByRole('checkbox', { name: '选择 刷新后的缓存' });
+    expect(action).toBeDisabled();
+    expect(screen.getByRole('region', { name: '操作结果' })).toHaveTextContent(kind === 'confirmation' ? '旧音轨需要转换' : '原媒体不可读');
+    fireEvent.click(action);
+    expect(kind === 'play' ? api.play : api.exportMedia).toHaveBeenCalledOnce();
+    expect(screen.getByRole('checkbox', { name: '选择 刷新后的缓存' })).toBeInTheDocument();
+  });
+
   it('keeps global action shortcuts behind an open confirmation and restores them after closing', async () => {
     render(<App />);
     await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
@@ -335,8 +370,7 @@ describe('desktop renderer', () => {
       confirmationId: 'confirmation-1', transcodeRequirements: [{ avid: '100', pageIndex: 1, title: '测试缓存',
         approvalToken, processingKind: 'audio-aac', reason: 'Unsupported audio', impact: 'Audio will be re-encoded' }] })
       .mockResolvedValueOnce({ published: true, outputPath: 'batch', exportedCount: 1, failures: [] });
-    render(<App />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    await renderScannedLibrary();
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
     fireEvent.click(screen.getByRole('button', { name: '导出' }));
     expect(await screen.findByText('导出结果：待确认转码')).toBeInTheDocument();
@@ -383,21 +417,32 @@ describe('desktop renderer', () => {
   it('shows all-failed playback as failure and retries only the failed page', async () => {
     vi.mocked(api.play).mockResolvedValueOnce({ queued: 0, failures: [{ avid: '100', pageIndex: 1, title: 'Failed page', message: 'Missing media' }] })
       .mockResolvedValueOnce({ queued: 1, failures: [] });
-    render(<App />);
-    await waitFor(() => expect(screen.getByRole('button', { name: '播放' })).toBeDisabled());
+    await renderScannedLibrary();
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
     fireEvent.click(screen.getByRole('button', { name: '播放' }));
     expect(await screen.findByText('播放结果：失败')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '重试未成功项目' }));
-    await waitFor(() => expect(api.play).toHaveBeenLastCalledWith(initial.settings.rootPath, [{ avid: '100', pageIndexes: [1] }], 'system', false));
+    await waitFor(() => expect(api.play).toHaveBeenLastCalledWith(initial.settings.rootPath, [{ avid: '100', pageIndexes: [1] }], 'system', false, indexToken));
     expect(await screen.findByText('播放结果：全部成功')).toBeInTheDocument();
+  });
+
+  it('shows the published batch directory in the live report and copies it via the recorded task', async () => {
+    vi.mocked(api.exportMedia).mockResolvedValue({ published: true, taskId: 'published-task', outputPath: '/exports/batch',
+      exportedCount: 1, failures: [] });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    const report = await screen.findByRole('region', { name: '操作结果' });
+    expect(within(report).getByText('/exports/batch')).toBeInTheDocument();
+    fireEvent.click(within(report).getByRole('button', { name: '复制路径' }));
+    await waitFor(() => expect(within(report).getByRole('status')).toHaveTextContent('已复制导出路径'));
+    expect(api.accessExportOutput).toHaveBeenCalledWith('published-task', 'copy');
   });
 
   it('keeps failed exports unpublished and retries the original batch', async () => {
     vi.mocked(api.exportMedia).mockResolvedValue({ published: false, outputPath: null, exportedCount: 0,
       failures: [{ avid: '100', pageIndex: 1, title: 'Failed page', message: 'Missing media' }] });
-    render(<App />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    await renderScannedLibrary();
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
     fireEvent.click(screen.getByRole('button', { name: '导出' }));
     expect(await screen.findByText('导出结果：失败')).toBeInTheDocument();
@@ -411,14 +456,13 @@ describe('desktop renderer', () => {
     vi.mocked(api.play).mockResolvedValueOnce({ queued: 1, failures: pages.map(pageIndex => ({
       avid: '100', pageIndex, title: 'Failed page', message: 'Missing media',
     })) }).mockResolvedValueOnce({ queued: pages.length, failures: [] });
-    render(<App />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    await renderScannedLibrary();
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
     fireEvent.click(screen.getByRole('button', { name: '播放' }));
     expect(await screen.findByText('播放结果：部分失败')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '重试未成功项目' }));
     await waitFor(() => expect(api.play).toHaveBeenLastCalledWith(initial.settings.rootPath,
-      [{ avid: '100', pageIndexes: pages }], 'system', false));
+      [{ avid: '100', pageIndexes: pages }], 'system', false, indexToken));
     expect(api.play).toHaveBeenCalledTimes(2);
     expect(await screen.findByText('播放结果：全部成功')).toBeInTheDocument();
   });
@@ -448,8 +492,7 @@ describe('desktop renderer', () => {
   it('does not claim an unknown export is unpublished and requires acknowledgement before retry', async () => {
     const pending = deferred<Awaited<ReturnType<CacheManagerApi['exportMedia']>>>();
     vi.mocked(api.exportMedia).mockReturnValue(pending.promise);
-    render(<App />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
+    await renderScannedLibrary();
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
     fireEvent.click(screen.getByRole('button', { name: '导出' }));
     const state = vi.mocked(api.onOperationState).mock.calls[0][0];
@@ -1173,7 +1216,7 @@ describe('desktop renderer', () => {
     await screen.findByText('测试缓存');
     fireEvent.click(screen.getByRole('button', { name: '回收站' }));
     await screen.findByText('已恢复条目');
-    fireEvent.click(screen.getByRole('checkbox', { name: '选择全部回收站条目' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择本页可恢复条目' }));
     fireEvent.click(screen.getByRole('button', { name: '恢复所选' }));
     expect(await screen.findByText(/已恢复 1 项，失败 0 项，未执行 1 项/)).toBeInTheDocument();
     expect(await screen.findByText('未恢复条目')).toBeInTheDocument();
@@ -1218,7 +1261,7 @@ describe('desktop renderer', () => {
     await screen.findByText('测试缓存');
     fireEvent.click(screen.getByRole('button', { name: '回收站' }));
     await screen.findByText('Restored entry');
-    fireEvent.click(screen.getByRole('checkbox', { name: '选择全部回收站条目' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择本页可恢复条目' }));
     fireEvent.click(screen.getByRole('button', { name: '恢复所选' }));
     expect(await screen.findByText(/已恢复 1 项，失败 1 项/)).toBeInTheDocument();
     expect(await screen.findByText('Failed restore')).toBeInTheDocument();

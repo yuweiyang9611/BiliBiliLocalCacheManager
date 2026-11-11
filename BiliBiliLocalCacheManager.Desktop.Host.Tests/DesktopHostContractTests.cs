@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
 using BiliBiliLocalCacheManager.Desktop.Host.Services;
 using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
+using BiliBiliLocalCacheManager.Playback.Models;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 
@@ -591,6 +592,41 @@ public sealed partial class DesktopHostContractTests
         Assert.Equal(0, failure.GetProperty("exportedCount").GetInt32());
         Assert.Single(failure.GetProperty("failures").EnumerateArray());
         Assert.Empty(Directory.EnumerateFileSystemEntries(exportParent));
+    }
+
+    [Fact]
+    public async Task StoragePolicyPreview_ExcludesTheTrashAndMatchesPolicyCleanup()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(123, "Trashed video");
+        var application = workspace.CreateApplication();
+        var parameters = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot });
+        var move = await DispatchAsync(application, "trash.move", JsonSerializer.Serialize(new
+        {
+            rootPath = workspace.CacheRoot,
+            avids = new[] { "123" }
+        }));
+        Assert.Single(move.GetProperty("moved").EnumerateArray());
+
+        var storage = await DispatchAsync(application, "storage.get", parameters);
+        var trashBytes = storage.GetProperty("trash").GetProperty("bytes").GetInt64();
+        Assert.True(trashBytes > 0);
+        Assert.Equal(0L, storage.GetProperty("policyReclaimableBytes").GetInt64());
+
+        var source = Path.Combine(workspace.Root, "preview-fixture.blv");
+        File.WriteAllText(source, "source");
+        var plan = CachePlaybackPlan.Playable(456, "Preview", 1, "Part", "c_1", workspace.Root,
+            "LegacyBlv", CachePlaybackMaterialKind.SingleFile, new[] { source });
+        var store = new PlaybackArtifactStore(workspace.TranscodeRoot);
+        var artifact = store.GetOrCreate(plan, ".mp4", output => File.WriteAllBytes(output, new byte[32]));
+        File.SetLastWriteTimeUtc(artifact.OutputPath, DateTime.UtcNow.AddDays(-45));
+        var preview = await DispatchAsync(application, "storage.get", parameters);
+        Assert.Equal(32L, preview.GetProperty("policyReclaimableBytes").GetInt64());
+        var cleanup = await DispatchAsync(application, "artifacts.cleanup", "{}");
+        Assert.Equal(32L, cleanup.GetProperty("freedBytes").GetInt64());
+        var after = await DispatchAsync(application, "storage.get", parameters);
+        Assert.Equal(trashBytes, after.GetProperty("trash").GetProperty("bytes").GetInt64());
+        Assert.Equal(0L, after.GetProperty("policyReclaimableBytes").GetInt64());
     }
 
     [Fact]
