@@ -22,6 +22,19 @@ function requireValue(condition, message) {
   if (!condition) throw new Error(message);
 }
 function nonempty(value) { return typeof value === 'string' && value.trim().length > 0; }
+export function validateReleaseIdentity(before, after) {
+  function identity(release) {
+    requireValue(release.isDraft === false && release.isPrerelease === true && nonempty(release.tagName)
+      && Array.isArray(release.assets) && release.assets.length > 0, 'Expected a published preview with assets.');
+    const assets = release.assets.map(({ id, name, size, state, digest, updatedAt }) => {
+      requireValue(nonempty(id) && nonempty(name) && Number.isSafeInteger(size) && size >= 0 &&
+        state === 'uploaded' && nonempty(updatedAt), 'Incomplete release asset identity.');
+      return { id, name, size, state, digest: digest ?? null, updatedAt };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+    return { tag: release.tagName, assets };
+  }
+  requireValue(JSON.stringify(identity(before)) === JSON.stringify(identity(after)), 'Release changed during validation.');
+}
 function sameSet(left, right) {
   return left.length === right.length && new Set(left).size === left.length &&
     [...left].sort().every((value, index) => value === [...right].sort()[index]);
@@ -77,9 +90,15 @@ export async function validateAcceptance({ record, assetsDirectory, tag, commit 
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   try {
-    const [recordPath, assetsDirectory, tag, commit] = process.argv.slice(2);
-    console.log(JSON.stringify(await validateAcceptance({
-      record: JSON.parse(await readFile(recordPath, 'utf8')), assetsDirectory, tag, commit,
-    })));
+    if (process.argv[2] === '--check-release-state') {
+      const snapshots = await Promise.all(process.argv.slice(3).map(async file => JSON.parse(await readFile(file, 'utf8'))));
+      requireValue(snapshots.length === 2, 'Two release snapshots are required.');
+      validateReleaseIdentity(...snapshots);
+    } else {
+      const [recordPath, assetsDirectory, tag, commit] = process.argv.slice(2);
+      console.log(JSON.stringify(await validateAcceptance({
+        record: JSON.parse(await readFile(recordPath, 'utf8')), assetsDirectory, tag, commit,
+      })));
+    }
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

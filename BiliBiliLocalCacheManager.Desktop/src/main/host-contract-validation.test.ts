@@ -69,6 +69,8 @@ describe('paged Host responses', () => {
     const entry = { id: 'pending', avid: '100', title: 'Video', deletedAt: null, sizeBytes: 1, isRestorable: false, unavailableReason: '清理中' };
     const page = { items: [entry], offset: 0, pageSize: 100, hasMore: false, totalItems: 1, totalSizeBytes: 1, snapshotToken: 's' };
     expect(validateTrashPage(page).items[0]).toEqual(entry);
+    expect(validateTrashPage({ ...page, canPurgeSnapshot: false }).canPurgeSnapshot).toBe(false);
+    expect(() => validateTrashPage({ ...page, canPurgeSnapshot: 'false' })).toThrow(/canPurgeSnapshot/);
     expect(() => validateTrashPage({ ...page, items: [{ ...entry, isRestorable: 'false' }] })).toThrow(/isRestorable/);
     expect(() => validateTrashPage({ ...page, items: [{ ...entry, unavailableReason: 1 }] })).toThrow(/unavailableReason/);
   });

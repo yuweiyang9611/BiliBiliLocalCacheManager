@@ -1,4 +1,6 @@
+using System.Security.Cryptography;
 using System.Text.Json;
+using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host;
@@ -16,8 +18,10 @@ internal sealed partial class DesktopHostApplication
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
-            TrashSnapshot snapshot;
-            if (token is not null) snapshot = ResolveTrashSnapshot(root, token);
+            var snapshot = token is null ? null : ResolveTrashSnapshot(root, token);
+            IReadOnlyList<TrashEntryDto> page;
+            if (snapshot?.Entries is { } cached)
+                page = cached.Skip(pagination.Offset).Take(pagination.PageSize).ToArray();
             else
             {
                 var entries = await Task.Run(() => _trashService.ListEntries(root, cancellationToken), cancellationToken);
@@ -31,27 +35,41 @@ internal sealed partial class DesktopHostApplication
                     cancellationToken.ThrowIfCancellationRequested();
                     ValidateTrashWirePath(entry.TrashPath);
                     ValidateTrashWirePath(entry.OriginalPath);
-                    // Worst-case JSON escaping bounds the eventual all-entry purge response as well as memory.
-                    identityBytes += (long)entry.TrashPath.Length * 6 + 3;
-                    if (identityBytes > MaximumTrashIdentityBytes)
-                        throw new RpcException("trash_too_large", "The trash identity snapshot exceeds the safety limit. Restore entries in batches before retrying.");
+                    identityBytes += TrashIdentityByteBudget(entry.TrashPath);
                     if (entry.TotalBytes < 0 || entry.TotalBytes > MaximumWireBytes - totalBytes)
                         throw new RpcException("trash_too_large", "The trash size exceeds the desktop numeric safety limit.");
                     totalBytes += entry.TotalBytes;
                 }
-                snapshot = new TrashSnapshot(Guid.NewGuid().ToString("N"), root, MapTrashEntries(entries), totalBytes);
-                _trashSnapshots.AddFirst(snapshot);
-                if (_trashSnapshots.Count > 8) _trashSnapshots.RemoveLast();
+                bool complete = identityBytes <= MaximumTrashIdentityBytes;
+                // Oversized snapshots retain only a digest. Re-enumerate on page requests and reject
+                // changes to entry order, identities or restore availability before publishing the page.
+                var fingerprint = complete ? null : FingerprintTrashEntries(entries, cancellationToken);
+                if (snapshot is null)
+                {
+                    snapshot = new TrashSnapshot(Guid.NewGuid().ToString("N"), root,
+                        complete ? MapTrashEntries(entries) : null, fingerprint, entries.Count, totalBytes);
+                    _trashSnapshots.AddFirst(snapshot);
+                    if (_trashSnapshots.Count > 8) _trashSnapshots.RemoveLast();
+                }
+                else if (snapshot.Fingerprint != fingerprint)
+                {
+                    _trashSnapshots.Remove(snapshot);
+                    throw new RpcException("stale_trash", "The trash contents changed. Reload the trash before continuing.");
+                }
+                page = snapshot.Entries is { } rows
+                    ? rows.Skip(pagination.Offset).Take(pagination.PageSize).ToArray()
+                    : MapTrashEntries(entries.Skip(pagination.Offset).Take(pagination.PageSize));
             }
             return new
             {
                 snapshotToken = snapshot.Token,
                 pagination.Offset,
                 pagination.PageSize,
-                totalItems = snapshot.Entries.Count,
-                hasMore = HasMore(pagination.Offset, pagination.PageSize, snapshot.Entries.Count),
+                totalItems = snapshot.TotalItems,
+                hasMore = HasMore(pagination.Offset, pagination.PageSize, snapshot.TotalItems),
+                canPurgeSnapshot = snapshot.Entries is not null,
                 totalSizeBytes = snapshot.TotalSizeBytes,
-                items = snapshot.Entries.Skip(pagination.Offset).Take(pagination.PageSize).ToArray()
+                items = page
             };
         }
         finally { _mutationGate.Release(); }
@@ -68,17 +86,34 @@ internal sealed partial class DesktopHostApplication
         try
         {
             var snapshot = ResolveTrashSnapshot(root, token);
-            return await PurgeTrashEntriesAsync(root, snapshot.Entries.Select(entry => entry.Id).ToArray(), cancellationToken);
+            if (snapshot.Entries is null) throw OversizedPurgeError();
+            try
+            {
+                return await PurgeTrashEntriesAsync(root, snapshot.Entries.Select(entry => entry.Id).ToArray(), cancellationToken);
+            }
+            finally { InvalidateTrashSnapshots(); }
         }
         catch (RpcException exception) when (exception.Code == "unsupported_operation")
         {
             throw new RpcException("stale_trash", exception.Message, exception.Details);
         }
-        finally
+        finally { _mutationGate.Release(); }
+    }
+
+    private static long TrashIdentityByteBudget(string id) => (long)id.Length * 6 + 3;
+
+    private static RpcException OversizedPurgeError() => new("trash_too_large",
+        "The full trash identity list exceeds the permanent deletion limit. Restore entries in batches before retrying.");
+
+    private static string FingerprintTrashEntries(IReadOnlyList<CacheTrashEntry> entries, CancellationToken cancellationToken)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var entry in entries)
         {
-            InvalidateTrashSnapshots();
-            _mutationGate.Release();
+            cancellationToken.ThrowIfCancellationRequested();
+            hash.AppendData(JsonSerializer.SerializeToUtf8Bytes(entry));
         }
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     private TrashSnapshot ResolveTrashSnapshot(string root, string token)
@@ -108,5 +143,6 @@ internal sealed partial class DesktopHostApplication
     // Callers hold the mutation gate, so no page can capture a partially committed host mutation.
     private void InvalidateTrashSnapshots() => _trashSnapshots.Clear();
 
-    private sealed record TrashSnapshot(string Token, string Root, IReadOnlyList<TrashEntryDto> Entries, long TotalSizeBytes);
+    private sealed record TrashSnapshot(string Token, string Root, IReadOnlyList<TrashEntryDto>? Entries,
+        string? Fingerprint, int TotalItems, long TotalSizeBytes);
 }

@@ -1,10 +1,87 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 
 public sealed partial class DesktopHostContractTests
 {
+    [Fact]
+    public async Task Scan_MissingCidKeepsOtherPartsUsableAndIdentifiesTheUnmovablePart()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Mixed video", 2);
+        workspace.CreateCache(202, "Other video");
+        var video = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "one-second.mp4"));
+        var healthyPath = Path.Combine(workspace.CacheRoot, "101", "c_1", "lua.flv.bb2api.80", "0.mp4");
+        File.WriteAllBytes(healthyPath, video);
+        var incompleteIdentityPath = Path.Combine(workspace.CacheRoot, "101", "c_2", "entry.json");
+        var metadata = JsonNode.Parse(File.ReadAllText(incompleteIdentityPath))!;
+        Assert.True(metadata["page_data"]!.AsObject().Remove("cid"));
+        File.WriteAllText(incompleteIdentityPath, metadata.ToJsonString());
+        var application = workspace.CreateApplication();
+        var rootPath = workspace.CacheRoot;
+
+        var scan = await RefreshDispatchAsync(application, "scan", new { rootPath });
+        var indexToken = scan.GetProperty("indexToken").GetString();
+        Assert.Equal(3, scan.GetProperty("includedEntries").GetInt32());
+        Assert.Equal(1, scan.GetProperty("unavailablePartIdentities").GetInt32());
+        Assert.True(scan.GetProperty("hasWarnings").GetBoolean());
+        var issue = Assert.Single(scan.GetProperty("issues").EnumerateArray());
+        Assert.Equal(incompleteIdentityPath, issue.GetProperty("path").GetString());
+        Assert.Equal("PartIdentityUnavailable", issue.GetProperty("kind").GetString());
+        Assert.Contains("page_data/cid", issue.GetProperty("message").GetString());
+        var search = await RefreshDispatchAsync(application, "search", new { indexToken, keyword = "av101" });
+        Assert.Equal("101", Assert.Single(search.GetProperty("items").EnumerateArray()).GetProperty("avid").GetString());
+        var details = await RefreshDispatchAsync(application, "cache.details", new { indexToken, avid = "101" });
+        var firstPart = details.GetProperty("segments").EnumerateArray().Single(item => item.GetProperty("pageIndex").GetInt32() == 1);
+        Assert.True(firstPart.GetProperty("isPlayable").GetBoolean());
+
+        var moved = await RefreshDispatchAsync(application, "trash.move", new { rootPath, indexToken,
+            targets = new[] { new { avid = "101", pageIndexes = new[] { 1, 2 } } } });
+        Assert.Equal("101:P1", Assert.Single(moved.GetProperty("moved").EnumerateArray()).GetString());
+        Assert.Equal("101:P2", Assert.Single(moved.GetProperty("failed").EnumerateArray()).GetString());
+        Assert.Contains("page_data/cid", moved.GetProperty("items")[1].GetProperty("error").GetString());
+        Assert.Equal(metadata.ToJsonString(), File.ReadAllText(incompleteIdentityPath));
+        var trashEntry = Assert.Single(moved.GetProperty("entryIds").EnumerateArray()).GetString()!;
+        Assert.Equal(video, File.ReadAllBytes(Path.Combine(trashEntry, "lua.flv.bb2api.80", "0.mp4")));
+
+        workspace.CreateCache(202, "External update");
+        var refreshed = await RefreshDispatchAsync(application, "scan", new { rootPath, incremental = true, maxReportedIssues = 0 });
+        Assert.Contains(refreshed.GetProperty("items").EnumerateArray(), row => row.GetProperty("title").GetString() == "External update");
+        Assert.True(refreshed.GetProperty("hasWarnings").GetBoolean());
+        Assert.Empty(refreshed.GetProperty("issues").EnumerateArray());
+        Assert.True(refreshed.GetProperty("issuesTruncated").GetBoolean());
+        var restored = await RefreshDispatchAsync(application, "trash.restore", new { rootPath, entryIds = new[] { trashEntry } });
+        Assert.Equal(trashEntry, Assert.Single(restored.GetProperty("restored").EnumerateArray()).GetString());
+        Assert.Equal(video, File.ReadAllBytes(healthyPath));
+    }
+
+    [Fact]
+    public async Task Scan_ReportsPaddedAvDirectoriesAndMovesOnlyTheCanonicalEntry()
+    {
+        using var workspace = new HostTestWorkspace();
+        var rootPath = workspace.CacheRoot;
+        workspace.CreateCache(43, "First alias");
+        Directory.Move(Path.Combine(rootPath, "43"), Path.Combine(rootPath, "00043"));
+        workspace.CreateCache(44, "Second alias");
+        Directory.Move(Path.Combine(rootPath, "44"), Path.Combine(rootPath, "00044"));
+        workspace.CreateCache(44, "Canonical");
+        var application = workspace.CreateApplication();
+        var scan = await RefreshDispatchAsync(application, "scan", new { rootPath });
+        Assert.Equal("Canonical", Assert.Single(scan.GetProperty("items").EnumerateArray()).GetProperty("title").GetString());
+        Assert.Equal(2, scan.GetProperty("invalidEntries").GetInt32());
+        Assert.Equal(new[] { Path.Combine(rootPath, "00043"), Path.Combine(rootPath, "00044") },
+            scan.GetProperty("issues").EnumerateArray().Select(issue => issue.GetProperty("path").GetString()));
+        var moved = await RefreshDispatchAsync(application, "trash.move", new { rootPath, indexToken = scan.GetProperty("indexToken").GetString(),
+            targets = new[] { new { avid = "43" }, new { avid = "44" } } });
+        Assert.Equal("43", Assert.Single(moved.GetProperty("failed").EnumerateArray()).GetString());
+        Assert.Equal("44", Assert.Single(moved.GetProperty("moved").EnumerateArray()).GetString());
+        Assert.True(File.Exists(Path.Combine(rootPath, "00043", "c_1", "entry.json")));
+        Assert.True(File.Exists(Path.Combine(rootPath, "00044", "c_1", "entry.json")));
+        Assert.False(Directory.Exists(Path.Combine(rootPath, "44")));
+    }
+
     [Fact]
     public async Task PartTrash_MovesCrossVideoSelectionAndReturnsExactUndoEntries()
     {

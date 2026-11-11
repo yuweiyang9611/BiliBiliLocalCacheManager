@@ -30,7 +30,8 @@ internal sealed partial class DesktopHostApplication
         await using var protection = new PlaybackPreparationProtection(store, cancellationToken);
         PlaybackBatchResultDto ProtectionFailure() => new(0, failures.Concat(targets.Select(target =>
             new MediaFailureDto(target.Cache.Avid.ToString(), target.Page, BoundWireString(target.Cache.Title),
-                BoundWireString("Playback preparation protection failed: " + protection.Failure?.Message)))).ToArray());
+                BoundWireString("Playback preparation protection failed: " + protection.Failure?.Message))))
+            .DistinctBy(failure => (failure.Avid, failure.PageIndex)).ToArray());
         for (var ordinal = 0; ordinal < targets.Count; ordinal++)
         {
             if (protection.Failure is not null) return ProtectionFailure();
@@ -38,7 +39,7 @@ internal sealed partial class DesktopHostApplication
             var target = targets[ordinal];
             try
             {
-                var plan = _playbackService.CreatePagePlan(target.Cache, target.Page.ToString());
+                var plan = _playbackService.CreatePagePlan(target.Cache, target.Page);
                 var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
                     ReportProgress(new HostProgressEvent(requestId, "play", value.Stage, value.Percentage,
                         ordinal + 1, targets.Count, $"av{target.Cache.Avid} P{target.Page}",
@@ -122,7 +123,7 @@ internal sealed partial class DesktopHostApplication
                 stagingGuard.Validate();
                 try
                 {
-                    var plan = _playbackService.CreatePagePlan(cache, target.Page.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    var plan = _playbackService.CreatePagePlan(cache, target.Page);
                     var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
                         ReportProgress(new HostProgressEvent(requestId, "export", value.Stage, value.Percentage,
                             ordinal + 1, requests.Count, $"av{cache.Avid} P{plan.PageIndex}",
@@ -133,12 +134,12 @@ internal sealed partial class DesktopHostApplication
                     protection.Register(materialization.OutputPath);
                     destinationGuard.Validate();
                     stagingGuard.Validate();
-                    var videoDirectory = Path.Combine(stagingDirectory, PortableFileNaming.Build(cache.Title,
-                        cache.Avid, plan.PageIndex, null, false) + "_AV" + cache.Avid);
+                    var videoDirectory = Path.Combine(stagingDirectory,
+                        PortableFileNaming.BuildVideoDirectoryName(cache.Title, cache.Avid));
                     Directory.CreateDirectory(videoDirectory);
                     using var videoGuard = new ExportDirectoryGuard(videoDirectory, allowRename: false);
-                    var partName = PortableFileNaming.Build(plan.PartName, cache.Avid, plan.PageIndex, null, false);
-                    var output = Path.Combine(videoDirectory, $"P{plan.PageIndex:D3}_{partName}.mp4");
+                    var output = Path.Combine(videoDirectory,
+                        PortableFileNaming.BuildPartFileName(plan.PartName, cache.Avid, plan.PageIndex));
                     await CopyAtomicallyAsync(materialization.OutputPath, output, protection.Token, bytes =>
                         ReportProgress(new HostProgressEvent(requestId, "export", "copying", Current: ordinal + 1,
                             Total: requests.Count, Details: new { bytesCopied = bytes }, Phase: "copy")));

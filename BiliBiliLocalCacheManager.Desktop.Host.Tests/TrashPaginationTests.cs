@@ -101,11 +101,77 @@ public sealed partial class DesktopHostContractTests
         }
     }
 
+    [Fact]
+    public async Task TrashPages_OverBudgetAllowsBoundedRestoreAndRefusesPermanentPurgeUntilItFits()
+    {
+        using var workspace = new HostTestWorkspace();
+        var rootPath = workspace.CacheRoot;
+        var service = CreateOverBudgetTrash(rootPath);
+        var application = new DesktopHostApplication(trashService: service);
+        var first = await RefreshDispatchAsync(application, "trash.page", new { rootPath, pageSize = 1 });
+        var snapshotToken = first.GetProperty("snapshotToken").GetString();
+        Assert.False(first.GetProperty("canPurgeSnapshot").GetBoolean());
+        Assert.Equal(1000, first.GetProperty("totalItems").GetInt32());
+        var last = await RefreshDispatchAsync(application, "trash.page", new { rootPath, snapshotToken, offset = 999, pageSize = 5 });
+        var lastEntry = Assert.Single(last.GetProperty("items").EnumerateArray()).GetProperty("id").GetString();
+        Assert.Equal(service.Entries[^1].TrashPath, lastEntry);
+        Assert.False(last.GetProperty("hasMore").GetBoolean());
+        Assert.Equal(2, service.ListCalls);
+        if (OperatingSystem.IsWindows())
+        {
+            var rejected = await Assert.ThrowsAsync<RpcException>(() => RefreshDispatchAsync(application, "trash.purgeSnapshot",
+                new { rootPath, snapshotToken, confirmed = true, confirmationText = "永久删除" }));
+            Assert.Equal("trash_too_large", rejected.Code);
+            var legacy = await Assert.ThrowsAsync<RpcException>(() => RefreshDispatchAsync(application, "trash.purge",
+                new { rootPath, entryIds = service.Entries.Select(entry => entry.TrashPath), confirmed = true, confirmationText = "永久删除" }));
+            Assert.Equal("trash_too_large", legacy.Code);
+            Assert.Equal(0, service.PurgeCalls);
+        }
+        var restored = await RefreshDispatchAsync(application, "trash.restore", new { rootPath, entryIds = new[] { lastEntry } });
+        Assert.Equal(lastEntry, Assert.Single(restored.GetProperty("restored").EnumerateArray()).GetString());
+        var stale = await Assert.ThrowsAsync<RpcException>(() => RefreshDispatchAsync(application, "trash.page", new { rootPath, snapshotToken }));
+        Assert.Equal("stale_trash", stale.Code);
+        var updated = await RefreshDispatchAsync(application, "trash.page", new { rootPath, pageSize = 1 });
+        Assert.True(updated.GetProperty("canPurgeSnapshot").GetBoolean());
+        Assert.Equal(999, updated.GetProperty("totalItems").GetInt32());
+    }
+
+    [Fact]
+    public async Task TrashPages_BrowseOnlySnapshotRejectsDifferentRootAndChangedRestoreStatus()
+    {
+        using var workspace = new HostTestWorkspace();
+        var rootPath = workspace.CacheRoot;
+        var service = CreateOverBudgetTrash(rootPath);
+        var application = new DesktopHostApplication(trashService: service);
+        var page = await RefreshDispatchAsync(application, "trash.page", new { rootPath, pageSize = 1 });
+        var snapshotToken = page.GetProperty("snapshotToken").GetString();
+        var otherRoot = Directory.CreateDirectory(Path.Combine(workspace.Root, "other")).FullName;
+        var wrongRoot = await Assert.ThrowsAsync<RpcException>(() => RefreshDispatchAsync(application, "trash.page", new { rootPath = otherRoot, snapshotToken }));
+        Assert.Equal("stale_trash", wrongRoot.Code);
+        service.Entries[^1] = service.Entries[^1] with { IsRestorable = false };
+        var stale = await Assert.ThrowsAsync<RpcException>(() => RefreshDispatchAsync(application, "trash.page", new { rootPath, snapshotToken, offset = 1 }));
+        Assert.Equal("stale_trash", stale.Code);
+        Assert.Equal(2, service.ListCalls);
+    }
+
+    private static SnapshotTrashService CreateOverBudgetTrash(string root)
+    {
+        var service = new SnapshotTrashService(root, 1000);
+        // 1,000 entries exceed the 16 MiB escaped identity budget; restoring one puts the rest under it.
+        for (var index = 0; index < service.Entries.Count; index++)
+        {
+            var entry = service.Entries[index];
+            service.Entries[index] = entry with { TrashPath = entry.TrashPath.PadRight(2797, 'x') };
+        }
+        return service;
+    }
+
     private sealed class SnapshotTrashService(string root, int count) : ICacheTrashService
     {
         public List<CacheTrashEntry> Entries { get; } = Enumerable.Range(1, count).Select(avid => new CacheTrashEntry(
             avid, Path.Combine(root, ".trash", avid.ToString()), Path.Combine(root, avid.ToString()), DateTimeOffset.UnixEpoch, 1, 1, true, null)).ToList();
         public int ListCalls { get; private set; }
+        public int PurgeCalls { get; private set; }
         public string GetTrashDirectory(string rootDirectory) => Path.Combine(rootDirectory, ".trash");
         public IReadOnlyList<CacheTrashEntry> ListEntries(string rootDirectory, CancellationToken cancellationToken = default)
         { ListCalls++; cancellationToken.ThrowIfCancellationRequested(); return Entries.ToArray(); }
@@ -118,6 +184,7 @@ public sealed partial class DesktopHostContractTests
         public CacheTrashStatistics GetStatistics(string rootDirectory, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public CacheTrashPurgeResult Purge(string rootDirectory, bool includeUntrustedLegacyEntries = false, IReadOnlyCollection<string>? expectedEntryIds = null)
         {
+            PurgeCalls++;
             if (expectedEntryIds is null || !Entries.Select(entry => entry.TrashPath).ToHashSet().SetEquals(expectedEntryIds))
                 throw new CacheTrashSnapshotMismatchException(expectedEntryIds?.Count ?? 0, Entries.Count);
             var count = Entries.Count;

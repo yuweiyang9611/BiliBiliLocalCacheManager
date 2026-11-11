@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+- Isolate per-part identity failures during scans, report ambiguous AV directory names, and support searching the displayed AV number.
+- Select a playable candidate from the requested page, concatenate only one quality's fragments, and fall back to complete DASH media when legacy directories are empty. Validate single-file MP4 exports before publishing a batch.
+- Preserve compatible fields from newer read-only settings and load UTF-8 BOM settings. Redact request-specific cache roots before retaining diagnostic events.
+- Keep library edits when saving settings, refresh estimates when policies change, and handle pending searches and page loads across navigation. Allow an explicitly selected session directory with read-only settings.
+- Restore long trash IDs from the UI and allow paged restoration above the whole-trash purge budget. Check restore names before moving parts and budget final export names by UTF-8 bytes.
+- Compare stable release asset identities during promotion. Validate incremental benchmark samples against Host diagnostics and compare all pages.
+
 ### Reliability
 
 - Keep modal focus contained, restore the invoking control, and suspend background shortcuts; expose keyboard navigation to part details across virtualized rows.

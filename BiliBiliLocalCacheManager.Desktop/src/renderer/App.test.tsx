@@ -25,6 +25,7 @@ vi.mock('./pages/LibraryPage', async importOriginal => {
 });
 
 const indexToken = 'index-token';
+const longTrashId = 'D:/' + ('cache/'.repeat(180)) + '.BiliBiliLocalCacheManager-Trash/v2_100_example';
 const initialSegments: CacheSegment[] = [{
   id: '100:1',
   segmentKey: '1',
@@ -265,6 +266,137 @@ describe('desktop renderer', () => {
 
   afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
+  it('keeps cleared results empty after both a pending search and its debounce deadline', async () => {
+    await renderScannedLibrary();
+    const delayed = deferred<CachePage>();
+    vi.mocked(api.search).mockReturnValue(delayed.promise);
+    const input = screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号');
+    fireEvent.change(input, { target: { value: '测试' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(api.search).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: '清空结果' }));
+    await act(async () => {
+      delayed.resolve(createCachePage());
+      await new Promise(resolve => window.setTimeout(resolve, 400));
+    });
+    expect(api.search).toHaveBeenCalledOnce();
+    expect(screen.queryByLabelText('选择 测试缓存')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '筛选' }));
+    expect(await screen.findByLabelText('选择 测试缓存')).toBeVisible();
+  });
+
+  it('restores all rows when an Enter-submitted filter is cleared before the debounce deadline', async () => {
+    const all = [initialItem, { ...initialItem, id: '101', avid: '101', title: '另一条' }];
+    vi.mocked(api.scan).mockResolvedValue(createCachePage(all));
+    vi.mocked(api.search).mockImplementation(async request => createCachePage(request.keyword ? [initialItem] : all));
+    await renderScannedLibrary();
+    const input = screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号');
+    fireEvent.change(input, { target: { value: '测试' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.queryByLabelText('选择 另一条')).not.toBeInTheDocument());
+    fireEvent.change(input, { target: { value: '' } });
+    expect(await screen.findByLabelText('选择 另一条')).toBeVisible();
+    expect(api.search).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves the active library query and scan mode when saving an unrelated preference', async () => {
+    await renderScannedLibrary();
+    fireEvent.click(screen.getByLabelText('包含未完成缓存'));
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledTimes(2));
+    const query = '测试';
+    fireEvent.change(screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号'), { target: { value: query } });
+    await waitFor(() => expect(api.search).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    expect(screen.getByLabelText('扫描时包含下载未完成的缓存')).toBeChecked();
+    fireEvent.change(screen.getByRole('spinbutton', { name: /保留天数/ }), { target: { value: '1' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({
+      transcodeCacheRetentionDays: 1, includeIncomplete: true, keyword: query,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: '缓存库' }));
+    expect(screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号')).toHaveValue(query);
+    expect(screen.getByLabelText('包含未完成缓存')).toBeChecked();
+    expect(api.scan).toHaveBeenCalledTimes(2);
+  });
+
+  it('replaces the storage estimate after saving a new policy on the same root', async () => {
+    vi.mocked(api.getStorage).mockResolvedValueOnce({ ...emptyStorage, policyReclaimableBytes: 1024 ** 3 })
+      .mockResolvedValue({ ...emptyStorage, policyReclaimableBytes: 0 });
+    render(<App />);
+    await screen.findByLabelText('选择 测试缓存');
+    fireEvent.click(screen.getByRole('button', { name: '存储概览' }));
+    await screen.findByText('按策略清理预计释放 1.00 GB');
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.change(screen.getByRole('spinbutton', { name: /保留天数/ }), { target: { value: '1' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存设置' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '存储概览' }));
+    expect(screen.queryByText('按策略清理预计释放 1.00 GB')).not.toBeInTheDocument();
+    expect(await screen.findByText('按策略清理预计释放 0 MB')).toBeVisible();
+    expect(api.getStorage).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves library input typed while a settings write is in flight for the next save', async () => {
+    await renderScannedLibrary();
+    const input = () => screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号');
+    fireEvent.change(input(), { target: { value: '旧词' } });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    const pending = deferred<InitialState['settings']>();
+    vi.mocked(api.updateSettings).mockReturnValueOnce(pending.promise);
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ keyword: '旧词' }));
+    fireEvent.click(screen.getByRole('button', { name: '缓存库' }));
+    fireEvent.change(input(), { target: { value: '新词' } });
+    await act(async () => pending.resolve({ ...initial.settings, keyword: '旧词' }));
+    expect(input()).toHaveValue('新词');
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(api.updateSettings).toHaveBeenLastCalledWith({ keyword: '新词' }));
+  });
+
+  it('waits for an active inspection before loading trash, and retries a failed load only on request', async () => {
+    render(<App />);
+    await screen.findByLabelText('选择 测试缓存');
+    fireEvent.click(screen.getByRole('button', { name: '存储概览' }));
+    await waitFor(() => expect(api.getStorage).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('button', { name: '刷新统计' })).toBeEnabled());
+    const delayed = deferred<typeof emptyStorage>();
+    vi.mocked(api.getStorage).mockReturnValue(delayed.promise);
+    vi.mocked(api.getTrashPage).mockRejectedValueOnce(new Error('读取失败'));
+    fireEvent.click(screen.getByRole('button', { name: '刷新统计' }));
+    fireEvent.click(screen.getByRole('button', { name: '回收站' }));
+    expect(screen.queryByText('回收站为空')).not.toBeInTheDocument();
+    await act(async () => delayed.resolve(emptyStorage));
+    expect(await screen.findByText('回收站读取失败')).toBeVisible();
+    expect(screen.queryByText('回收站为空')).not.toBeInTheDocument();
+    expect(api.getTrashPage).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+    expect(await screen.findByText('回收站为空')).toBeVisible();
+    expect(api.getTrashPage).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses a validated root for this session when Host settings are read-only', async () => {
+    vi.mocked(api.getInitialState).mockResolvedValue({
+      ...initial, items: [], settings: { ...initial.settings, rootPath: '' },
+      settingsState: { canSave: false, sourceSchemaVersion: 3 },
+    });
+    const rootPath = 'D:/valid';
+    vi.mocked(api.chooseRootDirectory).mockResolvedValue(rootPath);
+    vi.mocked(api.updateSettings).mockRejectedValue(new IpcError('future schema', 'settings_read_only'));
+    render(<App />);
+    const browse = screen.getByRole('button', { name: '浏览缓存目录' });
+    await waitFor(() => expect(browse).toBeEnabled());
+    fireEvent.click(browse);
+    expect(await screen.findByLabelText('选择 测试缓存')).toBeVisible();
+    expect(screen.getByLabelText('缓存根目录')).toHaveValue(rootPath);
+    expect(api.updateSettings).not.toHaveBeenCalled();
+    expect(screen.getByText(/仅在本次会话使用/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
+    await waitFor(() => expect(api.scan).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.scan).mock.calls.every(([request]) => request.persistSettings === false)).toBe(true);
+  });
+
   it('recovers a failed page during export without replaying the task or losing its guard', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const exporting = deferred<Awaited<ReturnType<CacheManagerApi['exportMedia']>>>();
@@ -404,12 +536,13 @@ describe('desktop renderer', () => {
   });
 
   it('shows damaged scan entries and locates an issue using its index token', async () => {
-    vi.mocked(api.scan).mockResolvedValue({ ...createCachePage(), invalidEntries: 2, hasWarnings: true,
+    vi.mocked(api.scan).mockResolvedValue({ ...createCachePage(), invalidEntries: 2, hasWarnings: true, unavailablePartIdentities: 5,
       issues: [{ id: 0, kind: 'InvalidEntry', path: 'damaged/entry.json', message: 'Invalid JSON' }], issuesTruncated: true });
     render(<App />);
     await waitFor(() => expect(screen.getByRole('button', { name: /扫描缓存/ })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: /扫描缓存/ }));
     expect(await screen.findByText('Invalid JSON')).toBeInTheDocument();
+    expect(screen.getByText(/无法核验身份的分 P 5/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '定位问题 1', hidden: true }));
     await waitFor(() => expect(api.locateScanIssue).toHaveBeenCalledWith(indexToken, 0));
   });
@@ -1208,10 +1341,10 @@ describe('desktop renderer', () => {
 
   it('keeps partially restored results and does not start a new scan after cancellation', async () => {
     vi.mocked(api.listTrash).mockResolvedValueOnce([
-      { id: 'trash-100', avid: '100', title: '已恢复条目', sizeBytes: 1, deletedAt: null },
+      { id: longTrashId, avid: '100', title: '已恢复条目', sizeBytes: 1, deletedAt: null },
       { id: 'trash-101', avid: '101', title: '未恢复条目', sizeBytes: 1, deletedAt: null },
     ]).mockResolvedValue([{ id: 'trash-101', avid: '101', title: '未恢复条目', sizeBytes: 1, deletedAt: null }]);
-    vi.mocked(api.restoreTrash).mockResolvedValue({ restored: ['trash-100'], failed: [], cancelled: true, unprocessed: ['trash-101'] });
+    vi.mocked(api.restoreTrash).mockResolvedValue({ restored: [longTrashId], failed: [], cancelled: true, unprocessed: ['trash-101'] });
     render(<App />);
     await screen.findByText('测试缓存');
     fireEvent.click(screen.getByRole('button', { name: '回收站' }));
@@ -1219,6 +1352,7 @@ describe('desktop renderer', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: '选择本页可恢复条目' }));
     fireEvent.click(screen.getByRole('button', { name: '恢复所选' }));
     expect(await screen.findByText(/已恢复 1 项，失败 0 项，未执行 1 项/)).toBeInTheDocument();
+    expect(api.restoreTrash).toHaveBeenCalledWith(initial.settings.rootPath, [longTrashId, 'trash-101']);
     expect(await screen.findByText('未恢复条目')).toBeInTheDocument();
     expect(screen.queryByText('已恢复条目')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 未恢复条目' }));
@@ -1296,7 +1430,7 @@ describe('desktop renderer', () => {
 
   it('restores the most recent move-to-trash batch with Ctrl+Z', async () => {
     const trashEntry = {
-      id: 'trash-entry-100',
+      id: longTrashId,
       avid: '100',
       title: '测试缓存',
       sizeBytes: 32 * 1024 * 1024,
@@ -1321,7 +1455,7 @@ describe('desktop renderer', () => {
     expect(screen.getByRole('button', { name: /撤销删除/ })).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
-    await waitFor(() => expect(api.restoreTrash).toHaveBeenCalledWith('D:\\Bilibili\\download', ['trash-entry-100']));
+    await waitFor(() => expect(api.restoreTrash).toHaveBeenCalledWith('D:\\Bilibili\\download', [longTrashId]));
   });
 
   it('does not expose permanent purge when the host capability is unavailable', async () => {

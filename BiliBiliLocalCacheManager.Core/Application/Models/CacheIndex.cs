@@ -91,12 +91,12 @@ public sealed class CacheIndex
         }
 
         // Local helper that applies the selected match mode on a candidate string.
-        static bool Matches(string candidate, string token, CacheSearchMatchMode mode, StringComparison cmp)
+        static bool Matches(ReadOnlySpan<char> candidate, ReadOnlySpan<char> token, CacheSearchMatchMode mode, StringComparison cmp)
         {
             return mode switch
             {
                 CacheSearchMatchMode.Contains => candidate.Contains(token, cmp),
-                CacheSearchMatchMode.Equals => string.Equals(candidate, token, cmp),
+                CacheSearchMatchMode.Equals => candidate.Equals(token, cmp),
                 CacheSearchMatchMode.StartsWith => candidate.StartsWith(token, cmp),
                 CacheSearchMatchMode.EndsWith => candidate.EndsWith(token, cmp),
                 _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown match mode.")
@@ -147,7 +147,9 @@ public sealed class CacheIndex
             if (options.Scope.HasFlag(CacheSearchScope.Avid))
             {
                 avidText ??= cache.Avid.ToString(CultureInfo.InvariantCulture);
-                if (Matches(avidText, token, options.MatchMode, comparison))
+                var avidToken = token.Length > 2 && token.StartsWith("av", comparison) && char.IsAsciiDigit(token[2])
+                    ? token.AsSpan(2) : token.AsSpan();
+                if (Matches(avidText, avidToken, options.MatchMode, comparison))
                 {
                     return true;
                 }

@@ -47,6 +47,7 @@ internal sealed partial class DesktopHostApplication
             var options = new CacheIndexBuildOptions
             {
                 IncludeIncompleteEntries = includeIncomplete,
+                RequireCanonicalAvidDirectory = true,
                 MaximumCacheBytes = MaximumWireBytes
             };
             var report = await Task.Run(
@@ -193,10 +194,11 @@ internal sealed partial class DesktopHostApplication
         CancellationToken cancellationToken,
         Action<int> partCaptureProgress,
         CurrentIndexSnapshot? previous = null,
-        IReadOnlySet<long>? changedAvids = null)
+        IReadOnlySet<long>? changedAvids = null,
+        int maximumIssues = 100)
     {
         var orderedIndex = new CacheIndex(report.Index.VideoCaches.OrderByDescending(GetLastUpdatedUtc).ThenBy(cache => cache.Avid));
-        var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, report.Issues);
+        var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, report.Issues, maximumIssues);
         snapshot.CaptureTrashPartTargets(_trashService, cancellationToken, partCaptureProgress, previous, changedAvids);
         return snapshot;
     }

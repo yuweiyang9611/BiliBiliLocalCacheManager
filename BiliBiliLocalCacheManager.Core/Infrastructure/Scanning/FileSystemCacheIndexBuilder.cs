@@ -49,6 +49,15 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
             cancellationToken.ThrowIfCancellationRequested();
             if (TryGetDirectoryAvid(path, out var avid))
             {
+                if (effectiveOptions.RequireCanonicalAvidDirectory &&
+                    Path.GetFileName(path) != avid.ToString(CultureInfo.InvariantCulture))
+                {
+                    var message = $"已跳过带前导零的 AV 目录。缓存管理操作需要标准十进制目录名 {avid}。";
+                    if (effectiveOptions.ThrowOnInvalidEntry) throw new InvalidDataException(message);
+                    state.InvalidEntries++;
+                    state.AddIssue(new CacheScanIssue(CacheScanIssueKind.InvalidEntry, path, message));
+                    continue;
+                }
                 avidDirectories.Add((path, avid));
             }
         }

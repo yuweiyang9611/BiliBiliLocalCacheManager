@@ -4,7 +4,20 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { expectedAssets, validateAcceptance } from './validate-desktop-acceptance.mjs';
+import { expectedAssets, validateAcceptance, validateReleaseIdentity } from './validate-desktop-acceptance.mjs';
+
+test('promotion tolerates downloads and reordered assets but rejects changed release content', () => {
+  const assets = ['windows.zip', 'linux.deb'].map((name, n) => ({ id: 'asset-' + n, name, state: 'uploaded',
+    size: 12, digest: 'sha256:' + 'a'.repeat(64), updatedAt: '2026-01-01T00:00:00Z', downloadCount: 1 }));
+  const before = { isDraft: false, isPrerelease: true, tagName: 'v0.4.1', assets };
+  const current = { ...before, assets: assets.toReversed().map(asset => ({ ...asset, downloadCount: 20 })) };
+  validateReleaseIdentity(before, current);
+  for (const change of [{ id: 'replacement' }, { size: 13 }, { digest: 'sha256:' + 'b'.repeat(64) }]) {
+    assert.throws(() => validateReleaseIdentity(before, { ...current, assets: [{ ...assets[0], ...change }, assets[1]] }));
+  }
+  assert.throws(() => validateReleaseIdentity(before, { ...current, assets: [assets[0]] }));
+  assert.throws(() => validateReleaseIdentity(before, { ...current, isPrerelease: false }));
+});
 
 async function fixture(t, schemaVersion = 2) {
   const assetsDirectory = await mkdtemp(path.join(tmpdir(), 'blcm-acceptance-'));

@@ -2,7 +2,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const { createInterface } = require('node:readline');
 const { performance } = require('node:perf_hooks');
 const { repository, createOutput, removeFixture } = require('./desktop-e2e-support.cjs');
@@ -40,34 +40,59 @@ const { repository, createOutput, removeFixture } = require('./desktop-e2e-suppo
       if (value.error) call.reject(new Error(JSON.stringify(value.error))); else call.resolve(value.result);
     } catch (error) { fail(error); }
   });
-  const request = (method, params) => new Promise((resolve, reject) => {
-    const id = `measure-${++sequence}`;
+  const request = (method, params, id = `measure-${++sequence}`) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out`)); }, 120000);
     pending.set(id, { resolve, reject, timer });
     child.stdin.write(JSON.stringify({ id, method, params }) + '\n', error => { if (error) fail(error); });
   });
   const samples = [];
-  const scan = async (name, incremental = false) => {
+  const diagnosticsPath = path.join(output, 'diagnostics.zip');
+  const scan = async (name, incremental = false, expectedReads = count * 2, expectedMode = incremental) => {
+    const id = `measure-${++sequence}`;
     const start = performance.now();
-    const result = await request('scan', { rootPath: root, includeIncomplete: false, persistSettings: false, incremental, pageSize: 100 });
-    samples.push({ name, milliseconds: performance.now() - start, videos: result.totalItems, parts: result.includedEntries });
-    return result;
+    const result = await request('scan', { rootPath: root, includeIncomplete: false, persistSettings: false, incremental, pageSize: 100 }, id);
+    const milliseconds = performance.now() - start;
+    // Read the timing before pagination evicts it from the bounded event history.
+    await request('diagnostics.export', { rootPath: root, outputPath: diagnosticsPath });
+    const content = process.platform === 'win32'
+      ? execFileSync('tar.exe', ['-xOf', diagnosticsPath, 'recent-events.json'], { encoding: 'utf8', windowsHide: true })
+      : execFileSync('unzip', ['-p', diagnosticsPath, 'recent-events.json'], { encoding: 'utf8' });
+    const event = JSON.parse(content).find(event => event.category === 'ScanTiming' && event.message.startsWith(`request=${id};`));
+    assert(event, `Missing ScanTiming for ${id}`);
+    const fields = Object.fromEntries(event.message.split('; ').map(field => field.split('=')));
+    assert.equal(fields.incremental, expectedMode ? 'True' : 'False', name);
+    assert.equal(Number(fields.readEntries), expectedReads, name);
+    samples.push({ name, requestId: id, milliseconds, videos: result.totalItems, parts: result.includedEntries,
+      incremental: expectedMode, readEntries: Number(fields.readEntries) });
+    const items = [...result.items];
+    while (items.length < result.totalItems) {
+      const page = await request('search', { keyword: '', indexToken: result.indexToken, pageSize: 100, offset: items.length });
+      assert(page.items.length > 0 && page.indexToken === result.indexToken);
+      items.push(...page.items);
+    }
+    return { ...result, items };
   };
   try {
     let current = await scan('initial-full');
     for (let iteration = 0; iteration < 3; iteration++) {
       const moved = await request('trash.move', { rootPath: root, indexToken: current.indexToken, targets: [{ avid: '1', pageIndexes: [1] }] });
       assert.equal(moved.moved.length, 1);
-      const local = await scan(`move-${iteration}-incremental`, true);
-      current = await scan(`move-${iteration}-full`);
+      const local = await scan(`move-${iteration}-incremental`, true, 1);
+      current = await scan(`move-${iteration}-full`, false, count * 2 - 1);
       assert.deepEqual(local.items, current.items); assert.equal(local.includedEntries, current.includedEntries);
       const restored = await request('trash.restore', { rootPath: root, entryIds: moved.entryIds });
       assert.equal(restored.restored.length, 1);
-      const localRestore = await scan(`restore-${iteration}-incremental`, true);
+      const localRestore = await scan(`restore-${iteration}-incremental`, true, 2);
       current = await scan(`restore-${iteration}-full`);
-      assert.deepEqual(localRestore.items, current.items); assert.equal(current.includedEntries, count * 2);
+      assert.deepEqual(localRestore.items, current.items); assert.equal(localRestore.includedEntries, current.includedEntries);
+      assert.equal(current.includedEntries, count * 2);
     }
-    await request('diagnostics.export', { rootPath: root, outputPath: path.join(output, 'diagnostics.zip') });
+    await fs.mkdir(path.join(root, String(count), 'missing-metadata'));
+    current = await scan('incomplete-baseline');
+    const moved = await request('trash.move', { rootPath: root, indexToken: current.indexToken, targets: [{ avid: '1', pageIndexes: [1] }] });
+    assert.equal(moved.moved.length, 1);
+    const fallback = await scan('move-fallback', true, count * 2 - 1, false);
+    assert.equal(fallback.includedEntries, count * 2 - 1);
     await fs.writeFile(path.join(output, 'results.json'), JSON.stringify({ scope: 'Synthetic metadata, sequential warm-process observations; no cross-machine SLA.', count, samples }, null, 2));
     console.log(JSON.stringify({ output, samples }, null, 2));
   } finally {

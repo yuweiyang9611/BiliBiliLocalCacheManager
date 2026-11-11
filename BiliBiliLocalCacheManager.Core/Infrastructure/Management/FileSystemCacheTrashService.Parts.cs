@@ -66,6 +66,7 @@ public sealed partial class FileSystemCacheTrashService
             using var trashRootLease = LeasePartDirectory(trashRoot);
             EnsureReservedPurgeMarkerAbsent(path);
             var relativePath = $"{target.Avid.ToString(CultureInfo.InvariantCulture)}/{Path.GetFileName(path)}";
+            ValidatePartRelativePath(target.Avid, relativePath);
             var metadataPath = Path.Combine(path, MetadataFileName);
             PartTrashMetadata metadata;
             if (TryGetExistingPathAttributes(metadataPath, out _))
@@ -136,9 +137,11 @@ public sealed partial class FileSystemCacheTrashService
         var root = document.RootElement;
         if (!root.TryGetProperty("avid", out var avidValue) || !avidValue.TryGetInt64(out var actualAvid) || actualAvid != avid ||
             !root.TryGetProperty("page_data", out var page) ||
-            !page.TryGetProperty("page", out var number) || !number.TryGetInt32(out var actualPage) || actualPage != pageIndex ||
-            (cid is { } expectedCid && (!page.TryGetProperty("cid", out var cidValue) || !cidValue.TryGetInt64(out var actualCid) || actualCid != expectedCid)))
+            !page.TryGetProperty("page", out var number) || !number.TryGetInt32(out var actualPage) || actualPage != pageIndex)
             throw new InvalidDataException("Part metadata no longer matches the indexed selection.");
+        if (cid is { } expectedCid && (!page.TryGetProperty("cid", out var cidValue) ||
+            cidValue.ValueKind != JsonValueKind.Number || !cidValue.TryGetInt64(out var actualCid) || actualCid != expectedCid))
+            throw new InvalidDataException("entry.json 的 page_data/cid 缺失、无效或已变化，请检查文件并重新扫描。");
         return Convert.ToHexString(SHA256.HashData(bytes));
     }
 
@@ -162,7 +165,7 @@ public sealed partial class FileSystemCacheTrashService
             metadata.DeletedAtUtc.UtcDateTime.ToString(TrashEntryTimestampFormat, CultureInfo.InvariantCulture) != identity.TimestampToken ||
             PartRestoreIdentityHash(metadata) != identity.PartIdentityHash)
             throw new InvalidDataException("Part metadata does not match its trash identity.");
-        ValidatePartRelativePath(metadata);
+        ValidatePartRelativePath(metadata.Avid, metadata.OriginalRelativePath);
     }
 
     private static string PartRestoreIdentityHash(PartTrashMetadata metadata)
@@ -171,10 +174,10 @@ public sealed partial class FileSystemCacheTrashService
             metadata.Avid, metadata.PageIndex, metadata.OriginalRelativePath
         })));
 
-    private static void ValidatePartRelativePath(PartTrashMetadata metadata)
+    private static void ValidatePartRelativePath(long avid, string relativePath)
     {
-        var pieces = metadata.OriginalRelativePath?.Split('/');
-        if (pieces is not { Length: 2 } || pieces[0] != metadata.Avid.ToString(CultureInfo.InvariantCulture) ||
+        var pieces = relativePath?.Split('/');
+        if (pieces is not { Length: 2 } || pieces[0] != avid.ToString(CultureInfo.InvariantCulture) ||
             string.IsNullOrWhiteSpace(pieces[1]) || pieces[1] is "." or ".." || pieces[1].IndexOfAny(['\\', ':', '\0']) >= 0 ||
             pieces[1].IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || pieces[1].EndsWith('.') || pieces[1].EndsWith(' '))
             throw new InvalidDataException("Part metadata contains an unsafe original path.");
@@ -182,7 +185,7 @@ public sealed partial class FileSystemCacheTrashService
 
     private static string GetPartRestorePath(string root, PartTrashMetadata metadata)
     {
-        ValidatePartRelativePath(metadata);
+        ValidatePartRelativePath(metadata.Avid, metadata.OriginalRelativePath);
         var parent = Path.Combine(root, metadata.Avid.ToString(CultureInfo.InvariantCulture));
         var path = Path.Combine(parent, metadata.OriginalRelativePath.Split('/')[1]);
         EnsureDirectChild(root, parent);

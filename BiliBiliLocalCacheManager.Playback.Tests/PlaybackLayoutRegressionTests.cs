@@ -67,6 +67,55 @@ public sealed class PlaybackLayoutRegressionTests
         Assert.EndsWith(".mp4", Assert.Single(plan.MediaFiles), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData(".blv")]
+    [InlineData(".mp4")]
+    public void LegacyLayout_UsesOrderedPartsFromOneQualityDirectory(string extension)
+    {
+        using var fixture = new CacheDirectoryFixture("1");
+        var prefix = extension == ".blv" ? "lua.flv.bili2api." : "lua.mp4.bapi.";
+        fixture.WriteFile(Path.Combine(prefix + "64", "0" + extension), 10);
+        fixture.WriteFile(Path.Combine(prefix + "80", "1" + extension), 26);
+        fixture.WriteFile(Path.Combine(prefix + "80", "0" + extension), 28);
+        var plan = fixture.BuildPlan();
+        Assert.Equal(CachePlaybackMaterialKind.OrderedPair, plan.MaterialKind);
+        Assert.Equal(new[] { "0" + extension, "1" + extension }, plan.MediaFiles.Select(Path.GetFileName));
+        Assert.All(plan.MediaFiles, path => Assert.Equal(prefix + "80", Path.GetFileName(Path.GetDirectoryName(path))));
+    }
+
+    [Theory]
+    [InlineData("1", "MidDash")]
+    [InlineData("c_1", "NewDash")]
+    public void DashLayout_RemainsPlayableWithEmptyLegacyMedia(string segment, string structure)
+    {
+        using var fixture = new CacheDirectoryFixture(segment);
+        fixture.WriteFile(Path.Combine("lua.flv.bili2api.80", "0.blv"), 0);
+        fixture.WriteFile(Path.Combine("80", "video.m4s"), 16);
+        fixture.WriteFile(Path.Combine("80", "audio.m4s"), 16);
+        var plan = fixture.BuildPlan();
+        Assert.Equal(structure, plan.StructureKind);
+        Assert.Equal(CachePlaybackMaterialKind.DashPair, plan.MaterialKind);
+    }
+
+    [Fact]
+    public void LegacyLayout_KeepsCaseDistinctDirectoryEntriesSeparate()
+    {
+        using var fixture = new CacheDirectoryFixture("1");
+        const string first = "lua.mp4.bapi.80", second = "lua.MP4.bapi.80";
+        fixture.WriteFile(Path.Combine(first, "0.mp4"), 32);
+        fixture.WriteFile(Path.Combine(second, "1.mp4"), 16);
+        var segment = fixture.ReadSegment();
+        var firstDirectory = Path.Combine(segment.SegmentDirectory, first);
+        var secondDirectory = Path.Combine(segment.SegmentDirectory, second);
+        var firstFile = Path.Combine(firstDirectory, "0.mp4");
+        var secondFile = Path.Combine(secondDirectory, "1.mp4");
+        // Keep the enumerated spellings in the probe even on a case-insensitive test volume.
+        var probe = new CachePlaybackProbe(segment, [], [firstDirectory, secondDirectory], [firstFile, secondFile]);
+        Assert.Equal(firstFile, Assert.Single(PlaybackPathHelpers.GetFilesUnderDirectory(probe, first, ".mp4")));
+        Assert.Equal(secondFile, Assert.Single(PlaybackPathHelpers.GetFilesUnderDirectory(probe, second, ".mp4")));
+        Assert.Equal(firstFile, Assert.Single(LegacyLayoutPlanBuilder.Build(probe, isHybrid: false).MediaFiles));
+    }
+
     private sealed class CacheDirectoryFixture : IDisposable
     {
         private readonly string _root = Path.Combine(
@@ -88,7 +137,9 @@ public sealed class PlaybackLayoutRegressionTests
             File.WriteAllBytes(path, new byte[byteCount]);
         }
 
-        public CachePlaybackPlan BuildPlan()
+        public CachePlaybackPlan BuildPlan() => CreateService().CreatePlan(ReadSegment());
+
+        public BiliSegment ReadSegment()
         {
             var report = new FileSystemCacheIndexBuilder().BuildIndexWithReport(
                 _root,
@@ -98,8 +149,7 @@ public sealed class PlaybackLayoutRegressionTests
                     ThrowOnInvalidEntry = true
                 });
             var cache = Assert.Single(report.Index.VideoCaches);
-            var segment = Assert.Single(cache.Segments);
-            return CreateService().CreatePlan(segment);
+            return Assert.Single(cache.Segments);
         }
 
         public void Dispose()

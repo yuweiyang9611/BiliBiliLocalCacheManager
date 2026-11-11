@@ -268,6 +268,7 @@ internal sealed partial class DesktopHostApplication
         var requestedIds = ParseRequiredStringArray(parameters, "entryIds", maximumCount: 10_000)
             .Distinct(PathComparer)
             .ToArray();
+        if (requestedIds.Sum(TrashIdentityByteBudget) > MaximumTrashIdentityBytes) throw OversizedPurgeError();
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {

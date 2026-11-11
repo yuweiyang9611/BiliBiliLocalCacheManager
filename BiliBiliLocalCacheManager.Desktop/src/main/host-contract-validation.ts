@@ -79,6 +79,7 @@ export function validateScanResult(value: unknown): ScanResult {
     ...(source.skippedIncompleteEntries === undefined ? {} : { skippedIncompleteEntries: integer(source.skippedIncompleteEntries, 'scan.skippedIncompleteEntries') }),
     ...(source.invalidEntries === undefined ? {} : { invalidEntries: integer(source.invalidEntries, 'scan.invalidEntries') }),
     ...(source.inaccessibleDirectories === undefined ? {} : { inaccessibleDirectories: integer(source.inaccessibleDirectories, 'scan.inaccessibleDirectories') }),
+    ...(source.unavailablePartIdentities === undefined ? {} : { unavailablePartIdentities: integer(source.unavailablePartIdentities, 'scan.unavailablePartIdentities') }),
     ...(source.hasWarnings === undefined ? {} : { hasWarnings: boolean(source.hasWarnings, 'scan.hasWarnings') }),
     ...(source.completedAtUtc === undefined ? {} : { completedAtUtc: string(source.completedAtUtc, 'scan.completedAtUtc') }),
   };
@@ -372,6 +373,7 @@ export function validateTrashPage(value: unknown): import('../shared/contracts')
   const snapshotToken = string(source.snapshotToken, 'trash.page.snapshotToken', 128);
   if (!snapshotToken) invalid('trash.page.snapshotToken is empty');
   return { snapshotToken, offset, pageSize, totalItems, hasMore, items,
+    ...(source.canPurgeSnapshot === undefined ? {} : { canPurgeSnapshot: boolean(source.canPurgeSnapshot, 'trash.page.canPurgeSnapshot') }),
     totalSizeBytes: integer(source.totalSizeBytes, 'trash.page.totalSizeBytes', 0, Number.MAX_SAFE_INTEGER) };
 }
 

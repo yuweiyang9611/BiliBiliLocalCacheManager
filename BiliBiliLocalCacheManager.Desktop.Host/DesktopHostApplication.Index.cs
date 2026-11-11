@@ -62,16 +62,21 @@ internal sealed partial class DesktopHostApplication
         public CacheIndex Index { get; }
         public string IndexToken { get; }
         public string Root { get; }
-        public IReadOnlyList<CacheScanIssue> Issues { get; }
+        private readonly List<CacheScanIssue> _issues;
+        private readonly int _maximumIssues;
+        public IReadOnlyList<CacheScanIssue> Issues => _issues;
+        public int PartIdentityIssueCount { get; private set; }
         public IReadOnlyDictionary<long, CacheSummaryDto> Summaries { get; }
         private readonly Dictionary<(long Avid, int PageIndex), (CacheTrashPartTarget? Target, string? Error)> _trashParts = new();
 
-        public CurrentIndexSnapshot(CacheIndex index, string token, string root, IReadOnlyList<CacheScanIssue> issues)
+        public CurrentIndexSnapshot(CacheIndex index, string token, string root, IReadOnlyList<CacheScanIssue> issues,
+            int maximumIssues = 100)
         {
             Index = index;
             IndexToken = token;
             Root = root;
-            Issues = issues.Take(100).ToArray();
+            _maximumIssues = Math.Min(100, maximumIssues);
+            _issues = issues.Take(_maximumIssues).ToList();
             Summaries = index.VideoCaches.ToDictionary(cache => cache.Avid, MapCacheSummary);
         }
 
@@ -104,10 +109,16 @@ internal sealed partial class DesktopHostApplication
                     else
                     {
                         try { _trashParts[key] = (trashService.CapturePartTarget(Root, segments[0]), null); }
-                        catch (Exception exception) when (IsTrashItemFailure(exception) || exception is NotSupportedException or JsonException)
+                        catch (Exception exception) when (IsTrashItemFailure(exception) || exception is InvalidDataException or NotSupportedException or JsonException)
                         {
                             _trashParts[key] = (null, $"无法安全绑定分 P 目录：{exception.Message}");
                         }
+                    }
+                    if (_trashParts[key].Error is { } error)
+                    {
+                        PartIdentityIssueCount++;
+                        if (_issues.Count < _maximumIssues)
+                            _issues.Add(new(CacheScanIssueKind.PartIdentityUnavailable, segments[0].EntryJsonPath, error));
                     }
                     progress?.Invoke(++processed);
                 }

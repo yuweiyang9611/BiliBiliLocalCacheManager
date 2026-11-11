@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "$RELEASE_TAG" --json isDraft,isPrerelease,tagName,assets > release-state-current.json
-          node -e 'const a=require("./release-state.json"),b=require("./release-state-current.json"); if(JSON.stringify(a)!==JSON.stringify(b)) throw Error("Release changed during validation")'
+          node scripts/validate-desktop-acceptance.mjs --check-release-state release-state.json release-state-current.json
           cp "$ACCEPTANCE_RECORD" desktop-acceptance.json
           gh release upload "$RELEASE_TAG" desktop-acceptance.json --clobber
           gh release edit "$RELEASE_TAG" --prerelease=false --latest

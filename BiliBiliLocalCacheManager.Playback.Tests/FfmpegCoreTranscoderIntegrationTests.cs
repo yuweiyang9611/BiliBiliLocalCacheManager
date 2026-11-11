@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 using BiliBiliLocalCacheManager.Playback.Models;
 
@@ -256,6 +257,65 @@ public sealed class FfmpegCoreTranscoderIntegrationTests(
         await new FfmpegCoreTranscoder().ConcatToMp4Async([specialPath, workspace.VideoPath], outputPath,
             TimeSpan.Zero, null, cancellation.Token);
         Assert.Equal(input.Concat(input).ToArray(), fixture.GetPacketHashes(outputPath, "v:0").ToArray());
+    }
+
+    [FfmpegIntegrationFact]
+    [Trait("Category", "FFmpegIntegration")]
+    public async Task DirectCopy_RejectsTruncatedPacketsInOpenEndedFastStartMp4()
+    {
+        using var workspace = fixture.CreateWorkspace();
+        var source = Path.Combine(workspace.RootDirectory, "fast-start.mp4");
+        fixture.RunFfmpeg("-i", workspace.VideoPath, "-i", workspace.AacAudioPath, "-c", "copy",
+            "-movflags", "+faststart", source);
+        var bytes = WriteOpenEndedMediaBox(source);
+        var plan = CachePlaybackPlan.Playable(101, "Fixture", 1, "P1", "c_1", workspace.RootDirectory,
+            "LegacyMp4", CachePlaybackMaterialKind.SingleFile, [source]);
+        var service = new BiliBiliLocalCacheManager.Playback.Services.CacheExportService(new PlaybackArtifactStore(workspace.ArtifactRoot));
+        var good = await service.MaterializeAsync(plan, [], null, default);
+        Assert.Equal(bytes, File.ReadAllBytes(good.OutputPath!));
+
+        foreach (var length in new[] { bytes.Length - 1, GetPacketOffsets(source)[^3] })
+        {
+            File.WriteAllBytes(source, bytes[..length]);
+            await Assert.ThrowsAsync<InvalidDataException>(() => service.MaterializeAsync(plan, [], null, default));
+        }
+    }
+
+    [FfmpegIntegrationFact]
+    [Trait("Category", "FFmpegIntegration")]
+    public async Task DirectCopy_AcceptsGroupedPcmSamplesAndRejectsMissingTailPackets()
+    {
+        using var workspace = fixture.CreateWorkspace();
+        var source = Path.Combine(workspace.RootDirectory, "pcm.mp4");
+        fixture.RunFfmpeg("-f", "lavfi", "-i", "sine=duration=1:sample_rate=48000", "-c:a", "pcm_s16le",
+            "-movflags", "+faststart", source);
+        var bytes = WriteOpenEndedMediaBox(source);
+        var plan = CachePlaybackPlan.Playable(101, "PCM", 1, "P1", "c_1", workspace.RootDirectory,
+            "LegacyMp4", CachePlaybackMaterialKind.SingleFile, [source]);
+        var service = new BiliBiliLocalCacheManager.Playback.Services.CacheExportService(new PlaybackArtifactStore(workspace.ArtifactRoot));
+        var good = await service.MaterializeAsync(plan, [], null, default);
+        Assert.Equal(bytes, File.ReadAllBytes(good.OutputPath!));
+        var offsets = GetPacketOffsets(source);
+        Assert.InRange(offsets.Length, 2, 47999);
+        File.WriteAllBytes(source, bytes[..offsets[^1]]);
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.MaterializeAsync(plan, [], null, default));
+    }
+
+    private int[] GetPacketOffsets(string source) =>
+        fixture.RunFfprobe("-show_packets", "-show_entries", "packet=pos:packet_side_data=", "-of", "csv=p=0", source)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => int.Parse(line.Split(',')[0], System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+
+    private static byte[] WriteOpenEndedMediaBox(string source)
+    {
+        var bytes = File.ReadAllBytes(source);
+        var box = 0;
+        while (!bytes.AsSpan(box + 4, 4).SequenceEqual("mdat"u8))
+            box += checked((int)BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(box, 4)));
+        Assert.Equal(bytes.Length, box + (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(box, 4)));
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(box, 4), 0);
+        File.WriteAllBytes(source, bytes);
+        return bytes;
     }
 
     private static CachePlaybackPlan CreateDashPlan(

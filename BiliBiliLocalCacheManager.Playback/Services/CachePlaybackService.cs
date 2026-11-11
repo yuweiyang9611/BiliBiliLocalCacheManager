@@ -100,6 +100,15 @@ public sealed partial class CachePlaybackService : ICachePlaybackService
         return BuildPagePlan(pageGroup.Key, pageGroup.ToList(), segmentKey);
     }
 
+    public CachePlaybackPagePlan CreatePagePlan(BiliVideoCache cache, int pageIndex)
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        var segments = cache.Segments.Where(segment => segment.PageIndex == pageIndex).ToList();
+        if (segments.Count == 0)
+            throw new ArgumentException($"没有找到页码：{pageIndex}", nameof(pageIndex));
+        return BuildPagePlan(pageIndex, segments, null);
+    }
+
     public IReadOnlyList<CachePlaybackPagePlan> CreatePagePlans(BiliVideoCache cache)
     {
         ArgumentNullException.ThrowIfNull(cache);
@@ -257,7 +266,7 @@ public sealed partial class CachePlaybackService : ICachePlaybackService
             segments[0].Avid,
             segments[0].Title,
             pageIndex,
-            segments[0].PartName,
+            selectedPlan.PartName,
             candidatePlans,
             selectedPlan,
             message);

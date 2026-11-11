@@ -4,6 +4,22 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { TrashPage } from './TrashPage';
 
 afterEach(cleanup);
+it('allows browsing and restoring when a snapshot is too large to purge', () => {
+  const item = { id: 'item', avid: '1', title: 'Video', sizeBytes: 1, deletedAt: null, isRestorable: true };
+  const snapshot = { snapshotToken: 'large', offset: 0, pageSize: 1, totalItems: 2, totalSizeBytes: 2,
+    hasMore: true, canPurgeSnapshot: false, items: [item] };
+  const restore = vi.fn(), pageTo = vi.fn(), purge = vi.fn();
+  render(<TrashPage entries={[item]} snapshot={snapshot} selected={new Set(['item'])} setSelected={vi.fn()} pageTo={pageTo}
+    refresh={vi.fn()} restore={restore} purge={purge} busy={false} inspectionDisabled={false} canPurge />);
+  expect(screen.getByText(/条目标识总大小超过永久清空上限/)).toBeVisible();
+  expect(screen.getByRole('button', { name: '清空回收站' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: '恢复所选' }));
+  fireEvent.click(screen.getByRole('button', { name: /下一页/ }));
+  expect(restore).toHaveBeenCalledOnce();
+  expect(pageTo).toHaveBeenCalledWith(1);
+  expect(purge).not.toHaveBeenCalled();
+});
+
 it('explains unavailable items and excludes them from restore selection while allowing full trash cleanup', () => {
   const entries = [
     { id: 'ready', avid: '100', title: 'Ready video', sizeBytes: 1, deletedAt: null, isRestorable: true },

@@ -18,41 +18,28 @@ internal static class PortableFileNaming
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
     };
 
-    public static string Build(
-        string? title,
-        long avid,
-        int pageIndex,
-        string? partName,
-        bool includePage)
+    public static string BuildVideoDirectoryName(string title, long avid) =>
+        BuildComponent(title, avid, string.Empty, $"_AV{avid.ToString(CultureInfo.InvariantCulture)}");
+
+    public static string BuildPartFileName(string partName, long avid, int pageIndex) =>
+        BuildComponent(partName, avid, $"P{pageIndex.ToString("D3", CultureInfo.InvariantCulture)}_", ".mp4");
+
+    private static string BuildComponent(string title, long avid, string prefix, string suffix)
     {
         var safeTitle = Sanitize(title);
-        if (safeTitle.Length == 0)
+        var retained = new StringBuilder();
+        var remainingBytes = 255 - Encoding.UTF8.GetByteCount(prefix + suffix);
+        foreach (var rune in safeTitle.EnumerateRunes())
         {
-            safeTitle = "av" + avid.ToString(CultureInfo.InvariantCulture);
+            if (rune.Utf8SequenceLength > remainingBytes ||
+                retained.Length + rune.Utf16SequenceLength > MaxBaseNameLength) break;
+            retained.Append(rune.ToString());
+            remainingBytes -= rune.Utf8SequenceLength;
         }
-
-        var result = safeTitle;
-        if (includePage)
-        {
-            var pageToken = "P" + pageIndex.ToString(CultureInfo.InvariantCulture);
-            result += " - " + pageToken;
-            var safePart = Sanitize(partName);
-            if (safePart.Length > 0 &&
-                !string.Equals(safePart, safeTitle, StringComparison.Ordinal) &&
-                !string.Equals(safePart, pageToken, StringComparison.OrdinalIgnoreCase))
-            {
-                result += " " + safePart;
-            }
-        }
-
-        result = result.Length > MaxBaseNameLength ? result[..MaxBaseNameLength] : result;
-        result = result.TrimEnd('.', ' ');
-        if (result.Length == 0)
-        {
-            result = "av" + avid.ToString(CultureInfo.InvariantCulture);
-        }
-
-        return ReservedDeviceNames.Contains(result) ? "_" + result : result;
+        var stem = retained.ToString().TrimEnd('.', ' ');
+        if (stem.Length == 0) stem = "av" + avid.ToString(CultureInfo.InvariantCulture);
+        if (ReservedDeviceNames.Contains(stem)) stem = "_" + stem;
+        return prefix + stem + suffix;
     }
 
     public static string EnsureUnique(string directory, string baseName, string extension)

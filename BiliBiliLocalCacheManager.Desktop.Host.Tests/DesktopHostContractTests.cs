@@ -5,6 +5,7 @@ using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
 using BiliBiliLocalCacheManager.Desktop.Host.Services;
 using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 using BiliBiliLocalCacheManager.Playback.Models;
+using BiliBiliLocalCacheManager.Playback.Services;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 
@@ -537,7 +538,7 @@ public sealed partial class DesktopHostContractTests
         workspace.CreateCache(717, "Successful batch", segmentCount: 2);
         var exportParent = Path.Combine(workspace.Root, "successful-export");
         Directory.CreateDirectory(exportParent);
-        var application = workspace.CreateApplication();
+        var application = workspace.CreateCopyExportApplication();
 
         var result = await DispatchAsync(
             application,
@@ -569,7 +570,7 @@ public sealed partial class DesktopHostContractTests
         workspace.CreateCache(808, "Failed batch", segmentCount: 2);
         var exportParent = Path.Combine(workspace.Root, "failed-export");
         Directory.CreateDirectory(exportParent);
-        var application = workspace.CreateApplication();
+        var application = workspace.CreateCopyExportApplication();
         await DispatchAsync(
             application,
             "scan",
@@ -919,6 +920,28 @@ public sealed partial class DesktopHostContractTests
         Assert.DoesNotContain("diagnostic-secret", settingsMessage, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task DiagnosticZipAfterRootSwitchRedactsEarlierFailedScan()
+    {
+        using var workspace = new HostTestWorkspace();
+        var oldRoot = Directory.CreateDirectory(Path.Combine(workspace.Root, "private-previous-cache")).FullName;
+        var application = workspace.CreateApplication();
+        var oldRequest = JsonSerializer.Serialize(new { rootPath = oldRoot, persistSettings = false });
+        await DispatchAsync(application, "scan", oldRequest);
+        Directory.Delete(oldRoot);
+        await Assert.ThrowsAsync<RpcException>(() => DispatchAsync(application, "scan", oldRequest));
+        await DispatchAsync(application, "scan", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        var zip = Path.Combine(workspace.Root, "history.zip");
+        await DispatchAsync(application, "diagnostics.export", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, outputPath = zip }));
+        using var archive = ZipFile.OpenRead(zip);
+        using var stream = archive.GetEntry("recent-events.json")!.Open();
+        using var document = await JsonDocument.ParseAsync(stream);
+        var message = Assert.Single(document.RootElement.EnumerateArray(), item =>
+            item.GetProperty("message").GetString()!.Contains("Cache root directory not found")).GetProperty("message").GetString();
+        Assert.DoesNotContain("private-previous-cache", message);
+        Assert.Contains("[CACHE_ROOT]", message);
+    }
+
     private static async Task<JsonElement> DispatchAsync(
         DesktopHostApplication application,
         string method,
@@ -1005,7 +1028,7 @@ public sealed partial class DesktopHostContractTests
     {
         using var workspace = new HostTestWorkspace();
         workspace.CreateCache(101, "First", 2);
-        var application = workspace.CreateApplication();
+        var application = workspace.CreateCopyExportApplication();
         var progress = new List<HostProgressEvent>();
         application.ProgressReported += (_, value) => progress.Add(value);
         var result = await DispatchAsync(application, "export", JsonSerializer.Serialize(new {
@@ -1057,7 +1080,7 @@ public sealed partial class DesktopHostContractTests
         var destination = Path.Combine(workspace.Root, "existing.mp4");
         File.WriteAllText(destination, "previous file");
         using var cancellation = new CancellationTokenSource();
-        var application = workspace.CreateApplication();
+        var application = workspace.CreateCopyExportApplication();
         application.ProgressReported += (_, progress) => {
             if (progress.Stage == "copying") cancellation.Cancel();
         };
@@ -1130,6 +1153,9 @@ public sealed partial class DesktopHostContractTests
         public string SettingsPath { get; }
 
         public DesktopHostApplication CreateApplication() => new();
+
+        public DesktopHostApplication CreateCopyExportApplication() => new(exportService:
+            new CacheExportService(new PlaybackArtifactStore(TranscodeRoot), new FixtureCopyProcessor()));
 
         public void CreateCache(long avid, string title, int segmentCount = 1, long? timestampOverride = null)
         {

@@ -398,6 +398,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
     const request = { rootPath: assertPath(rootPath, 'rootPath'), snapshotToken: assertNonEmptyString(token, 'snapshotToken', 128) };
     const snapshot = validateTrashPage(await track(event, host<unknown>('trash.page', { ...request, offset: 0, pageSize: 1 })));
     if (snapshot.snapshotToken !== request.snapshotToken || snapshot.offset !== 0 || snapshot.pageSize !== 1) throw new TypeError('Trash snapshot mismatch.');
+    if (snapshot.canPurgeSnapshot === false) throw new Error('回收站条目过多，无法一次永久清空。请先分页恢复所需内容。');
     const parent = BrowserWindow.fromWebContents(event.sender) ?? getWindow() ?? undefined;
     const options = { type: 'warning' as const, title: '永久清空应用回收站', message: '确定要永久删除整个回收站快照吗？',
       detail: `${request.rootPath}：${snapshot.totalItems} 项，${snapshot.totalSizeBytes} 字节。此操作无法撤销，Host 将重新核对完整集合。`,
@@ -431,7 +432,7 @@ export function registerIpc(bridge: DesktopHostBridge, getWindow: () => BrowserW
           confirmation.id !== session.id || session.rootPath !== validatedRoot || session.indexToken !== validatedToken ||
           session.includeIncomplete !== incomplete || JSON.stringify(session.targets) !== JSON.stringify(validatedTargets))
         throw new TypeError('导出确认已失效或与原始目标不一致。');
-      const approvals = validateStringArray(confirmation.approvals, 'approvals', 10_000);
+      const approvals = validateStringArray(confirmation.approvals, 'approvals', 10_000, 64);
       if (approvals.some(token => !/^[0-9a-f]{64}$/.test(token) ||
           (!session!.requested.has(token) && !session!.approved.has(token))))
         throw new TypeError('导出确认包含未请求的转码许可。');
@@ -662,15 +663,15 @@ function validateTargets(value: unknown): SelectionTarget[] {
   });
 }
 
-function validateStringArray(value: unknown, name: string, maximumCount = 1_000): string[] {
+function validateStringArray(value: unknown, name: string, maximumCount: number, maximumLength: number): string[] {
   if (!Array.isArray(value) || value.length > maximumCount) {
     throw new TypeError(`${name} 必须是最多包含 ${maximumCount} 项的数组。`);
   }
-  return value.map((item) => assertString(item, name, 1_024));
+  return value.map((item) => assertString(item, name, maximumLength));
 }
 
 function validateNonEmptyStringArray(value: unknown, name: string, maximumCount = 1_000): string[] {
-  const result = validateStringArray(value, name, maximumCount);
+  const result = validateStringArray(value, name, maximumCount, 4_096);
   if (result.length === 0) throw new TypeError(name + ' 必须至少包含 1 项。');
   return result;
 }
