@@ -17,6 +17,7 @@ internal sealed partial class DesktopHostApplication
             // A clean, fully represented baseline lets us subtract per-video counts exactly.
             // Missing metadata, skipped entries and bounded issue lists require a full scan.
             if (refresh is null && _indexSnapshot is { } snapshot && _lastScanReport is { } report &&
+                snapshot.PartIdentityIssueCount == 0 &&
                 PathsEqual(_currentRoot, root) && report.IssuesCollected && !report.HasWarnings &&
                 report.ScannedAvidDirectories == report.Index.VideoCaches.Count &&
                 report.ScannedSegmentDirectories == report.IncludedEntries)

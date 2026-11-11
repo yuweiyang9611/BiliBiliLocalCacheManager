@@ -37,6 +37,7 @@ internal sealed partial class DesktopHostApplication
             var options = new CacheIndexBuildOptions
             {
                 IncludeIncompleteEntries = includeIncomplete,
+                RequireCanonicalAvidDirectory = true,
                 MaxReportedIssues = maxReportedIssues,
                 MaximumCacheBytes = MaximumWireBytes,
                 AvidFilter = refresh?.Avids
@@ -71,7 +72,7 @@ internal sealed partial class DesktopHostApplication
             var completedAt = DateTimeOffset.UtcNow;
             var snapshotStarted = Stopwatch.GetTimestamp();
             var snapshot = CreateIndexSnapshot(report, root, cancellationToken,
-                count => ReportPartCaptureProgress(requestId, "scan", count), refresh?.Snapshot, refresh?.Avids);
+                count => ReportPartCaptureProgress(requestId, "scan", count), refresh?.Snapshot, refresh?.Avids, maxReportedIssues);
             var snapshotMilliseconds = Stopwatch.GetElapsedTime(snapshotStarted).TotalMilliseconds;
             var pageStarted = Stopwatch.GetTimestamp();
             var page = CreateCachePage(
@@ -104,9 +105,11 @@ internal sealed partial class DesktopHostApplication
                 report.SkippedIncompleteEntries,
                 report.InvalidEntries,
                 report.InaccessibleDirectories,
-                report.HasWarnings,
+                unavailablePartIdentities = snapshot.PartIdentityIssueCount,
+                hasWarnings = report.HasWarnings || snapshot.PartIdentityIssueCount > 0,
                 issues = snapshot.Issues.Select((issue, id) => new { id, kind = issue.Kind.ToString(), path = BoundWireString(issue.Path), message = BoundWireString(issue.Message) }).ToArray(),
-                issuesTruncated = report.Issues.Count > 100 || report.InvalidEntries + report.InaccessibleDirectories > report.Issues.Count,
+                issuesTruncated = report.Issues.Count > snapshot.Issues.Count ||
+                    (long)report.InvalidEntries + report.InaccessibleDirectories + snapshot.PartIdentityIssueCount > snapshot.Issues.Count,
                 page.IndexToken,
                 page.Offset,
                 page.PageSize,

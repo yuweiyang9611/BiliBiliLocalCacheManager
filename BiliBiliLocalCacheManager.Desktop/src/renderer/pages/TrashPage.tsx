@@ -7,6 +7,7 @@ import { toggleSet, formatBytes, formatDate } from '../display';
 interface TrashPageProps {
   entries: TrashEntry[];
   snapshot: TrashPageResult | null;
+  status?: 'waiting' | 'ready' | 'failed' | 'no-root';
   pageTo(offset: number): void;
   selected: Set<string>;
   setSelected(value: Set<string>): void;
@@ -19,20 +20,25 @@ interface TrashPageProps {
 }
 
 export const TrashPage = memo(function TrashPage({
-  entries, snapshot, pageTo, selected, setSelected, refresh, restore, purge, busy, inspectionDisabled, canPurge,
+  entries, snapshot, status = 'ready', pageTo, selected, setSelected, refresh, restore, purge, busy, inspectionDisabled, canPurge,
 }: TrashPageProps) {
   const available = entries.filter(entry => entry.isRestorable !== false);
   const size = snapshot?.totalSizeBytes ?? entries.reduce((sum, entry) => sum + entry.sizeBytes, 0);
   return <section className="card full-panel">
     <div className="panel-heading">
-      <div><h2>应用回收站</h2><span>{snapshot?.totalItems ?? entries.length} 项 · {formatBytes(size)}{!canPurge && ' · 当前平台暂不支持永久清理'}</span></div>
+      <div><h2>应用回收站</h2><span>{status === 'ready' && `${snapshot?.totalItems ?? entries.length} 项 · ${formatBytes(size)}`}{!canPurge && ' 当前平台暂不支持永久清理'}</span></div>
       <div className="toolbar">
         <button className="button ghost" onClick={() => void refresh()} disabled={inspectionDisabled}><Icon name="refresh" />刷新</button>
         <button className="button secondary" onClick={restore} disabled={busy || !available.some(entry => selected.has(entry.id))}><Icon name="restore" />恢复所选</button>
-        {canPurge && <button className="button danger" onClick={() => purge(true)} disabled={!entries.length || busy}>清空回收站</button>}
+        {canPurge && <button className="button danger" onClick={() => purge(true)} disabled={!entries.length || busy || snapshot?.canPurgeSnapshot === false}>清空回收站</button>}
       </div>
     </div>
-    {entries.length ? <div className="table-scroll"><table>
+    {status === 'ready' && canPurge && snapshot?.canPurgeSnapshot === false &&
+      <p>条目标识总大小超过永久清空上限。可翻页选择所需条目并分批恢复。</p>}
+    {status === 'waiting' ? <p role="status">正在等待回收站数据…</p>
+      : status === 'failed' ? <Empty icon="trash" title="回收站读取失败" body="点击刷新重新读取当前缓存目录的回收站。" />
+      : status === 'no-root' ? <Empty icon="folder" title="尚未选择缓存目录" body="请先在缓存库选择目录。" />
+      : entries.length ? <div className="table-scroll"><table>
       <thead><tr>
         <th className="check-cell"><input aria-label="选择本页可恢复条目" type="checkbox"
           disabled={!available.length} checked={available.length > 0 && available.every(entry => selected.has(entry.id))}

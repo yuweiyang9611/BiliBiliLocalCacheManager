@@ -11,15 +11,24 @@ internal static class LegacyLayoutPlanBuilder
             .Where(name => name.StartsWith("lua.", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        var blvFiles = luaDirectoryNames
-            .SelectMany(name => PlaybackPathHelpers.GetFilesUnderDirectory(probe, name, ".blv"))
-            .ToList();
-        var mp4Files = luaDirectoryNames
-            .SelectMany(name => PlaybackPathHelpers.GetFilesUnderDirectory(probe, name, ".mp4"))
-            .ToList();
+        var blvFiles = SelectVariant(".blv");
+        var mp4Files = SelectVariant(".mp4");
+
+        IReadOnlyList<string> SelectVariant(string extension) => luaDirectoryNames
+            .Select(name => (Name: name, Files: PlaybackPathHelpers.GetFilesUnderDirectory(probe, name, extension)))
+            .Where(candidate => candidate.Files.Count > 0)
+            .OrderByDescending(candidate => string.Equals(candidate.Name, segment.TypeTag, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(candidate => int.TryParse(candidate.Name.AsSpan(candidate.Name.LastIndexOf('.') + 1), out var quality)
+                && quality == segment.VideoQuality)
+            .ThenByDescending(candidate => PlaybackPathHelpers.GetTotalBytes(candidate.Files))
+            .ThenBy(candidate => candidate.Name, StringComparer.Ordinal)
+            .Select(candidate => candidate.Files)
+            .FirstOrDefault() ?? [];
 
         if (blvFiles.Count == 0 && mp4Files.Count == 0)
         {
+            var dash = DashLayoutPlanBuilder.Build(probe, isHybrid ? "NewDash" : "MidDash");
+            if (dash.IsPlayable) return dash;
             return CachePlaybackPlan.Unavailable(
                 segment.Avid,
                 segment.Title,

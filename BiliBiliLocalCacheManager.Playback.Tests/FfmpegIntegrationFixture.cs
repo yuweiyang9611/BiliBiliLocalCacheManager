@@ -144,7 +144,7 @@ public sealed class FfmpegIntegrationFixture : IDisposable
         TryDeleteDirectory(RootDirectory);
     }
 
-    private void RunFfmpeg(params string[] arguments)
+    internal void RunFfmpeg(params string[] arguments)
     {
         RunTool(
             FfmpegPath,
@@ -153,7 +153,7 @@ public sealed class FfmpegIntegrationFixture : IDisposable
             ToolTimeout);
     }
 
-    private string RunFfprobe(params string[] arguments)
+    internal string RunFfprobe(params string[] arguments)
     {
         return RunTool(
                 FfprobePath,

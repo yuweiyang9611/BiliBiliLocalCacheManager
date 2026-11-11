@@ -109,7 +109,9 @@ internal static class PlaybackPathHelpers
 
         var splitIndex = relative.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar });
         var firstPart = splitIndex >= 0 ? relative[..splitIndex] : relative;
-        return string.Equals(firstPart, childDirectoryName, StringComparison.OrdinalIgnoreCase);
+        // Both names came from enumerating this parent. Preserve their physical spelling:
+        // a case-sensitive filesystem can contain both "lua.X" and "lua.x".
+        return string.Equals(firstPart, childDirectoryName, StringComparison.Ordinal);
     }
 
     private static int ExtractNumericStem(string filePath)

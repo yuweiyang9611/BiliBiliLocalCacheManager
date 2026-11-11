@@ -175,7 +175,7 @@ internal sealed class DiagnosticExporter(
         return CredentialPattern.Replace(redacted, "$1=[REDACTED]");
     }
 
-    private static string ReplaceKnownPath(string value, string? path, string marker)
+    internal static string ReplaceKnownPath(string value, string? path, string marker)
     {
         if (string.IsNullOrWhiteSpace(path))
         {

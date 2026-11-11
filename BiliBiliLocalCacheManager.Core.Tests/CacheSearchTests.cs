@@ -120,6 +120,21 @@ public sealed class CacheSearchTests
             new CacheSearchOptions { Keyword = "alpha" }, source.Token));
     }
 
+    [Theory]
+    [InlineData("AV123", CacheSearchScope.Avid, false, 123)]
+    [InlineData("123", CacheSearchScope.Avid, true, 123)]
+    [InlineData("av123", CacheSearchScope.Avid, true, 123)]
+    [InlineData("AV123", CacheSearchScope.Avid, true, 0)]
+    [InlineData("av123", CacheSearchScope.Title, false, 456)]
+    [InlineData("av", CacheSearchScope.Avid, false, 0)]
+    public void Search_OptionalAvPrefixAppliesOnlyToAvIds(string keyword, CacheSearchScope scope, bool caseSensitive, long expected)
+    {
+        var index = new CacheIndex([CreateCache(123, "First", "P1", null, null), CreateCache(456, "av123", "P1", null, null)]);
+        var results = index.Search(new CacheSearchOptions { Keyword = keyword, Scope = scope,
+            MatchMode = CacheSearchMatchMode.Equals, CaseSensitive = caseSensitive });
+        Assert.Equal(expected == 0 ? Array.Empty<long>() : new[] { expected }, results.Select(cache => cache.Avid));
+    }
+
     [Fact]
     public void Search_CaseSensitiveAndEmptyTokenRulesArePreserved()
     {

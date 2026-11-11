@@ -68,6 +68,26 @@ afterEach(() => {
 });
 
 describe('IPC cancellable request tracking', () => {
+  it('round-trips a long paged trash identity through restore', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const owner = trustedEvent(319);
+    const root = path.resolve('cache', ...Array<string>(10).fill('x'.repeat(100)));
+    const id = path.join(root, '.BiliBiliLocalCacheManager-Trash', 'v2_100_20260101000000_' + '1'.repeat(32));
+    const request = invoke(channels.trashPage, owner, root);
+    fake.pending.get(fake.calls[0].id)!.resolve({
+      snapshotToken: 'snapshot', offset: 0, pageSize: 100, totalItems: 1, totalSizeBytes: 1, hasMore: false,
+      items: [{ id, avid: '100', title: 'video', sizeBytes: 1, deletedAt: null, isRestorable: true }],
+    });
+    const page = await request as { items: { id: string }[] };
+    const restored = invoke(channels.trashRestore, owner, root, [page.items[0].id]);
+    expect(fake.calls[1]).toMatchObject({ method: 'trash.restore', params: { entryIds: [id] } });
+    fake.pending.get(fake.calls[1].id)!.resolve({ restored: [id], failed: [] });
+    expect(await restored).toMatchObject({ restored: [id] });
+    await expect(invoke(channels.trashRestore, owner, root, ['x'.repeat(4097)])).rejects.toThrow(/4096/);
+    expect(fake.calls).toHaveLength(2);
+  });
+
   it('returns a plain error envelope instead of relying on Electron Error properties', async () => {
     const fake = createDeferredBridge();
     unregister = registerIpc(fake.bridge, () => null);
@@ -89,6 +109,18 @@ describe('IPC cancellable request tracking', () => {
     fake.pending.get(fake.calls[1].id)!.resolve(validCacheDetails());
     fake.pending.get(fake.calls[2].id)!.resolve(validCacheDetails());
     await Promise.all([other, next]);
+  });
+
+  it('refuses a browse-only trash snapshot before showing native permanent deletion confirmation', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const result = invoke(channels.trashPurgeSnapshot, trustedEvent(303), path.resolve('cache'), 'oversize', '永久删除');
+    fake.pending.get(fake.calls[0].id)!.resolve({ snapshotToken: 'oversize', offset: 0, pageSize: 1, totalItems: 1000,
+      totalSizeBytes: 1000, hasMore: true, canPurgeSnapshot: false,
+      items: [{ id: 'entry', avid: '1', title: 'Video', sizeBytes: 1, deletedAt: null }] });
+    await expect(result).rejects.toThrow(/分.*恢复/);
+    expect(electronMocks.showMessageBox).not.toHaveBeenCalled();
+    expect(fake.calls.map(call => call.method)).toEqual(['trash.page']);
   });
 
   it('validates the complete trash snapshot before native confirmation and never accepts arbitrary ids', async () => {

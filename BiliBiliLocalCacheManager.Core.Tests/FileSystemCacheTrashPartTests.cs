@@ -8,6 +8,25 @@ public sealed class FileSystemCacheTrashPartTests : IDisposable
 {
     private readonly string _root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"part-trash-{Guid.NewGuid():N}")).FullName;
 
+    [Theory]
+    [InlineData("episode:1")]
+    [InlineData("episode.")]
+    public void Move_LinuxFilenameThatCannotBeRestoredLeavesSourceIntact(string name)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var source = CreatePart(100, name, 1);
+        var metadata = File.ReadAllBytes(Path.Combine(source, "entry.json"));
+        var service = new FileSystemCacheTrashService();
+        var segment = Assert.Single(new FileSystemCacheIndexBuilder().BuildIndex(_root).ByAvid[100].Segments);
+        var target = service.CapturePartTarget(_root, segment);
+        var result = service.MovePartToTrash(_root, target);
+        Assert.False(result.Succeeded);
+        Assert.Contains("unsafe original path", result.ErrorMessage);
+        Assert.Equal(metadata, File.ReadAllBytes(Path.Combine(source, "entry.json")));
+        Assert.False(File.Exists(Path.Combine(source, ".trash-info.json")));
+        Assert.Empty(service.ListEntries(_root));
+    }
+
     [Fact]
     public void Capture_Utf8BomMetadataPreservesByteHashAndCanMovePart()
     {

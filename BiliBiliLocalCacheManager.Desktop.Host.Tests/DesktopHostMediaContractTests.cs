@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Text;
+using System.Text.Json.Nodes;
+using BiliBiliLocalCacheManager.Core.Infrastructure.Scanning;
 using BiliBiliLocalCacheManager.Playback.Contracts;
 using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 using BiliBiliLocalCacheManager.Playback.Models;
@@ -34,7 +37,7 @@ public sealed partial class DesktopHostContractTests
     {
         using var workspace = new HostTestWorkspace();
         workspace.CreateCache(101, "Title: invalid/characters");
-        var application = workspace.CreateApplication();
+        var application = workspace.CreateCopyExportApplication();
         var request = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, outputPath = workspace.Root,
             targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } } } });
         var first = await DispatchAsync(application, "export", request);
@@ -116,7 +119,7 @@ public sealed partial class DesktopHostContractTests
     {
         using var workspace = new HostTestWorkspace();
         workspace.CreateCache(101, "First");
-        var application = workspace.CreateApplication();
+        var application = workspace.CreateCopyExportApplication();
         application.ProgressReported += (_, progress) =>
         {
             if (progress.Stage == "copying")
@@ -138,7 +141,7 @@ public sealed partial class DesktopHostContractTests
         using var workspace = new HostTestWorkspace();
         workspace.CreateCache(101, "First", 2);
         var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
-        var application = workspace.CreateApplication();
+        var application = workspace.CreateCopyExportApplication();
         application.ProgressReported += (_, progress) =>
         {
             if (progress.Current == 2 && progress.Phase == "source-hash")
@@ -159,7 +162,7 @@ public sealed partial class DesktopHostContractTests
         using var workspace = new HostTestWorkspace();
         workspace.CreateCache(101, "First", 2);
         var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
-        var application = workspace.CreateApplication();
+        var application = workspace.CreateCopyExportApplication();
         string? replaced = null;
         application.ProgressReported += (_, progress) =>
         {
@@ -177,6 +180,77 @@ public sealed partial class DesktopHostContractTests
         Assert.False(result.GetProperty("published").GetBoolean());
         Assert.Equal("keep", File.ReadAllText(Path.Combine(replaced, "keep.txt")));
         Assert.Empty(Directory.EnumerateFiles(replaced, "*.mp4", SearchOption.AllDirectories));
+    }
+
+    [Theory]
+    [InlineData(70)]
+    [InlineData(81)]
+    public async Task Export_LongChineseNamesFitUtf8BudgetDuringCopyAndAfterPublication(int partLength)
+    {
+        using var workspace = new HostTestWorkspace();
+        var title = new string('题', 82) + "🎵" + new string('题', 20);
+        var part = partLength == 70 ? new string('集', 70) : new string('集', partLength) + "🎬" + new string('集', 20);
+        workspace.CreateCache(101, title);
+        var entry = Path.Combine(workspace.CacheRoot, "101", "c_1", "entry.json");
+        var metadata = JsonNode.Parse(await File.ReadAllTextAsync(entry))!;
+        metadata["page_data"]!["part"] = part;
+        await File.WriteAllTextAsync(entry, metadata.ToJsonString());
+        var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
+        var application = workspace.CreateCopyExportApplication();
+        string? temporaryName = null;
+        application.ProgressReported += (_, progress) =>
+        {
+            if (progress.Stage == "copying")
+                temporaryName ??= Path.GetFileName(Directory.EnumerateFiles(destination, "*.writing", SearchOption.AllDirectories).Single());
+        };
+        var result = await DispatchAsync(application, "export", JsonSerializer.Serialize(new
+        {
+            rootPath = workspace.CacheRoot, outputPath = destination, targets = new[] { new { avid = "101" } }
+        }));
+        Assert.True(result.GetProperty("published").GetBoolean(), result.ToString());
+        var directory = Assert.Single(Directory.EnumerateDirectories(result.GetProperty("outputPath").GetString()!));
+        var file = Assert.Single(Directory.EnumerateFiles(directory));
+        Assert.EndsWith("_AV101", Path.GetFileName(directory));
+        Assert.StartsWith("P001_", Path.GetFileName(file));
+        Assert.EndsWith(".mp4", file);
+        Assert.NotNull(temporaryName);
+        foreach (var name in new[] { temporaryName!, Path.GetFileName(directory), Path.GetFileName(file) })
+            Assert.InRange(new UTF8Encoding(false, true).GetByteCount(name), 1, 255);
+    }
+
+    [Fact]
+    public async Task PlaybackProtectionFailure_PreservesOneFailurePerRequestedPage()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Fixture", 2);
+        string Media(int page) => Path.Combine(workspace.CacheRoot, "101", $"c_{page}", "lua.flv.bb2api.80", "0.mp4");
+        File.Delete(Media(1));
+        File.Move(Media(2), Path.ChangeExtension(Media(2), ".blv"));
+        var cache = Assert.Single(new FileSystemCacheIndexBuilder().BuildIndex(workspace.CacheRoot).VideoCaches);
+        var plan = new CachePlaybackService().CreatePagePlan(cache, 2).SelectedPlan;
+        var store = new PlaybackArtifactStore(workspace.TranscodeRoot);
+        var cached = store.GetOrCreate(plan, ".mp4", path => File.WriteAllText(path, "prepared"));
+        Directory.CreateDirectory(cached.OutputPath + ".protected-until");
+        var launcher = new QueueRecorder();
+        var result = await DispatchAsync(new DesktopHostApplication(launcher), "play",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, targets = new[] { new { avid = "101" } } }));
+        Assert.Equal(0, launcher.Calls);
+        var failures = result.GetProperty("failures").EnumerateArray().ToArray();
+        Assert.Equal(new[] { 1, 2 }, failures.Select(failure => failure.GetProperty("pageIndex").GetInt32()));
+        Assert.DoesNotContain("protection failed", failures[0].GetProperty("message").GetString());
+        Assert.Contains("protection failed", failures[1].GetProperty("message").GetString());
+    }
+
+    // Host publication tests use labelled bytes so they can assert which page was copied without FFmpeg.
+    private sealed class FixtureCopyProcessor : IExportMediaProcessor
+    {
+        public Task ProcessAsync(CachePlaybackPlan plan, string outputPath, Action<string> requireAudioTranscode,
+            IProgress<PlaybackPreparationProgress>? progress, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Copy(Assert.Single(plan.MediaFiles), outputPath);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class ExportProcessor : IExportMediaProcessor

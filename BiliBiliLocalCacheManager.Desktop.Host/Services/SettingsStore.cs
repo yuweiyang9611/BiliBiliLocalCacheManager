@@ -76,7 +76,8 @@ internal sealed class SettingsStore
 
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllBytes(_settingsPath));
+            using var input = File.OpenRead(_settingsPath);
+            using var document = JsonDocument.Parse(input);
             if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
                 return RecoverCorrupt("The settings root is not a JSON object.");
@@ -85,14 +86,8 @@ internal sealed class SettingsStore
             var sourceVersion = document.RootElement.OptionalInt32("SchemaVersion") ?? 0;
             if (sourceVersion > DesktopSettings.CurrentSchemaVersion)
             {
-                var futureSettings = JsonSerializer.Deserialize<DesktopSettings>(
-                                         document.RootElement.GetRawText(),
-                                         FileSerializerOptions) ??
-                                     new DesktopSettings();
-                PreservePersistedDefaults(futureSettings, document.RootElement);
-                Normalize(futureSettings);
                 return new SettingsState(
-                    futureSettings,
+                    ReadCompatibleSettings(document.RootElement),
                     CanSave: false,
                     sourceVersion,
                     $"Settings schema v{sourceVersion} is newer than supported schema " +
@@ -129,6 +124,31 @@ internal sealed class SettingsStore
         {
             return RecoverCorrupt(exception.Message);
         }
+    }
+
+    private static DesktopSettings ReadCompatibleSettings(JsonElement persisted)
+    {
+        // A newer schema stays read-only even when individual fields change type or meaning.
+        var defaults = new DesktopSettings();
+        var settings = new DesktopSettings { ScanOnStartup = false, IncludePartName = true };
+        foreach (var property in JsonSerializerOptions.Default.GetTypeInfo(typeof(DesktopSettings)).Properties)
+        {
+            if (property.Set is null || !persisted.TryGetPropertyIgnoreCase(property.Name, out var field))
+                continue;
+            try
+            {
+                var value = field.Deserialize(property.PropertyType, FileSerializerOptions);
+                if (value is null || (value is Enum && !Enum.IsDefined(property.PropertyType, value))) continue;
+                property.Set(settings, value);
+            }
+            catch (JsonException) { /* Use the supported default for this field. */ }
+        }
+        if (!PlaybackArtifactCleanupOptions.IsValidRetentionDays(settings.TranscodeCacheRetentionDays))
+            settings.TranscodeCacheRetentionDays = defaults.TranscodeCacheRetentionDays;
+        if (!PlaybackArtifactCleanupOptions.IsValidMaxSizeGigabytes(settings.TranscodeCacheMaxSizeGigabytes))
+            settings.TranscodeCacheMaxSizeGigabytes = defaults.TranscodeCacheMaxSizeGigabytes;
+        Normalize(settings);
+        return settings;
     }
 
     private static void PreservePersistedDefaults(DesktopSettings settings, JsonElement persisted)

@@ -24,6 +24,7 @@
   <ItemGroup>
     <ProjectReference Include="..\BiliBiliLocalCacheManager.Core\BiliBiliLocalCacheManager.Core.csproj" />
     <ProjectReference Include="..\BiliBiliLocalCacheManager.Playback\BiliBiliLocalCacheManager.Playback.csproj" />
+    <ProjectReference Include="..\BiliBiliLocalCacheManager.Desktop.Host\BiliBiliLocalCacheManager.Desktop.Host.csproj" />
   </ItemGroup>
 
 </Project>

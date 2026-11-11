@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <None Update="Fixtures/one-second.mp4" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

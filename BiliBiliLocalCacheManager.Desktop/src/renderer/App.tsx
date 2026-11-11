@@ -26,7 +26,8 @@ import { projectOperationResult } from '../shared/operation-result';
 import type { TrashMoveResult, TrashRestoreResult, TrashPurgeResult } from '../shared/contracts';
 
 type UndoDeleteBatch = { rootPath: string; entryIds: string[] };
-type RootBoundState<T> = { rootPath: string | null; value: T };
+type RootBoundState<T> = { rootPath: string | null; value: T; failed?: boolean };
+type StorageState = { key: string; value: StorageSnapshot | null };
 type LegacySettingsMigration = { rootPath: string };
 type IndexBinding = { rootPath: string; includeIncomplete: boolean; indexToken: string };
 type QueuedSearch = { revision: number; request: SearchRequest };
@@ -62,7 +63,10 @@ const navigation: Array<{ id: Page; label: string; icon: IconName }> = [
 export function App() {
   const [page, setPage] = useState<Page>('library');
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
-  const [draftSettings, setDraftSettings] = useState<AppSettings>(defaultSettings);
+  const [draftEdits, setDraftEdits] = useState<Partial<AppSettings>>({});
+  const libraryEdits = useRef<Partial<AppSettings>>({});
+  const draftSettings = { ...settings, ...draftEdits };
+  const [canSaveSettings, setCanSaveSettings] = useState(true);
   const [items, setItems] = useState<CacheEntry[]>([]);
   const [cachePage, setCachePage] = useState<CachePageState>(initialCachePage);
   const [indexBinding, setIndexBinding] = useState<IndexBinding | null>(null);
@@ -72,7 +76,7 @@ export function App() {
   const [focusedDetails, setFocusedDetails] = useState<CacheDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsOffset, setDetailsOffset] = useState(0);
-  const [storageState, setStorageState] = useState<RootBoundState<StorageSnapshot>>({ rootPath: null, value: emptyStorage });
+  const [storageState, setStorageState] = useState<StorageState | null>(null);
   const [trashState, setTrashState] = useState<RootBoundState<TrashEntry[]>>({ rootPath: null, value: [] });
   const [trashSnapshot, setTrashSnapshot] = useState<TrashPageResult | null>(null);
   const [health, setHealth] = useState<HostHealth | null>(null);
@@ -112,6 +116,7 @@ export function App() {
   const noticeId = useRef(0);
   const searchInput = useRef<HTMLInputElement>(null);
   const searchWasActive = useRef(false);
+  const searchTimer = useRef<number | undefined>(undefined);
   const pendingSearch = useRef<QueuedSearch | null>(null);
   const latestSearchRevision = useRef(0);
   const displayedSearch = useRef<SearchRequest | null>(null);
@@ -121,9 +126,12 @@ export function App() {
   const allowReadOnly = useRef(false);
   const detailsRevision = useRef(0);
   const activeRootPath = settings.rootPath.trim();
+  const storageKey = JSON.stringify([activeRootPath, settings.transcodeCacheRetentionDays, settings.transcodeCacheMaxSizeGigabytes]);
+  const activeStorageKey = useRef(storageKey);
+  useLayoutEffect(() => { activeStorageKey.current = storageKey; }, [storageKey]);
   const activeRootPathRef = useRef(activeRootPath);
   useLayoutEffect(() => { activeRootPathRef.current = activeRootPath; }, [activeRootPath]);
-  const storage = storageState.rootPath === activeRootPath ? storageState.value : emptyStorage;
+  const currentStorage = storageState?.key === storageKey ? storageState : null;
   const trash = trashState.rootPath === activeRootPath ? trashState.value : [];
   const hasActiveIndex = indexBinding?.rootPath === activeRootPath &&
     indexBinding.includeIncomplete === settings.includeIncomplete &&
@@ -166,33 +174,42 @@ export function App() {
     setDetailsLoading(false);
   }, [clearSelection]);
 
-  const invalidateIndex = useCallback(() => {
+  const discardSearch = useCallback(() => {
+    window.clearTimeout(searchTimer.current);
     void cacheManager.cancelSearch().catch(() => undefined);
     searchDrainActive.current = false;
     setSearching(false);
-    setScanReport(null);
     latestSearchRevision.current += 1;
     pendingSearch.current = null;
+  }, []);
+
+  const invalidateIndex = useCallback(() => {
+    discardSearch();
+    setScanReport(null);
     searchWasActive.current = false;
     setIndexBinding(null);
     replaceLibraryItems();
-  }, [replaceLibraryItems]);
+  }, [discardSearch, replaceLibraryItems]);
 
-  const clearLibrary = useCallback(() => replaceLibraryItems(), [replaceLibraryItems]);
+  const clearLibrary = useCallback(() => {
+    discardSearch();
+    searchWasActive.current = Boolean(searchContextRef.current.request.keyword);
+    replaceLibraryItems();
+  }, [discardSearch, replaceLibraryItems]);
 
   const invalidateRootViews = useCallback(() => {
     setTrashSnapshot(null);
-    setStorageState({ rootPath: null, value: emptyStorage });
+    setStorageState(null);
     setTrashState({ rootPath: null, value: [] });
     setSelectedTrashIds(new Set());
   }, []);
 
   const invalidateStorage = useCallback(() => {
-    setStorageState({ rootPath: null, value: emptyStorage });
+    setStorageState(null);
   }, []);
 
-  const bindStorage = useCallback((rootPath: string, value: StorageSnapshot) => {
-    if (activeRootPathRef.current === rootPath) setStorageState({ rootPath, value });
+  const bindStorage = useCallback((key: string, value: StorageSnapshot | null) => {
+    if (activeStorageKey.current === key) setStorageState({ key, value });
   }, []);
 
   const bindTrash = useCallback((rootPath: string, value: TrashPageResult) => {
@@ -303,11 +320,11 @@ export function App() {
           .catch(error => { if (!disposed) notify('info', `运行环境检查暂不可用：${describeError(error)}`); });
         const loadedSettings = initial.settings;
         setSettings(loadedSettings);
-        setDraftSettings(loadedSettings);
+        setCanSaveSettings(initial.settingsState.canSave);
         setSettingsLoaded(true);
         replaceLibraryItems(initial.items);
         setIndexBinding(null);
-        setStorageState({ rootPath: null, value: emptyStorage });
+        setStorageState(null);
         setTrashState({ rootPath: null, value: [] });
         setCapabilities(initial.capabilities);
         setDesktop(info);
@@ -408,6 +425,19 @@ export function App() {
     };
   }, [detailsOffset, focusedItem, indexBinding?.indexToken, invalidateIndex, notify]);
 
+  const persistSettings = useCallback(async (patch: Partial<AppSettings>) => {
+    if (!canSaveSettings) return false;
+    if (!Object.keys(patch).length) return true;
+    try {
+      await cacheManager.updateSettings(patch);
+      return true;
+    } catch (error) {
+      if (errorCode(error) !== 'settings_read_only') throw error;
+      setCanSaveSettings(false);
+      return false;
+    }
+  }, [canSaveSettings]);
+
   const browse = useCallback(async () => {
     const completed = await run('正在验证缓存目录…', async () => {
       const rootPath = await cacheManager.chooseRootDirectory(settings.rootPath);
@@ -421,20 +451,17 @@ export function App() {
         pageSize: DEFAULT_CACHE_PAGE_SIZE,
       });
       invalidateIndex();
-      const saved = await cacheManager.updateSettings({
-        rootPath: normalizedRootPath,
-        includeIncomplete: settings.includeIncomplete,
-      });
-      const sessionSettings = { ...saved, rootPath: normalizedRootPath };
-      return { saved: sessionSettings, result, rootPath: normalizedRootPath };
+      const persisted = await persistSettings({ rootPath: normalizedRootPath, includeIncomplete: settings.includeIncomplete });
+      return { result, rootPath: normalizedRootPath, sessionOnly: !persisted };
     });
     if (!completed) return;
-    setSettings(completed.saved);
-    setDraftSettings(completed.saved);
+    setSettings(current => ({ ...current, rootPath: completed.rootPath }));
+    setDraftEdits(({ rootPath: _previousRoot, ...rest }) => rest);
     setUndoDeleteBatch(null);
     invalidateRootViews();
-    applyScanResult(completed.rootPath, settings.includeIncomplete, completed.result);
-  }, [applyScanResult, restoreAndRescan, invalidateIndex, invalidateRootViews, notify, replaceLibraryItems, reportScan, run, settings.includeIncomplete, settings.rootPath]);
+    const prefix = completed.sessionOnly ? '设置文件只读，所选目录仅在本次会话使用。' : '';
+    applyScanResult(completed.rootPath, settings.includeIncomplete, completed.result, prefix);
+  }, [applyScanResult, invalidateIndex, invalidateRootViews, persistSettings, run, settings.includeIncomplete, settings.rootPath]);
 
   const scan = useCallback(async () => {
     if (!settings.rootPath.trim()) { notify('error', '请先选择 B 站缓存根目录。'); return; }
@@ -442,7 +469,7 @@ export function App() {
       const next = await cacheManager.scan({
         rootPath: activeRootPath,
         includeIncomplete: settings.includeIncomplete,
-        persistSettings: true,
+        persistSettings: canSaveSettings,
         offset: 0,
         pageSize: DEFAULT_CACHE_PAGE_SIZE,
       });
@@ -451,7 +478,7 @@ export function App() {
     });
     if (!result) return;
     applyScanResult(activeRootPath, settings.includeIncomplete, result);
-  }, [applyScanResult, restoreAndRescan, activeRootPath, invalidateIndex, invalidateStorage, notify, replaceLibraryItems, reportScan, run, settings.includeIncomplete]);
+  }, [applyScanResult, activeRootPath, canSaveSettings, invalidateIndex, notify, run, settings.includeIncomplete]);
 
   const drainSearchQueue = useCallback(async () => {
     if ((operationInFlight.current && !allowReadOnly.current) || !pendingSearch.current) return;
@@ -491,6 +518,8 @@ export function App() {
       return;
     }
     const request = { ...searchContextRef.current.request, offset };
+    window.clearTimeout(searchTimer.current);
+    searchWasActive.current = Boolean(request.keyword);
     const revision = ++latestSearchRevision.current;
     pendingSearch.current = { revision, request };
     resumePendingSearch.current();
@@ -500,13 +529,12 @@ export function App() {
     if (!initialized || legacySettingsMigration || !hasActiveIndex) return;
     const hasKeyword = Boolean(settings.keyword.trim());
     if (!hasKeyword && !searchWasActive.current) return;
-    const timer = window.setTimeout(() => {
-      searchWasActive.current = hasKeyword;
-      void search();
-    }, 350);
+    const timer = window.setTimeout(() => { void search(); }, 350);
+    searchTimer.current = timer;
     return () => window.clearTimeout(timer);
   }, [
     hasActiveIndex,
+    indexBinding?.indexToken,
     initialized,
     legacySettingsMigration,
     search,
@@ -554,7 +582,14 @@ export function App() {
 
   const updateSetting = useCallback(<K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     clearSelection();
+    libraryEdits.current = { ...libraryEdits.current, [key]: value };
     setSettings((current) => ({ ...current, [key]: value }));
+    setDraftEdits(current => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
   }, [clearSelection]);
 
   const play = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport) => {
@@ -694,13 +729,17 @@ export function App() {
   }, [applyScanResult, restoreAndRescan, activeRootPath, invalidateIndex, invalidateRootViews, notify, refreshAfterMutation, replaceLibraryItems, reportScan, run, settings.includeIncomplete, undoDeleteBatch]);
 
   const refreshStorage = useCallback(async (announce = true) => {
-    const rootPath = activeRootPath;
-    const value = await inspect('正在统计存储…', () => cacheManager.getStorage(rootPath || undefined));
-    if (value) {
-      bindStorage(rootPath, value);
-      if (announce) notify('success', '存储统计已刷新。');
-    }
-  }, [activeRootPath, bindStorage, notify, inspect]);
+    await inspect('正在统计存储…', async () => {
+      try {
+        const value = await cacheManager.getStorage(activeRootPath || undefined);
+        bindStorage(storageKey, value);
+        if (announce) notify('success', '存储统计已刷新。');
+      } catch (error) {
+        bindStorage(storageKey, null);
+        throw error;
+      }
+    });
+  }, [activeRootPath, bindStorage, storageKey, notify, inspect]);
 
   const refreshTrash = useCallback(async (announce = true, offset = 0, snapshotToken?: string) => {
     const rootPath = activeRootPath;
@@ -708,19 +747,28 @@ export function App() {
       setTrashState({ rootPath, value: [] });
       return;
     }
-    const value = await inspect('正在读取回收站…', () => cacheManager.getTrashPage(rootPath, { offset, pageSize: 100, snapshotToken }));
-    if (value) {
-      bindTrash(rootPath, value);
-      setSelectedTrashIds(new Set());
-      if (announce) notify('success', '回收站已刷新。');
-    }
+    await inspect('正在读取回收站…', async () => {
+      try {
+        const value = await cacheManager.getTrashPage(rootPath, { offset, pageSize: 100, snapshotToken });
+        bindTrash(rootPath, value);
+        setSelectedTrashIds(new Set());
+        if (announce) notify('success', '回收站已刷新。');
+      } catch (error) {
+        if (rootPath === activeRootPathRef.current) {
+          setTrashState({ rootPath, value: [], failed: true });
+          setTrashSnapshot(null);
+          setSelectedTrashIds(new Set());
+        }
+        throw error;
+      }
+    });
   }, [activeRootPath, bindTrash, notify, inspect]);
 
   useEffect(() => {
-    if (!initialized || (busy && !operationsBlocked) || legacySettingsMigration) return;
-    if (page === 'storage' && storageState.rootPath !== activeRootPath) void refreshStorage(false);
+    if (!initialized || inspectionBusy || (busy && !operationsBlocked) || legacySettingsMigration) return;
+    if (page === 'storage' && !currentStorage) void refreshStorage(false);
     if (page === 'trash' && trashState.rootPath !== activeRootPath) void refreshTrash(false);
-  }, [activeRootPath, busy, initialized, legacySettingsMigration, operationsBlocked, page, refreshStorage, refreshTrash, storageState.rootPath, trashState.rootPath]);
+  }, [activeRootPath, busy, currentStorage, initialized, inspectionBusy, legacySettingsMigration, operationsBlocked, page, refreshStorage, refreshTrash, trashState.rootPath]);
 
   const cleanupTranscodeCache = useCallback(async () => {
     const rootPath = activeRootPath;
@@ -729,10 +777,10 @@ export function App() {
       return { result, snapshot: result.cancelled ? null : await refreshAfterMutation(() => cacheManager.getStorage(rootPath || undefined)) };
     });
     if (!completed) return;
-    if (completed.snapshot) bindStorage(rootPath, completed.snapshot);
+    if (completed.snapshot) bindStorage(storageKey, completed.snapshot);
     else invalidateStorage();
     notify(completed.result.failedFileCount ? 'error' : completed.result.cancelled ? 'info' : 'success', artifactCleanupMessage('清理完成', completed.result));
-  }, [activeRootPath, bindStorage, invalidateStorage, notify, refreshAfterMutation, run]);
+  }, [activeRootPath, bindStorage, storageKey, invalidateStorage, notify, refreshAfterMutation, run]);
 
   const openTranscodeCache = useCallback(async () => {
     const opened = await inspect('正在打开转码缓存目录…', () => cacheManager.openTranscodeCache());
@@ -752,12 +800,12 @@ export function App() {
           return { result, snapshot: result.cancelled ? null : await refreshAfterMutation(() => cacheManager.getStorage(rootPath || undefined)) };
         });
         if (!completed) return;
-        if (completed.snapshot) bindStorage(rootPath, completed.snapshot);
+        if (completed.snapshot) bindStorage(storageKey, completed.snapshot);
         else invalidateStorage();
         notify(completed.result.failedFileCount ? 'error' : completed.result.cancelled ? 'info' : 'success', artifactCleanupMessage('清空完成', completed.result));
       })(); },
     });
-  }, [activeRootPath, bindStorage, invalidateStorage, notify, refreshAfterMutation, run]);
+  }, [activeRootPath, bindStorage, storageKey, invalidateStorage, notify, refreshAfterMutation, run]);
 
   const resolveLegacySettingsMigration = useCallback(async (choice: 'scan' | 'remember' | 'forget') => {
     const migration = legacySettingsMigration;
@@ -774,7 +822,7 @@ export function App() {
 
     const sessionSettings = choice === 'forget' ? saved : { ...saved, rootPath: migration.rootPath };
     setSettings(sessionSettings);
-    setDraftSettings(sessionSettings);
+    setDraftEdits({});
     setLegacySettingsMigration(null);
     setUndoDeleteBatch(null);
     invalidateRootViews();
@@ -888,7 +936,8 @@ export function App() {
         <section className="page-content">
           <RenderBoundary scope="page" key={page}>
           {(page === 'library' || page === 'settings') && scanReport && <section className="result-panel" aria-label="扫描结果">
-            <div className="panel-heading"><h2>扫描结果</h2><span>损坏 {scanReport.invalidEntries ?? 0} · 无法访问 {scanReport.inaccessibleDirectories ?? 0} · 跳过未完成 {scanReport.skippedIncompleteEntries ?? 0}</span></div>
+            <div className="panel-heading"><h2>扫描结果</h2><span>损坏 {scanReport.invalidEntries ?? 0} · 无法访问 {scanReport.inaccessibleDirectories ?? 0} · 跳过未完成 {scanReport.skippedIncompleteEntries ?? 0}
+              {Boolean(scanReport.unavailablePartIdentities) && ` · 无法核验身份的分 P ${scanReport.unavailablePartIdentities}`}</span></div>
             {scanReport.issues.length > 0 && <details><summary>问题明细（{scanReport.issues.length}）</summary><ul className="result-list">
               {scanReport.issues.map((issue) => <li key={issue.id}><div><strong>{issue.kind}</strong><p>{issue.message}</p><code>{issue.path}</code></div>
                 <button className="icon-button" title="打开所在目录" aria-label={`定位问题 ${issue.id + 1}`} disabled={uiBusy || indexBinding?.indexToken !== scanReport.indexToken}
@@ -939,7 +988,8 @@ export function App() {
             clear={clearLibrary}
           />}
           {page === 'storage' && <StoragePage
-            storage={storage}
+            storage={currentStorage?.value ?? emptyStorage}
+            status={!currentStorage ? 'waiting' : currentStorage.value ? 'ready' : 'failed'}
             settings={settings}
             busy={uiBusy}
             inspectionDisabled={inspectionDisabled}
@@ -948,7 +998,9 @@ export function App() {
             clear={requestClearTranscodeCache}
             open={openTranscodeCache}
           />}
-          {page === 'trash' && <TrashPage entries={trash} snapshot={trashSnapshot} pageTo={offset => void refreshTrash(false, offset, trashSnapshot?.snapshotToken)} selected={selectedTrashIds} setSelected={setSelectedTrashIds} busy={uiBusy || !trashSnapshot} inspectionDisabled={inspectionDisabled} canPurge={capabilities.trashPurge} refresh={refreshTrash} restore={() => {
+          {page === 'trash' && <TrashPage entries={trash} snapshot={trashSnapshot}
+            status={!activeRootPath ? 'no-root' : trashState.rootPath !== activeRootPath ? 'waiting' : trashState.failed ? 'failed' : 'ready'}
+            pageTo={offset => void refreshTrash(false, offset, trashSnapshot?.snapshotToken)} selected={selectedTrashIds} setSelected={setSelectedTrashIds} busy={uiBusy || !trashSnapshot} inspectionDisabled={inspectionDisabled} canPurge={capabilities.trashPurge} refresh={refreshTrash} restore={() => {
             if (!selectedTrashIds.size) return notify('info', '请选择要恢复的条目。');
             const rootPath = trashState.rootPath;
             if (!rootPath || rootPath !== activeRootPath) return notify('error', '回收站内容与当前缓存目录不一致，请刷新后重试。');
@@ -1007,11 +1059,15 @@ export function App() {
               notify(diskOutcomeKind(completed.result), diskOutcomeMessage('永久删除', completed.result.purged.length, completed.result));
             })(); },
           })} />}
-          {page === 'settings' && <SettingsPage value={draftSettings} setValue={setDraftSettings} browse={async () => {
+          {page === 'settings' && <SettingsPage value={draftSettings} canSave={canSaveSettings}
+            edit={patch => setDraftEdits(current => ({ ...current, ...patch }))} browse={async () => {
             const value = await run('正在选择缓存目录…', () => cacheManager.chooseRootDirectory(draftSettings.rootPath));
-            if (value) setDraftSettings((current) => ({ ...current, rootPath: value }));
+            if (value) setDraftEdits(current => ({ ...current, rootPath: value }));
           }} save={async () => {
             const candidate = { ...draftSettings, rootPath: draftSettings.rootPath.trim() };
+            const submittedLibraryEdits = libraryEdits.current;
+            const patch = { ...submittedLibraryEdits, ...draftEdits };
+            if ('rootPath' in patch || patch.rememberRootPath) patch.rootPath = candidate.rootPath;
             const rootChanged = candidate.rootPath !== activeRootPath;
             const scanBehaviorChanged = candidate.includeIncomplete !== settings.includeIncomplete;
             const completed = await run(rootChanged ? '正在验证并切换缓存目录…' : '正在保存设置…', async () => {
@@ -1025,27 +1081,36 @@ export function App() {
                 })
                 : null;
               if (scanResult) invalidateIndex();
-              const saved = await cacheManager.updateSettings(candidate);
+              const sessionOnly = !await persistSettings(patch);
               if ((rootChanged || scanBehaviorChanged) && !scanResult) invalidateIndex();
-              const sessionSettings = candidate.rootPath ? { ...saved, rootPath: candidate.rootPath } : saved;
-              return { saved: sessionSettings, scanResult };
+              const changes = sessionOnly ? { rootPath: candidate.rootPath, includeIncomplete: candidate.includeIncomplete } : patch;
+              return { changes, scanResult, sessionOnly };
             });
             if (!completed) return;
-            setSettings(completed.saved);
-            setDraftSettings(completed.saved);
-            setUndoDeleteBatch(null);
-            if (rootChanged) invalidateRootViews();
-            if (completed.scanResult) {
-              applyScanResult(candidate.rootPath, candidate.includeIncomplete, completed.scanResult, '设置已保存。');
+            // The library's search fields remain editable during a settings write.
+            const newerEdits = { ...libraryEdits.current };
+            for (const key of Object.keys(submittedLibraryEdits) as (keyof AppSettings)[]) {
+              if (newerEdits[key] === submittedLibraryEdits[key]) delete newerEdits[key];
             }
-            if (!completed.saved.rootPath.trim()) {
+            libraryEdits.current = newerEdits;
+            setSettings(current => ({ ...current, ...completed.changes, ...newerEdits }));
+            setDraftEdits({});
+            if (rootChanged) {
+              setUndoDeleteBatch(null);
+              invalidateRootViews();
+            }
+            const message = completed.sessionOnly ? '设置文件只读，目录和扫描选项仅在本次会话使用。' : '设置已保存。';
+            if (completed.scanResult) {
+              applyScanResult(candidate.rootPath, candidate.includeIncomplete, completed.scanResult, message);
+            }
+            if (!candidate.rootPath) {
               setIndexBinding(null);
               replaceLibraryItems();
-              notify('success', '设置已保存；缓存根目录为空，列表已清空。');
+              notify('success', message + '缓存根目录为空，列表已清空。');
               return;
             }
             if (!completed.scanResult) {
-              notify('success', '设置已保存。');
+              notify('success', message);
             }
           }} busy={uiBusy} />}
           {page === 'diagnostics' && <DiagnosticsPage health={health} desktop={desktop} activities={activities} refresh={async () => {

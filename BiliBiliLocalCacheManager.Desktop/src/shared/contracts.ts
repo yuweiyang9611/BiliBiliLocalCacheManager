@@ -164,6 +164,7 @@ export interface ScanResult extends CachePage {
   skippedIncompleteEntries?: number;
   invalidEntries?: number;
   inaccessibleDirectories?: number;
+  unavailablePartIdentities?: number;
   hasWarnings?: boolean;
   completedAtUtc?: string;
 }
@@ -304,6 +305,7 @@ export interface TaskHistorySnapshot { entries: TaskHistoryEntry[]; warning?: st
 
 export interface TrashPage {
   snapshotToken: string;
+  canPurgeSnapshot?: boolean;
   offset: number;
   pageSize: number;
   totalItems: number;

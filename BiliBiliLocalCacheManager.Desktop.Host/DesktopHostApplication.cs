@@ -112,6 +112,11 @@ internal sealed partial class DesktopHostApplication
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
+        var requestRoot = parameters.TryGetPropertyIgnoreCase("rootPath", out var root) && root.ValueKind == JsonValueKind.String
+            ? root.GetString()?.Trim() : null;
+        string? indexedRoot;
+        lock (_stateSync) { indexedRoot = _currentRoot; }
+        using var diagnosticScope = _eventRecorder.WithCacheRoots(requestRoot, indexedRoot, _settingsStore.GetState().Settings.RootPath);
         _eventRecorder.Record("Rpc", "Information", $"Started {method} ({requestId}).");
         try
         {
@@ -411,7 +416,7 @@ internal sealed partial class DesktopHostApplication
                      throw new IOException("The export destination has no parent directory.");
         var temporaryPath = Path.Combine(
             parent,
-            $".{Path.GetFileName(destination)}.{Guid.NewGuid():N}.writing");
+            $".{Guid.NewGuid():N}.writing");
         try
         {
             await using (var input = new FileStream(

@@ -46,6 +46,9 @@ public sealed class CacheIndexBuildOptions
     /// </summary>
     public long? MaximumCacheBytes { get; set; }
 
+    /// <summary>Skip and report AV directories that cannot be addressed by their canonical decimal ID.</summary>
+    public bool RequireCanonicalAvidDirectory { get; set; }
+
     /// <summary>Optional AV scope for refreshing known local mutations; null scans the whole root.</summary>
     public IReadOnlySet<long>? AvidFilter { get; set; }
 
@@ -58,6 +61,7 @@ public sealed class CacheIndexBuildOptions
             ThrowOnInvalidEntry = ThrowOnInvalidEntry,
             MaxReportedIssues = Math.Max(0, MaxReportedIssues),
             MaximumCacheBytes = MaximumCacheBytes,
+            RequireCanonicalAvidDirectory = RequireCanonicalAvidDirectory,
             AvidFilter = AvidFilter is null ? null : new HashSet<long>(AvidFilter)
         };
 
