@@ -92,6 +92,8 @@ export interface StorageSnapshot {
   transcodeCache: StorageArea;
   trash: StorageArea;
   totalBytes: number;
+  policyReclaimableBytes?: number;
+  measurementWarning?: string;
   lastMaintenanceSummary?: string;
 }
 
@@ -119,6 +121,8 @@ export interface TrashEntry {
   deletedAt: string | null;
   originalPath?: string;
   pageIndex?: number | null;
+  isRestorable?: boolean;
+  unavailableReason?: string;
 }
 
 export interface HostHealth {
@@ -179,6 +183,7 @@ export interface ExportTranscodeRequirement {
 export interface ExportConfirmation { id: string; approvals: string[] }
 export interface ExportBatchResult {
   outputPath: string | null;
+  taskId?: string;
   exportedCount: number;
   failures: MediaFailure[];
   published: boolean;
@@ -237,6 +242,7 @@ export interface DesktopInfo {
 
 export interface CacheManagerApi {
   getTaskHistory(): Promise<TaskHistorySnapshot>;
+  accessExportOutput(taskId: string, action: 'open' | 'copy'): Promise<void>;
   onTaskHistoryChanged(listener: () => void): () => void;
   reloadWhenIdle(): Promise<boolean>;
   getTrashPage(rootPath: string, options?: { snapshotToken?: string; offset?: number; pageSize?: number }): Promise<TrashPage>;

@@ -8,6 +8,7 @@ import {
   validateCacheDetails, validateCachePage, validateInitialState, validatePlaybackBatchResult,
   validateExportBatchResult, validateScanResult, validateArtifactCleanupResult,
   validateTrashMoveResult, validateTrashRestoreResult, validateTrashPurgeResult,
+  validateStorageSnapshot, validateTrashPage,
 } from './host-contract-validation';
 
 describe('validateInitialState', () => {
@@ -58,6 +59,20 @@ describe('validateInitialState', () => {
 });
 
 describe('paged Host responses', () => {
+  it('checks the policy preview byte count and accepts legacy snapshots without an estimate', () => {
+    expect(validateStorageSnapshot(emptyStorage).policyReclaimableBytes).toBeUndefined();
+    expect(validateStorageSnapshot({ ...emptyStorage, policyReclaimableBytes: 0 }).policyReclaimableBytes).toBe(0);
+    expect(() => validateStorageSnapshot({ ...emptyStorage, policyReclaimableBytes: -1 })).toThrow(/policyReclaimableBytes/);
+  });
+
+  it('preserves a blocked trash item and validates its restore flag and reason', () => {
+    const entry = { id: 'pending', avid: '100', title: 'Video', deletedAt: null, sizeBytes: 1, isRestorable: false, unavailableReason: '清理中' };
+    const page = { items: [entry], offset: 0, pageSize: 100, hasMore: false, totalItems: 1, totalSizeBytes: 1, snapshotToken: 's' };
+    expect(validateTrashPage(page).items[0]).toEqual(entry);
+    expect(() => validateTrashPage({ ...page, items: [{ ...entry, isRestorable: 'false' }] })).toThrow(/isRestorable/);
+    expect(() => validateTrashPage({ ...page, items: [{ ...entry, unavailableReason: 1 }] })).toThrow(/unavailableReason/);
+  });
+
   it('preserves logical page counts and rejects counts exceeding physical segments', () => {
     const page = validCachePage();
     const items = [{ ...validCacheEntry('100'), segmentCount: 3, pageCount: 2 }, page.items[1]];

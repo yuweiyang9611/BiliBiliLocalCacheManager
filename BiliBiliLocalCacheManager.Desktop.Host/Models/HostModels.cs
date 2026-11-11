@@ -154,7 +154,9 @@ internal sealed record TrashEntryDto(
     long SizeBytes,
     DateTimeOffset? DeletedAt,
     string? OriginalPath,
-    int? PageIndex = null);
+    int? PageIndex,
+    bool IsRestorable,
+    string? UnavailableReason);
 
 internal sealed record DiagnosticEvent(
     DateTimeOffset TimestampUtc,

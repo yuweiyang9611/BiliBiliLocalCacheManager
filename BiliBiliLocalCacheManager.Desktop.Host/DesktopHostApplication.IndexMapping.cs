@@ -57,12 +57,11 @@ internal sealed partial class DesktopHostApplication
                     progress),
                 cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            return SetCurrentIndex(
-                report.Index,
-                root,
-                includeIncomplete,
-                DateTimeOffset.UtcNow, report.Issues, generation, cancellationToken: cancellationToken,
-                partCaptureProgress: count => ReportPartCaptureProgress(requestId, operation, count)).Index;
+            var completedAt = DateTimeOffset.UtcNow;
+            var snapshot = CreateIndexSnapshot(report, root, cancellationToken,
+                count => ReportPartCaptureProgress(requestId, operation, count));
+            PublishIndexSnapshot(snapshot, includeIncomplete, completedAt, generation, cancellationToken);
+            return snapshot.Index;
         }
         finally { _indexBuildGate.Release(); }
     }
@@ -188,36 +187,39 @@ internal sealed partial class DesktopHostApplication
         }
     }
 
-    private CurrentIndexSnapshot SetCurrentIndex(
-        CacheIndex index,
+    private CurrentIndexSnapshot CreateIndexSnapshot(
+        CacheIndexBuildResult report,
         string root,
-        bool includeIncomplete,
-        DateTimeOffset completedAtUtc,
-        IReadOnlyList<CacheScanIssue>? issues = null,
-        long? expectedGeneration = null,
-        bool persistScanSettings = false,
-        CancellationToken cancellationToken = default,
-        Action<int>? partCaptureProgress = null,
+        CancellationToken cancellationToken,
+        Action<int> partCaptureProgress,
         CurrentIndexSnapshot? previous = null,
         IReadOnlySet<long>? changedAvids = null)
     {
-        var orderedIndex = new CacheIndex(index.VideoCaches.OrderByDescending(GetLastUpdatedUtc).ThenBy(cache => cache.Avid));
-        var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, issues ?? []);
+        var orderedIndex = new CacheIndex(report.Index.VideoCaches.OrderByDescending(GetLastUpdatedUtc).ThenBy(cache => cache.Avid));
+        var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, report.Issues);
         snapshot.CaptureTrashPartTargets(_trashService, cancellationToken, partCaptureProgress, previous, changedAvids);
+        return snapshot;
+    }
+
+    private void PublishIndexSnapshot(CurrentIndexSnapshot snapshot, bool includeIncomplete,
+        DateTimeOffset completedAtUtc, long generation, CancellationToken cancellationToken,
+        CacheIndexBuildResult? scanReport = null, bool persistScanSettings = false)
+    {
         lock (_stateSync)
         {
-            if (expectedGeneration is { } generation && generation != _indexGeneration) throw StaleIndexException();
+            if (generation != _indexGeneration) throw StaleIndexException();
+            // Once published, the scan must return this token even if cancellation arrives.
+            cancellationToken.ThrowIfCancellationRequested();
             _indexSnapshot?.Invalidate();
             _mutationRefresh = null;
-            _lastScanReport = null;
+            _lastScanReport = scanReport;
             _indexSnapshot = snapshot;
-            _currentIndex = orderedIndex;
+            _currentIndex = snapshot.Index;
             _currentIndexToken = snapshot.IndexToken;
-            _currentRoot = root;
+            _currentRoot = snapshot.Root;
             _currentIncludeIncomplete = includeIncomplete;
             _lastScanCompletedAtUtc = completedAtUtc;
-            if (persistScanSettings) TryPersistScanSettings(root, includeIncomplete);
-            return snapshot;
+            if (persistScanSettings) TryPersistScanSettings(snapshot.Root, includeIncomplete);
         }
     }
 

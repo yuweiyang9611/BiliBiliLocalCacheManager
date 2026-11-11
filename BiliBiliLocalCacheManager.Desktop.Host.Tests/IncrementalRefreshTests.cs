@@ -143,12 +143,15 @@ public sealed partial class DesktopHostContractTests
         Assert.True(File.Exists(Path.Combine(originalPath, "entry.json")));
     }
 
-    [Fact]
-    public async Task MutationRefresh_CancelledRefreshKeepsThePendingMutationScope()
+    [Theory]
+    [InlineData("scanning")]
+    [InlineData("verifying")]
+    public async Task MutationRefresh_CancelledRefreshKeepsThePendingMutationScope(string cancelStage)
     {
         using var workspace = new HostTestWorkspace();
-        workspace.CreateCache(101, "changed", 2);
-        workspace.CreateCache(202, "unchanged");
+        // The changed AV sorts last and has one remaining part after the move.
+        workspace.CreateCache(101, "changed", 2, timestampOverride: 100);
+        workspace.CreateCache(202, "unchanged", timestampOverride: 200);
         var application = workspace.CreateApplication();
         var first = await RefreshDispatchAsync(application, "scan", new { rootPath = workspace.CacheRoot });
         var moved = await RefreshDispatchAsync(application, "trash.move", new { rootPath = workspace.CacheRoot,
@@ -158,7 +161,7 @@ public sealed partial class DesktopHostContractTests
         using var cancellation = new CancellationTokenSource();
         application.ProgressReported += (_, progress) =>
         {
-            if (progress.Operation == "scan" && progress.Stage == "scanning") cancellation.Cancel();
+            if (progress.Operation == "scan" && progress.Stage == cancelStage) cancellation.Cancel();
         };
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DispatchAsync(application, "scan",
             JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, incremental = true }), cancellation.Token));
@@ -166,6 +169,31 @@ public sealed partial class DesktopHostContractTests
         Assert.Equal("unchanged", refreshed.GetProperty("items").EnumerateArray()
             .Single(value => value.GetProperty("avid").GetString() == "202").GetProperty("title").GetString());
         Assert.Equal(2, refreshed.GetProperty("includedEntries").GetInt32());
+    }
+
+    [Fact]
+    public async Task Scan_CancelAtLastVerifiedPartPreservesTokenAndSettings()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "before");
+        var application = workspace.CreateApplication();
+        var original = await RefreshDispatchAsync(application, "scan", new { rootPath = workspace.CacheRoot, includeIncomplete = false });
+        var token = original.GetProperty("indexToken").GetString();
+        workspace.CreateCache(101, "after");
+
+        using var cancellation = new CancellationTokenSource();
+        application.ProgressReported += (_, progress) =>
+        {
+            if (progress.Operation == "scan" && progress.Stage == "verifying" && progress.Current == 1)
+                cancellation.Cancel();
+        };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DispatchAsync(application, "scan",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, includeIncomplete = true }), cancellation.Token));
+
+        var settings = await RefreshDispatchAsync(application, "settings.get", new { });
+        Assert.False(settings.GetProperty("includeIncomplete").GetBoolean());
+        var page = await RefreshDispatchAsync(application, "search", new { indexToken = token });
+        Assert.Equal("before", Assert.Single(page.GetProperty("items").EnumerateArray()).GetProperty("title").GetString());
     }
 
     [Fact]

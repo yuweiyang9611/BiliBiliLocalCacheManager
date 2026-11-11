@@ -337,7 +337,9 @@ internal sealed partial class DesktopHostApplication
                 entry.TotalBytes,
                 entry.DeletedAtUtc,
                 entry.OriginalPath,
-                entry.PageIndex);
+                entry.PageIndex,
+                entry.IsRestorable,
+                entry.UnavailableReason is null ? null : BoundWireString(entry.UnavailableReason));
         })
             .ToArray();
     }

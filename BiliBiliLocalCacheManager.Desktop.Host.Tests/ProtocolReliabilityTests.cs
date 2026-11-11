@@ -99,6 +99,68 @@ public sealed partial class DesktopHostContractTests
         await Assert.ThrowsAsync<IOException>(() => server.RunAsync().WaitAsync(TimeSpan.FromSeconds(5)));
     }
 
+    [Fact]
+    public async Task JsonLinesServer_CancelAfterScanPublicationReturnsUsableToken()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "published");
+        using var manager = new BlockingCacheManager();
+        var application = new DesktopHostApplication(cacheManager: manager);
+        var scan = JsonSerializer.Serialize(new { id = "scan", method = "scan", @params = new { rootPath = workspace.CacheRoot } });
+        using var input = new CancelAfterPublicationReader(scan, manager);
+        using var output = new StringWriter();
+        application.ProgressReported += (_, progress) =>
+        {
+            if (progress.Operation == "scan" && progress.Stage == "completed")
+                input.WaitForCancellationAcknowledgement();
+        };
+        var server = new JsonLineRpcServer(application, input, output);
+        await server.RunAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        var responses = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonSerializer.Deserialize<JsonElement>(line))
+            .Where(line => line.TryGetProperty("id", out _))
+            .ToDictionary(line => line.GetProperty("id").GetString()!, line => line.GetProperty("result"));
+        Assert.True(responses["cancel"].GetProperty("cancelled").GetBoolean());
+        var page = await RefreshDispatchAsync(application, "search", new { indexToken = responses["scan"].GetProperty("indexToken").GetString() });
+        Assert.Equal("published", Assert.Single(page.GetProperty("items").EnumerateArray()).GetProperty("title").GetString());
+    }
+
+    private sealed class CancelAfterPublicationReader(string scan, BlockingCacheManager manager) : TextReader
+    {
+        private readonly TaskCompletionSource _published = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _acknowledged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _readCount;
+
+        public void WaitForCancellationAcknowledgement()
+        {
+            _published.SetResult();
+            _acknowledged.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            string request;
+            switch (++_readCount)
+            {
+                case 1:
+                    request = scan + "\n";
+                    break;
+                case 2:
+                    manager.Release.Set();
+                    await _published.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+                    request = "{\"id\":\"cancel\",\"method\":\"cancel\",\"params\":{\"requestId\":\"scan\"}}\n";
+                    break;
+                default:
+                    // The server reads again only after writing the cancel acknowledgement.
+                    _acknowledged.TrySetResult();
+                    return 0;
+            }
+            request.AsMemory().CopyTo(buffer);
+            return request.Length;
+        }
+    }
+
     private sealed class FlushCountingStream : MemoryStream
     {
         public int FlushCount { get; private set; }
