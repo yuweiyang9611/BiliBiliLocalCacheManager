@@ -162,6 +162,7 @@ export class DesktopHostBridge extends EventEmitter {
     const id = randomUUID();
     let settled = false;
     let cancelRequested = false;
+    let preparation: HostCall<unknown> | undefined;
     const recordedOperation = isRecordedTask(method) ? method : undefined;
     let recording = false;
     const response = (async () => {
@@ -169,8 +170,24 @@ export class DesktopHostBridge extends EventEmitter {
       let request: string;
       try { request = JSON.stringify({ id, method, params }); }
       catch { throw new DesktopHostError('无法序列化 Desktop Host 请求。', 'INVALID_REQUEST'); }
-      if (Buffer.byteLength(request, 'utf8') > MAX_HOST_REQUEST_BYTES)
-        throw new DesktopHostError('Desktop Host 请求超过 1 MiB 安全上限。请减少一次操作中的项目或分段数量。', 'REQUEST_TOO_LARGE');
+      if (Buffer.byteLength(request, 'utf8') > MAX_HOST_REQUEST_BYTES) {
+        if (method !== 'trash.restore' || typeof params.rootPath !== 'string' || !Array.isArray(params.entryIds) ||
+            params.entryIds.length === 0 || params.entryIds.length > 20_000 ||
+            !params.entryIds.every((item): item is string => typeof item === 'string'))
+          throw requestTooLarge();
+        const rootPath = params.rootPath;
+        const ids = params.entryIds;
+        for (const chunk of restoreRequestChunks(id, rootPath, ids)) {
+          const call = this.call<{ receivedCount: number }>('trash.prepareRestore', chunk, timeoutMs);
+          preparation = call;
+          const ack = await call.promise;
+          preparation = undefined;
+          if (cancelRequested) throw new DesktopHostError('操作已取消。', 'CANCELLED');
+          if (ack?.receivedCount !== chunk.offset + chunk.entryIds.length)
+            throw new DesktopHostError('Host 未确认完整的恢复清单。', 'INVALID_RESPONSE');
+        }
+        request = JSON.stringify({ id, method, params: { rootPath, preparedCount: ids.length } });
+      }
       if (recordedOperation && this.#taskHistory) {
         await this.#taskHistory.start(id, recordedOperation, params);
         recording = true;
@@ -220,6 +237,7 @@ export class DesktopHostBridge extends EventEmitter {
       cancel: () => {
         if (settled || cancelRequested) return false;
         cancelRequested = true;
+        preparation?.cancel();
         if (this.#pending.has(id)) return this.#requestCancellation(id);
         return true;
       },
@@ -444,6 +462,30 @@ export class DesktopHostBridge extends EventEmitter {
     }
     if (kill) context.child.kill();
     if (!this.#stopping) this.emit('unavailable', error.message);
+  }
+}
+
+function requestTooLarge(): DesktopHostError {
+  return new DesktopHostError('Desktop Host 请求超过 1 MiB 安全上限。请减少一次操作中的项目或分段数量。', 'REQUEST_TOO_LARGE');
+}
+
+function* restoreRequestChunks(id: string, rootPath: string, ids: string[]) {
+  let offset = 0;
+  while (offset < ids.length) {
+    const header = { rootPath, restoreRequestId: id, offset, total: ids.length };
+    // A preparation request has a UUID of the same serialized size as the final restore ID.
+    const empty = JSON.stringify({ id, method: 'trash.prepareRestore', params: { ...header, entryIds: [] } });
+    let bytes = Buffer.byteLength(empty);
+    let end = offset;
+    while (end < ids.length) {
+      const size = Buffer.byteLength(JSON.stringify(ids[end])) + (end === offset ? 0 : 1);
+      if (bytes + size > MAX_HOST_REQUEST_BYTES) break;
+      bytes += size;
+      end++;
+    }
+    if (end === offset) throw requestTooLarge();
+    yield { ...header, entryIds: ids.slice(offset, end) };
+    offset = end;
   }
 }
 

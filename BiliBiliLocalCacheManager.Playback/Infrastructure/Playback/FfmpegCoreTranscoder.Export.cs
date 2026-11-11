@@ -16,7 +16,20 @@ public sealed partial class FfmpegCoreTranscoder
             await using var source = new FileStream(plan.MediaFiles[0], FileMode.Open, FileAccess.Read, FileShare.Read,
                 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
             var openEndedMedia = ValidateMp4Boxes(source, cancellationToken);
-            await ValidateMp4StreamsAsync(source.Name, openEndedMedia, progress, cancellationToken).ConfigureAwait(false);
+            if (!await CanCopyMp4Async(source.Name, openEndedMedia, progress, cancellationToken).ConfigureAwait(false))
+            {
+                await RunAsync(async (reporter, token) =>
+                {
+                    var tracker = new ProgressTracker(reporter);
+                    var processor = FFMpegArguments.FromFileInput(source.Name)
+                        .OutputToFile(outputPath, false, options => options.WithCustomArgument("-map 0 -c copy -f mp4"));
+                    processor.NotifyOnProgress(time => tracker.ReportTime("Remuxing to MP4", time, "mux", plan.Duration));
+                    var succeeded = await processor.CancellableThrough(token).ProcessAsynchronously().ConfigureAwait(false);
+                    token.ThrowIfCancellationRequested();
+                    if (!succeeded) throw new IOException("FFmpeg could not copy all source streams into an MP4 container.");
+                }, progress, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             await using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                 1024 * 1024, FileOptions.Asynchronous);
             var buffer = new byte[1024 * 1024];
@@ -45,11 +58,12 @@ public sealed partial class FfmpegCoreTranscoder
         throw new IOException("This media layout cannot be exported reliably.");
     }
 
-    private static async Task ValidateMp4StreamsAsync(string path, bool openEndedMedia, IProgress<PlaybackPreparationProgress>? progress,
+    private static async Task<bool> CanCopyMp4Async(string path, bool openEndedMedia, IProgress<PlaybackPreparationProgress>? progress,
         CancellationToken cancellationToken)
     {
         try
         {
+            var canCopy = false;
             await RunAsync(async (reporter, token) =>
             {
                 var analysis = await FFProbe.AnalyseAsync(path, cancellationToken: token).ConfigureAwait(false);
@@ -59,8 +73,14 @@ public sealed partial class FfmpegCoreTranscoder
                     throw new InvalidDataException("The MP4 contains no readable audio or video stream.");
                 if (openEndedMedia)
                     await VerifyOpenEndedMediaPacketsAsync(path, reporter, token).ConfigureAwait(false);
+                // MOV, MP4 and 3GP share the same demuxer alias list. Unrecognized brands
+                // (and older brandless files) must pass through the actual MP4 muxer.
+                canCopy = analysis.Format.Tags?.GetValueOrDefault("major_brand") is
+                    "isom" or "iso2" or "iso3" or "iso4" or "iso5" or "iso6" or "iso7" or "iso8" or "iso9"
+                    or "mp41" or "mp42" or "avc1" or "dash" or "M4V " or "M4A ";
                 reporter.Report(new PlaybackPreparationProgress("MP4 streams verified", 100, TimeSpan.Zero, null, Phase: "probe"));
             }, progress, cancellationToken).ConfigureAwait(false);
+            return canCopy;
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not InvalidDataException)
         {

@@ -426,17 +426,16 @@ export function App() {
   }, [detailsOffset, focusedItem, indexBinding?.indexToken, invalidateIndex, notify]);
 
   const persistSettings = useCallback(async (patch: Partial<AppSettings>) => {
-    if (!canSaveSettings) return false;
-    if (!Object.keys(patch).length) return true;
+    if (!canSaveSettings) return null;
+    if (!Object.keys(patch).length) return settings;
     try {
-      await cacheManager.updateSettings(patch);
-      return true;
+      return await cacheManager.updateSettings(patch);
     } catch (error) {
       if (errorCode(error) !== 'settings_read_only') throw error;
       setCanSaveSettings(false);
-      return false;
+      return null;
     }
-  }, [canSaveSettings]);
+  }, [canSaveSettings, settings]);
 
   const browse = useCallback(async () => {
     const completed = await run('正在验证缓存目录…', async () => {
@@ -451,15 +450,15 @@ export function App() {
         pageSize: DEFAULT_CACHE_PAGE_SIZE,
       });
       invalidateIndex();
-      const persisted = await persistSettings({ rootPath: normalizedRootPath, includeIncomplete: settings.includeIncomplete });
-      return { result, rootPath: normalizedRootPath, sessionOnly: !persisted };
+      const saved = await persistSettings({ rootPath: normalizedRootPath, includeIncomplete: settings.includeIncomplete });
+      return { result, rootPath: saved?.rememberRootPath ? saved.rootPath : normalizedRootPath, saved };
     });
     if (!completed) return;
-    setSettings(current => ({ ...current, rootPath: completed.rootPath }));
+    setSettings(current => ({ ...(completed.saved ?? current), ...libraryEdits.current, rootPath: completed.rootPath }));
     setDraftEdits(({ rootPath: _previousRoot, ...rest }) => rest);
     setUndoDeleteBatch(null);
     invalidateRootViews();
-    const prefix = completed.sessionOnly ? '设置文件只读，所选目录仅在本次会话使用。' : '';
+    const prefix = completed.saved ? '' : '设置文件只读，所选目录仅在本次会话使用。';
     applyScanResult(completed.rootPath, settings.includeIncomplete, completed.result, prefix);
   }, [applyScanResult, invalidateIndex, invalidateRootViews, persistSettings, run, settings.includeIncomplete, settings.rootPath]);
 
@@ -712,10 +711,11 @@ export function App() {
 
     const completed = await run('正在撤销删除…', async () => {
       const { result: restoreResult, scanResult } = await restoreAndRescan(rootPath, batch.entryIds, settings.includeIncomplete);
+      const restored = new Set(restoreResult.restored);
       return {
         restoreResult,
         scanResult,
-        remainingEntryIds: batch.entryIds.filter(id => !restoreResult.restored.includes(id)),
+        remainingEntryIds: batch.entryIds.filter(id => !restored.has(id)),
       };
     });
     if (!completed) return;
@@ -731,7 +731,7 @@ export function App() {
   const refreshStorage = useCallback(async (announce = true) => {
     await inspect('正在统计存储…', async () => {
       try {
-        const value = await cacheManager.getStorage(activeRootPath || undefined);
+        const value = await cacheManager.getStorage(activeRootPath);
         bindStorage(storageKey, value);
         if (announce) notify('success', '存储统计已刷新。');
       } catch (error) {
@@ -774,7 +774,7 @@ export function App() {
     const rootPath = activeRootPath;
     const completed = await run('正在按策略清理转码缓存…', async () => {
       const result = await cacheManager.cleanupTranscodeCache();
-      return { result, snapshot: result.cancelled ? null : await refreshAfterMutation(() => cacheManager.getStorage(rootPath || undefined)) };
+      return { result, snapshot: result.cancelled ? null : await refreshAfterMutation(() => cacheManager.getStorage(rootPath)) };
     });
     if (!completed) return;
     if (completed.snapshot) bindStorage(storageKey, completed.snapshot);
@@ -797,7 +797,7 @@ export function App() {
         const completed = await run('正在清空转码缓存…', async () => {
           const result = await cacheManager.clearTranscodeCache();
           if (!result) return null;
-          return { result, snapshot: result.cancelled ? null : await refreshAfterMutation(() => cacheManager.getStorage(rootPath || undefined)) };
+          return { result, snapshot: result.cancelled ? null : await refreshAfterMutation(() => cacheManager.getStorage(rootPath)) };
         });
         if (!completed) return;
         if (completed.snapshot) bindStorage(storageKey, completed.snapshot);
@@ -1081,10 +1081,11 @@ export function App() {
                 })
                 : null;
               if (scanResult) invalidateIndex();
-              const sessionOnly = !await persistSettings(patch);
+              const saved = await persistSettings(patch);
               if ((rootChanged || scanBehaviorChanged) && !scanResult) invalidateIndex();
-              const changes = sessionOnly ? { rootPath: candidate.rootPath, includeIncomplete: candidate.includeIncomplete } : patch;
-              return { changes, scanResult, sessionOnly };
+              const rootPath = saved?.rememberRootPath ? saved.rootPath : candidate.rootPath;
+              const changes = saved ? { ...saved, rootPath } : { rootPath, includeIncomplete: candidate.includeIncomplete };
+              return { changes, scanResult, sessionOnly: !saved };
             });
             if (!completed) return;
             // The library's search fields remain editable during a settings write.
@@ -1095,15 +1096,15 @@ export function App() {
             libraryEdits.current = newerEdits;
             setSettings(current => ({ ...current, ...completed.changes, ...newerEdits }));
             setDraftEdits({});
-            if (rootChanged) {
+            if (completed.changes.rootPath !== activeRootPath) {
               setUndoDeleteBatch(null);
               invalidateRootViews();
             }
             const message = completed.sessionOnly ? '设置文件只读，目录和扫描选项仅在本次会话使用。' : '设置已保存。';
             if (completed.scanResult) {
-              applyScanResult(candidate.rootPath, candidate.includeIncomplete, completed.scanResult, message);
+              applyScanResult(completed.changes.rootPath, completed.changes.includeIncomplete, completed.scanResult, message);
             }
-            if (!candidate.rootPath) {
+            if (!completed.changes.rootPath) {
               setIndexBinding(null);
               replaceLibraryItems();
               notify('success', message + '缓存根目录为空，列表已清空。');

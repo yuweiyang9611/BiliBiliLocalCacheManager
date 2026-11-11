@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 using FFMpegCore;
@@ -142,6 +143,23 @@ public sealed class FfmpegIntegrationFixture : IDisposable
     public void Dispose()
     {
         TryDeleteDirectory(RootDirectory);
+    }
+
+    internal int[] GetPacketOffsets(string source) =>
+        RunFfprobe("-ignore_editlist", "1", "-show_packets", "-show_entries", "packet=pos:packet_side_data=", "-of", "csv=p=0", source)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => int.Parse(line.Split(',')[0], System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+
+    internal static byte[] WriteOpenEndedMediaBox(string source)
+    {
+        var bytes = File.ReadAllBytes(source);
+        var box = 0;
+        while (!bytes.AsSpan(box + 4, 4).SequenceEqual("mdat"u8))
+            box += checked((int)BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(box, 4)));
+        Assert.Equal(bytes.Length, box + (int)BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(box, 4)));
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(box, 4), 0);
+        File.WriteAllBytes(source, bytes);
+        return bytes;
     }
 
     internal void RunFfmpeg(params string[] arguments)

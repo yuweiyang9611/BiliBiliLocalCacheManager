@@ -15,7 +15,7 @@ internal static class LegacyLayoutPlanBuilder
         var mp4Files = SelectVariant(".mp4");
 
         IReadOnlyList<string> SelectVariant(string extension) => luaDirectoryNames
-            .Select(name => (Name: name, Files: PlaybackPathHelpers.GetFilesUnderDirectory(probe, name, extension)))
+            .Select(name => (Name: name, Files: PlaybackPathHelpers.GetCompleteLegacyFragments(probe, name, extension)))
             .Where(candidate => candidate.Files.Count > 0)
             .OrderByDescending(candidate => string.Equals(candidate.Name, segment.TypeTag, StringComparison.OrdinalIgnoreCase))
             .ThenByDescending(candidate => int.TryParse(candidate.Name.AsSpan(candidate.Name.LastIndexOf('.') + 1), out var quality)

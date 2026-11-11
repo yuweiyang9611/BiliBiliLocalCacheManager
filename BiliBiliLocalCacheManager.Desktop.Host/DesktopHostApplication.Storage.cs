@@ -18,7 +18,7 @@ internal sealed partial class DesktopHostApplication
         var store = new PlaybackArtifactStore(_artifactStore.RootDirectory, activity);
         var settings = _settingsStore.GetState().Settings;
         var cleanupOptions = CreateCleanupOptions(settings);
-        var rawRoot = parameters.OptionalString("rootPath") ?? settings.RootPath;
+        var rawRoot = parameters.OptionalString("rootPath", preserveEmpty: true) ?? settings.RootPath;
         string? root = null;
         var errors = new List<string>();
         if (!string.IsNullOrWhiteSpace(rawRoot))

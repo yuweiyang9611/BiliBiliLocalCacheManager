@@ -15,19 +15,29 @@ internal static class PlaybackPathHelpers
         return probe.ChildDirectoryNames.Any(name => name.StartsWith("lua.", StringComparison.OrdinalIgnoreCase));
     }
 
-    public static IReadOnlyList<string> GetFilesUnderDirectory(
+    public static IReadOnlyList<string> GetCompleteLegacyFragments(
         CachePlaybackProbe probe,
         string childDirectoryName,
         string extension)
     {
-        return probe.NestedFiles
+        var files = probe.NestedFiles
             .Where(path =>
                 string.Equals(Path.GetExtension(path), extension, StringComparison.OrdinalIgnoreCase) &&
-                RelativePathStartsWith(path, probe.SegmentDirectory, childDirectoryName) &&
-                IsNonEmptyFile(path))
-            .OrderBy(path => ExtractNumericStem(path))
+                RelativePathStartsWith(path, probe.SegmentDirectory, childDirectoryName))
+            .OrderBy(path => ExtractNumericStem(path) ?? int.MaxValue)
             .ThenBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
+        int? previous = null;
+        foreach (var path in files)
+        {
+            if (!IsNonEmptyFile(path)) return [];
+            if (ExtractNumericStem(path) is not { } number) continue;
+            // Legacy fragment numbering starts at zero or one. A gap or repeated number
+            // makes the whole quality unusable; dropping a bad fragment shortens the page.
+            if (previous is null ? number is not (0 or 1) : number != (long)previous.Value + 1) return [];
+            previous = number;
+        }
+        return files;
     }
 
     public static IReadOnlyList<string> GetQualityDirectories(CachePlaybackProbe probe)
@@ -114,10 +124,11 @@ internal static class PlaybackPathHelpers
         return string.Equals(firstPart, childDirectoryName, StringComparison.Ordinal);
     }
 
-    private static int ExtractNumericStem(string filePath)
+    private static int? ExtractNumericStem(string filePath)
     {
         var stem = Path.GetFileNameWithoutExtension(filePath);
-        return int.TryParse(stem, out var number) ? number : int.MaxValue;
+        return int.TryParse(stem, System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var number) ? number : null;
     }
 
     private static int ParseNumber(string? value)

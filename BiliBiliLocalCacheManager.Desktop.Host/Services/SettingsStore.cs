@@ -148,6 +148,9 @@ internal sealed class SettingsStore
         if (!PlaybackArtifactCleanupOptions.IsValidMaxSizeGigabytes(settings.TranscodeCacheMaxSizeGigabytes))
             settings.TranscodeCacheMaxSizeGigabytes = defaults.TranscodeCacheMaxSizeGigabytes;
         Normalize(settings);
+        // A future string field may be readable as JSON but exceed the desktop v3 wire limit.
+        if (settings.Keyword.Length > 500) settings.Keyword = defaults.Keyword;
+        if (settings.RootPath.Length > 32_768) settings.RootPath = defaults.RootPath;
         return settings;
     }
 
@@ -224,7 +227,7 @@ internal sealed class SettingsStore
             patch = nested;
         }
 
-        settings.RootPath = patch.OptionalString("rootPath") ?? settings.RootPath;
+        settings.RootPath = patch.OptionalString("rootPath", preserveEmpty: true) ?? settings.RootPath;
         settings.RememberRootPath =
             patch.OptionalBoolean("rememberRootPath") ?? settings.RememberRootPath;
         settings.ScanOnStartup =

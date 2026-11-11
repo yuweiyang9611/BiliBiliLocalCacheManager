@@ -299,6 +299,19 @@ describe('IPC cancellable request tracking', () => {
     expect((await settled).every((result) => result.status === 'rejected')).toBe(true);
   });
 
+  it('preserves an explicitly cleared storage root through IPC', async () => {
+    const fake = createDeferredBridge();
+    unregister = registerIpc(fake.bridge, () => null);
+    const event = trustedEvent(310);
+    const response = invoke(channels.storageGet, event, '');
+    fake.pending.get(fake.calls[0].id)!.resolve({
+      originalCache: { bytes: 0, itemCount: 0 }, transcodeCache: { bytes: 0, itemCount: 0 },
+      trash: { bytes: 0, itemCount: 0 }, totalBytes: 0,
+    });
+    await response;
+    expect(fake.calls[0]).toMatchObject({ method: 'storage.get', params: { rootPath: '' } });
+  });
+
   it('cancels only active cache.details work through the scoped channel', async () => {
     const fake = createDeferredBridge();
     unregister = registerIpc(fake.bridge, () => null);

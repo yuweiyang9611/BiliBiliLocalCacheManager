@@ -17,7 +17,7 @@ internal static class JsonElementExtensions
         return property.GetString()!.Trim();
     }
 
-    public static string? OptionalString(this JsonElement value, string propertyName)
+    public static string? OptionalString(this JsonElement value, string propertyName, bool preserveEmpty = false)
     {
         if (!value.TryGetPropertyIgnoreCase(propertyName, out var property) ||
             property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
@@ -31,7 +31,7 @@ internal static class JsonElementExtensions
         }
 
         var text = property.GetString()?.Trim();
-        return string.IsNullOrEmpty(text) ? null : text;
+        return !preserveEmpty && string.IsNullOrEmpty(text) ? null : text;
     }
 
     public static bool? OptionalBoolean(this JsonElement value, string propertyName)

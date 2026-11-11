@@ -58,6 +58,30 @@ public sealed partial class DesktopHostContractTests
         Assert.False(capabilities.GetProperty("nativeWayland").GetBoolean());
     }
 
+    [Theory]
+    [InlineData(500, false)]
+    [InlineData(501, false)]
+    [InlineData(500, true)]
+    public async Task FutureInitialState_UsesWireCompatibleFieldsAndPreservesFile(int keywordLength, bool oversizedRoot)
+    {
+        using var workspace = new HostTestWorkspace();
+        var keyword = new string('词', keywordLength);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            SchemaVersion = 3, Keyword = keyword, MatchMode = "new-mode",
+            RootPath = oversizedRoot ? new string('r', 32_769) : workspace.CacheRoot,
+            IncludePartName = false
+        });
+        File.WriteAllBytes(workspace.SettingsPath, bytes);
+        var state = await DispatchAsync(workspace.CreateApplication(), "initialState", "{}");
+        Assert.False(state.GetProperty("settingsState").GetProperty("canSave").GetBoolean());
+        var settings = state.GetProperty("settings");
+        Assert.Equal(keywordLength <= 500 ? keyword : "", settings.GetProperty("keyword").GetString());
+        Assert.Equal(oversizedRoot ? "" : workspace.CacheRoot, settings.GetProperty("rootPath").GetString());
+        Assert.False(settings.GetProperty("includePartName").GetBoolean());
+        Assert.Equal(bytes, File.ReadAllBytes(workspace.SettingsPath));
+    }
+
     [Fact]
     public async Task InitialState_ReportsSchemaOneMigrationWithoutSavingIt()
     {
@@ -87,6 +111,21 @@ public sealed partial class DesktopHostContractTests
 
         using var persisted = JsonDocument.Parse(File.ReadAllBytes(workspace.SettingsPath));
         Assert.Equal(1, persisted.RootElement.GetProperty("SchemaVersion").GetInt32());
+    }
+
+    [Fact]
+    public async Task SettingsUpdate_ClearsRememberedRootAfterReopening()
+    {
+        using var workspace = new HostTestWorkspace();
+        var app = workspace.CreateApplication();
+        await DispatchAsync(app, "settings.update", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+        var unchanged = await DispatchAsync(app, "settings.update", """{"scanOnStartup":true}""");
+        Assert.Equal(workspace.CacheRoot, unchanged.GetProperty("rootPath").GetString());
+
+        var cleared = await DispatchAsync(app, "settings.update", """{"rootPath":""}""");
+        Assert.Equal("", cleared.GetProperty("rootPath").GetString());
+        var reopened = await DispatchAsync(workspace.CreateApplication(), "initialState", "{}");
+        Assert.Equal("", reopened.GetProperty("settings").GetProperty("rootPath").GetString());
     }
 
     [Fact]
@@ -593,6 +632,23 @@ public sealed partial class DesktopHostContractTests
         Assert.Equal(0, failure.GetProperty("exportedCount").GetInt32());
         Assert.Single(failure.GetProperty("failures").EnumerateArray());
         Assert.Empty(Directory.EnumerateFileSystemEntries(exportParent));
+    }
+
+    [Fact]
+    public async Task StorageGet_ExplicitEmptyRootMeasuresOnlyGlobalArtifacts()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(123, "Remembered cache");
+        var application = workspace.CreateApplication();
+        await DispatchAsync(application, "settings.update", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot }));
+
+        var remembered = await DispatchAsync(application, "storage.get", "{}");
+        Assert.True(remembered.GetProperty("originalCache").GetProperty("bytes").GetInt64() > 0);
+
+        var cleared = await DispatchAsync(application, "storage.get", """{"rootPath":""}""");
+        Assert.Equal(0, cleared.GetProperty("originalCache").GetProperty("bytes").GetInt64());
+        Assert.Equal(0, cleared.GetProperty("trash").GetProperty("itemCount").GetInt32());
+        Assert.Equal(workspace.TranscodeRoot, cleared.GetProperty("transcodeCache").GetProperty("path").GetString());
     }
 
     [Fact]

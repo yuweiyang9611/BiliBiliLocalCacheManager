@@ -24,6 +24,7 @@ import type {
 import {
   DESKTOP_HOST_PROTOCOL_VERSION,
   MAXIMUM_CACHE_PAGE_SIZE,
+  MAXIMUM_SEARCH_KEYWORD_LENGTH,
 } from '../shared/contracts';
 import { isRecord } from './protocol';
 import { boundedString, booleanValue, boundedInteger } from './ipc-validation';
@@ -278,7 +279,7 @@ function appSettings(value: unknown): AppSettings {
     rememberRootPath: boolean(source.rememberRootPath, 'initialState.settings.rememberRootPath'),
     scanOnStartup: boolean(source.scanOnStartup, 'initialState.settings.scanOnStartup'),
     includeIncomplete: boolean(source.includeIncomplete, 'initialState.settings.includeIncomplete'),
-    keyword: string(source.keyword, 'initialState.settings.keyword', 500),
+    keyword: string(source.keyword, 'initialState.settings.keyword', MAXIMUM_SEARCH_KEYWORD_LENGTH),
     splitKeywords: boolean(source.splitKeywords, 'initialState.settings.splitKeywords'),
     anyKeywords: boolean(source.anyKeywords, 'initialState.settings.anyKeywords'),
     includePartName: boolean(source.includePartName, 'initialState.settings.includePartName'),

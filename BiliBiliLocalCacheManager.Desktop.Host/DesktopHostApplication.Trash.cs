@@ -132,9 +132,8 @@ internal sealed partial class DesktopHostApplication
             parameters.TryGetProperty("confirmationText", out var text) &&
             text.ValueKind == JsonValueKind.String && text.GetString() == "永久删除";
 
-    private static void ValidateTrashMutationResponseBudget(IEnumerable<string> entryIds)
+    private static long ValidateTrashMutationResponseBudget(IEnumerable<string> entryIds, long maximumBytes = 0)
     {
-        long maximumBytes = 0;
         foreach (var id in entryIds)
         {
             ValidateTrashWirePath(id);
@@ -143,6 +142,7 @@ internal sealed partial class DesktopHostApplication
             if (maximumBytes > 48L * 1024 * 1024)
                 throw new RpcException("invalid_params", "The selected trash operation is too large to report safely. Select a smaller batch.");
         }
+        return maximumBytes;
     }
 
     private async Task<object> ListTrashAsync(
@@ -164,7 +164,10 @@ internal sealed partial class DesktopHostApplication
         CancellationToken cancellationToken)
     {
         var root = ResolveRequiredRoot(parameters, _settingsStore.GetState().Settings);
-        var entryIds = ParseRequiredStringArray(parameters, "entryIds", maximumCount: 20_000)
+        var requested = parameters.OptionalInt32("preparedCount") is { } preparedCount
+            ? TakePreparedTrashRestore(root, requestId, preparedCount, parameters)
+            : ParseRequiredStringArray(parameters, "entryIds", maximumCount: 20_000);
+        var entryIds = requested
             .Distinct(PathComparer)
             .ToArray();
         ValidateTrashMutationResponseBudget(entryIds);
