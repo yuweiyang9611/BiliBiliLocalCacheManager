@@ -191,8 +191,9 @@ else {
 
 $dotnetVersion = [string](& dotnet --version)
 Assert-NativeCommandSucceeded "dotnet --version"
-if ($dotnetVersion.Trim() -ne "10.0.400") {
-    throw "Release builds require .NET SDK 10.0.400; found $($dotnetVersion.Trim())."
+$dotnetMajor = 0
+if (-not [int]::TryParse(($dotnetVersion.Trim() -split '\.')[0], [ref]$dotnetMajor) -or $dotnetMajor -lt 10) {
+    throw "Release builds require .NET SDK 10 or later; found $($dotnetVersion.Trim())."
 }
 
 $nodeVersion = [string](& node --version)
