@@ -9,6 +9,20 @@ namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 
 public sealed partial class DesktopHostContractTests
 {
+    // A scan reaches the cache manager through Task.Run, so it starts only when a thread-pool thread is free.
+    // Earlier tests in this class each start an FFmpeg prewarm. On Windows without FFmpeg installed those hold
+    // four pool threads while the bundle downloads, and the scan waits for the pool to grow. Five seconds was
+    // not always enough for that on CI.
+    private static readonly TimeSpan ScanWaitTimeout = TimeSpan.FromSeconds(30);
+
+    private static async Task WaitForScanToStartAsync(BlockingCacheManager manager, Task scan)
+    {
+        var started = manager.Started.Task;
+        if (await Task.WhenAny(started, scan).WaitAsync(ScanWaitTimeout) == started) return;
+        await scan; // The scan ended first: report its own failure instead of a timeout.
+        Assert.Fail("The scan completed without calling the cache manager.");
+    }
+
     [Fact]
     public async Task IndexBuildGate_SerializesScansAndCancelsQueuedWorkWithoutRebuilding()
     {
@@ -18,14 +32,14 @@ public sealed partial class DesktopHostContractTests
         var app = new DesktopHostApplication(cacheManager: manager);
         var parameters = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot });
         var first = DispatchAsync(app, "scan", parameters);
-        await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitForScanToStartAsync(manager, first);
         using var cancellation = new CancellationTokenSource();
         var second = DispatchAsync(app, "scan", parameters, cancellation.Token);
         Assert.Equal(1, manager.BuildCalls);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
         manager.Release.Set();
-        var result = await first.WaitAsync(TimeSpan.FromSeconds(5));
+        var result = await first.WaitAsync(ScanWaitTimeout);
         Assert.Equal(1, result.GetProperty("totalItems").GetInt32());
         Assert.Equal(1, manager.BuildCalls);
     }
@@ -37,7 +51,7 @@ public sealed partial class DesktopHostContractTests
         using var manager = new BlockingCacheManager();
         var app = new DesktopHostApplication(cacheManager: manager);
         var scan = DispatchAsync(app, "scan", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, includeIncomplete = false }));
-        await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitForScanToStartAsync(manager, scan);
         await DispatchAsync(app, "settings.update", "{\"includeIncomplete\":true}");
         manager.Release.Set();
         var stale = await Assert.ThrowsAsync<RpcException>(() => scan);
@@ -57,7 +71,7 @@ public sealed partial class DesktopHostContractTests
         var app = new DesktopHostApplication(cacheManager: manager);
         var parameters = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot });
         var scan = DispatchAsync(app, "scan", parameters);
-        await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitForScanToStartAsync(manager, scan);
         await DispatchAsync(app, "trash.move", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, avids = new[] { "101" } }));
         manager.Release.Set();
         var stale = await Assert.ThrowsAsync<RpcException>(() => scan);
