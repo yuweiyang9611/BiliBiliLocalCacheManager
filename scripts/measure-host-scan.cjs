@@ -18,7 +18,7 @@ const repository = path.resolve(__dirname, '..');
   assert.equal(previous.kind, 'development-electron-real-host-synthetic-cache');
   assert.equal(previous.data.syntheticMedia, true);
   const output = await fs.mkdtemp(path.join(artifacts, 'scan-measurement-'));
-  const hostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net10.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll');
+  const hostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net11.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll');
   await fs.access(hostPath);
   const report = { scope: 'Synthetic cache, sequential scans in one Host process; first sample is not an OS cold-cache guarantee.',
     source: { commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim(),

@@ -3,7 +3,7 @@ const path = require('node:path');
 const targetRid = process.env.DESKTOP_HOST_RID ||
   (process.platform === 'win32' ? 'win-x64' : 'linux-x64');
 const hostPublishDirectory = process.env.DESKTOP_HOST_PUBLISH_DIR ||
-  path.resolve(__dirname, '..', 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net10.0', targetRid, 'publish');
+  path.resolve(__dirname, '..', 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net11.0', targetRid, 'publish');
 
 async function applyStrictElectronFuses(context) {
   const { flipFuses, FuseVersion, FuseV1Options } = await import('@electron/fuses');

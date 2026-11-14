@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file.
 - Preserve explicit directory clears across restarts and session-only storage reads. Keep search text within the desktop protocol limit when editing or reading newer settings.
 - Transfer oversized trash restore selections in bounded messages and restore the confirmed set in a single operation, including Ctrl+Z.
 - Stop pinning the .NET SDK. Remove `global.json`, install the latest .NET 10 SDK in CI and Release, and accept any SDK 10 or later in release builds.
+- Move to .NET 11 and C# 15. Target `net11.0`, install the latest .NET 11 SDK (`11.0.x`) in CI and Release, and require SDK 11 or later in release builds. The self-contained Desktop Host now ships the .NET 11 runtime.
 
 - Isolate per-part identity failures during scans, report ambiguous AV directory names, and support searching the displayed AV number.
 - Select a playable candidate from the requested page, concatenate only one quality's fragments, and fall back to complete DASH media when legacy directories are empty. Validate single-file MP4 exports before publishing a batch.

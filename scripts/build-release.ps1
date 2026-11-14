@@ -192,8 +192,8 @@ else {
 $dotnetVersion = [string](& dotnet --version)
 Assert-NativeCommandSucceeded "dotnet --version"
 $dotnetMajor = 0
-if (-not [int]::TryParse(($dotnetVersion.Trim() -split '\.')[0], [ref]$dotnetMajor) -or $dotnetMajor -lt 10) {
-    throw "Release builds require .NET SDK 10 or later; found $($dotnetVersion.Trim())."
+if (-not [int]::TryParse(($dotnetVersion.Trim() -split '\.')[0], [ref]$dotnetMajor) -or $dotnetMajor -lt 11) {
+    throw "Release builds require .NET SDK 11 or later; found $($dotnetVersion.Trim())."
 }
 
 $nodeVersion = [string](& node --version)
@@ -248,7 +248,7 @@ if (Test-Path -LiteralPath $desktopReleasePath) {
     Remove-Item -LiteralPath $desktopReleasePath -Recurse -Force
 }
 
-$hostPublishPath = Join-Path $repositoryRoot "BiliBiliLocalCacheManager.Desktop.Host/bin/Release/net10.0/publish"
+$hostPublishPath = Join-Path $repositoryRoot "BiliBiliLocalCacheManager.Desktop.Host/bin/Release/net11.0/publish"
 if (Test-Path -LiteralPath $hostPublishPath) {
     Remove-Item -LiteralPath $hostPublishPath -Recurse -Force
 }

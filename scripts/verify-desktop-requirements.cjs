@@ -25,7 +25,7 @@ assert(inside(artifactRoot, output), 'Output must be a child of repository artif
 const fixtureRoot = path.join(output, 'isolated-fixture');
 const cacheRoot = path.join(fixtureRoot, 'cache');
 const settingsPath = path.join(fixtureRoot, 'settings.json');
-const hostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net10.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll');
+const hostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net11.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll');
 const mainPath = path.join(desktop, 'dist-electron', 'main.cjs');
 const report = {
   kind: 'development-electron-real-host-synthetic-cache',
