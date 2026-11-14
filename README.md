@@ -1,6 +1,6 @@
 # BiliBiliLocalCacheManager
 
-用于扫描、搜索、播放、导出和安全管理本地哔哩哔哩缓存的桌面应用。项目基于 Electron 44、内置 Chromium 和 React/TypeScript；桌面界面通过受限的 IPC 与独立 .NET 10 Host 通信，不在渲染进程中开放 Node.js。不再提供或维护独立 CLI，历史已发布产物保留。
+用于扫描、搜索、播放、导出和安全管理本地哔哩哔哩缓存的桌面应用。项目基于 Electron 44、内置 Chromium 和 React/TypeScript；桌面界面通过受限的 IPC 与独立 .NET 11 Host 通信，不在渲染进程中开放 Node.js。不再提供或维护独立 CLI，历史已发布产物保留。
 
 ## 需求与规划
 
@@ -23,7 +23,7 @@
 
 ## 桌面架构
 
-Electron 44 自带运行所需的 Chromium，不依赖系统浏览器。桌面包还携带针对目标平台自包含发布的 .NET 10 Host，因此最终用户不需要安装 Node.js 或 .NET Runtime。
+Electron 44 自带运行所需的 Chromium，不依赖系统浏览器。桌面包还携带针对目标平台自包含发布的 .NET 11 Host，因此最终用户不需要安装 Node.js 或 .NET Runtime。
 
 安全边界如下：
 
@@ -120,7 +120,7 @@ Windows 使用仓库 `ffmpeg-bundle.json` 指定并校验的 FFmpeg bundle。Lin
 
 开发环境：
 
-- .NET SDK 10 或更高版本。仓库不锁定 SDK 版本，构建使用本机已安装的最新 SDK
+- .NET SDK 11 或更高版本。仓库不锁定 SDK 版本，构建使用本机已安装的最新 SDK
 - Node.js 24 与仓库锁定的 npm 依赖
 
 验证 .NET 与 Electron：
@@ -167,7 +167,7 @@ $env:BILIBILI_LOCAL_CACHE_MANAGER_FFMPEG_ARCHIVE_PATH = $archive
 dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj --configuration Release --filter "Category=FFmpegIntegration"
 ```
 
-`.github/workflows/ci.yml` 使用最新的 .NET 10 SDK（`10.0.x`）与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。自检会加载真实渲染器、读取隔离设置、通过 Preload/IPC 调用内置 Host，并扫描一条临时缓存夹具。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。稳定的 `ci-required` 汇总检查只有在隐私检查、完整构建/测试/打包矩阵和发行版安装包自检全部成功时才通过。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查仍需人工完成；转正流程会自动核验已提交的验收记录及安装包校验值，缺少必测记录时保持预览状态。
+`.github/workflows/ci.yml` 使用最新的 .NET 11 SDK（`11.0.x`）与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。自检会加载真实渲染器、读取隔离设置、通过 Preload/IPC 调用内置 Host，并扫描一条临时缓存夹具。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。稳定的 `ci-required` 汇总检查只有在隐私检查、完整构建/测试/打包矩阵和发行版安装包自检全部成功时才通过。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查仍需人工完成；转正流程会自动核验已提交的验收记录及安装包校验值，缺少必测记录时保持预览状态。
 
 ## 下载与发布
 

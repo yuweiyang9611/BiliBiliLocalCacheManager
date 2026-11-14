@@ -16,7 +16,7 @@ const { repository, desktop, projectRequire, createOutput, electronExecutable, e
   let application, page;
   try {
   await fs.mkdir(root, { recursive: true });
-  const hostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net10.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll');
+  const hostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net11.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll');
   await fs.access(hostPath);
   await fs.access(path.join(desktop, 'dist-electron', 'main.cjs'));
   for (let page = 1; page <= 2; page++) {

@@ -21,7 +21,7 @@ const { repository, createOutput, removeFixture } = require('./desktop-e2e-suppo
       time_update_stamp: 1750000000000, time_create_stamp: 1750000000000, avid, bvid: `BV${avid}`, cover: 'fixture',
       type_tag: '80', owner_name: 'Fixture', page_data: { cid: avid * 10 + page, page, part: `Part ${page}`, from: 'local' } }));
   }
-  const child = spawn('dotnet', [path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host/bin/Release/net10.0/BiliBiliLocalCacheManager.Desktop.Host.dll')],
+  const child = spawn('dotnet', [path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host/bin/Release/net11.0/BiliBiliLocalCacheManager.Desktop.Host.dll')],
     { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env,
       BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH: path.join(fixture, 'settings.json'),
       BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT: path.join(fixture, 'transcode') } });
