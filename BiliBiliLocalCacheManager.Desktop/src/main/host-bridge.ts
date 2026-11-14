@@ -517,8 +517,8 @@ function resolveHostLaunch(): { command: string; args: string[]; hostPath: strin
     : configuredPath
       ? [path.resolve(configuredPath)]
       : [
-          path.resolve(app.getAppPath(), '..', 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Debug', 'net10.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll'),
-          path.resolve(app.getAppPath(), '..', 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net10.0', 'publish', 'BiliBiliLocalCacheManager.Desktop.Host.dll'),
+          path.resolve(app.getAppPath(), '..', 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Debug', 'net11.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll'),
+          path.resolve(app.getAppPath(), '..', 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net11.0', 'publish', 'BiliBiliLocalCacheManager.Desktop.Host.dll'),
         ];
   const hostPath = candidates.find(existsSync);
   if (!hostPath) {
