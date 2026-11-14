@@ -59,8 +59,7 @@ internal sealed partial class DesktopHostApplication
     private readonly PlaybackContracts.IPlaybackLauncher _desktopPlaybackLauncher;
     private readonly PlaybackContracts.IFfmpegDiagnosticsProvider _ffmpegDiagnosticsProvider =
         new BundledFfmpegDiagnosticsProvider();
-    private readonly PlaybackContracts.IFfmpegPrewarmService _ffmpegPrewarmService =
-        new BundledFfmpegPrewarmService();
+    private readonly PlaybackContracts.IFfmpegPrewarmService _ffmpegPrewarmService;
     private readonly SettingsStore _settingsStore;
     private readonly DiagnosticEventRecorder _eventRecorder = new();
     private readonly DiagnosticExporter _diagnosticExporter;
@@ -83,11 +82,13 @@ internal sealed partial class DesktopHostApplication
         PlaybackContracts.IPlaybackLauncher? playbackLauncher = null,
         CoreContracts.ICacheTrashService? trashService = null,
         CoreContracts.ICacheManager? cacheManager = null,
-        PlaybackContracts.ICacheExportMaterializationService? exportService = null)
+        PlaybackContracts.ICacheExportMaterializationService? exportService = null,
+        PlaybackContracts.IFfmpegPrewarmService? ffmpegPrewarmService = null)
     {
         _cacheManager = cacheManager ?? new CacheManager();
         _desktopPlaybackLauncher = playbackLauncher ?? new SystemPlaybackLauncher();
         _trashService = trashService ?? new FileSystemCacheTrashService();
+        _ffmpegPrewarmService = ffmpegPrewarmService ?? new BundledFfmpegPrewarmService();
         var settingsPath = Environment.GetEnvironmentVariable(
             "BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH");
         var transcodeCacheRoot = Environment.GetEnvironmentVariable(

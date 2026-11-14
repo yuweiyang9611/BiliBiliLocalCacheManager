@@ -58,6 +58,28 @@ public sealed partial class DesktopHostContractTests
         Assert.False(capabilities.GetProperty("nativeWayland").GetBoolean());
     }
 
+    [Fact]
+    public async Task InitialState_PrewarmsThroughTheInjectedServiceWithoutBootstrappingFfmpeg()
+    {
+        using var workspace = new HostTestWorkspace();
+        var application = workspace.CreateApplication();
+
+        await DispatchAsync(application, "initialState", "{}");
+        await DispatchAsync(application, "initialState", "{}");
+
+        // The prewarm is queued on the thread pool, so wait for it before judging what it reached.
+        var started = workspace.FfmpegPrewarm.Started;
+        Assert.True(
+            await Task.WhenAny(started, Task.Delay(TimeSpan.FromSeconds(30))) == started,
+            "initialState did not run the prewarm service injected by the test workspace, " +
+            "so it started the bundled FFmpeg bootstrap instead.");
+        Assert.Equal(1, workspace.FfmpegPrewarm.Calls);
+        // FFmpeg state is process-wide, so this also fails when an earlier host test bootstrapped real FFmpeg.
+        Assert.False(
+            new BundledFfmpegDiagnosticsProvider().GetSnapshot().IsInitialized,
+            "A host test initialised real FFmpeg inside the test process.");
+    }
+
     [Theory]
     [InlineData(500, false)]
     [InlineData(501, false)]
@@ -1163,6 +1185,26 @@ public sealed partial class DesktopHostContractTests
         Assert.True(reports > 0);
     }
 
+    // Stands in for the bundled prewarm, which bootstraps real FFmpeg and downloads it on a clean Windows machine.
+    private sealed class RecordingFfmpegPrewarm : BiliBiliLocalCacheManager.Playback.Contracts.IFfmpegPrewarmService
+    {
+        private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _calls;
+
+        public int Calls => Volatile.Read(ref _calls);
+
+        public Task Started => _started.Task;
+
+        public Task<BiliBiliLocalCacheManager.Playback.Contracts.FfmpegPrewarmResult> PrewarmAsync(
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _calls);
+            _started.TrySetResult();
+            return Task.FromResult(
+                BiliBiliLocalCacheManager.Playback.Contracts.FfmpegPrewarmResult.Ok("Skipped in host tests."));
+        }
+    }
+
     private static IReadOnlyList<JsonElement> ParseLines(string output) =>
         output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(line =>
@@ -1208,10 +1250,13 @@ public sealed partial class DesktopHostContractTests
 
         public string SettingsPath { get; }
 
-        public DesktopHostApplication CreateApplication() => new();
+        public RecordingFfmpegPrewarm FfmpegPrewarm { get; } = new();
 
-        public DesktopHostApplication CreateCopyExportApplication() => new(exportService:
-            new CacheExportService(new PlaybackArtifactStore(TranscodeRoot), new FixtureCopyProcessor()));
+        public DesktopHostApplication CreateApplication() => new(ffmpegPrewarmService: FfmpegPrewarm);
+
+        public DesktopHostApplication CreateCopyExportApplication() => new(
+            exportService: new CacheExportService(new PlaybackArtifactStore(TranscodeRoot), new FixtureCopyProcessor()),
+            ffmpegPrewarmService: FfmpegPrewarm);
 
         public void CreateCache(long avid, string title, int segmentCount = 1, long? timestampOverride = null)
         {
