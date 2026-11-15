@@ -39,7 +39,7 @@ public sealed class PlaybackArtifactLockCancellationTests
             string? reportedStage = null;
             var stopwatch = Stopwatch.StartNew();
 
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => RunOnOwnThread(() =>
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => OwnThread.Run(() =>
                 store.GetOrCreate(
                     plan,
                     ".mp4",
@@ -136,7 +136,7 @@ public sealed class PlaybackArtifactLockCancellationTests
                 new[] { sourcePath });
 
             // This call parks in its producer while the test blocks below, so it must not wait for a pool thread.
-            var firstTask = RunOnOwnThread(() => store.GetOrCreate(plan, ".mp4", outputPath =>
+            var firstTask = OwnThread.Run(() => store.GetOrCreate(plan, ".mp4", outputPath =>
             {
                 producerEntered.Set();
                 Assert.True(releaseProducer.Wait(CoordinationTimeout));
@@ -152,7 +152,7 @@ public sealed class PlaybackArtifactLockCancellationTests
             var waitingProducerCalled = false;
             // This call blocks too, so it also gets a thread of its own. Its cancellation arrives on the thread pool,
             // and the test's own pool thread is free for that while it awaits.
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => RunOnOwnThread(() =>
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => OwnThread.Run(() =>
                 store.GetOrCreate(
                     plan,
                     ".mp4",
@@ -176,12 +176,6 @@ public sealed class PlaybackArtifactLockCancellationTests
             }
         }
     }
-
-    // Starts a store call on a thread of its own instead of the thread pool. Test bodies here run on pool threads;
-    // a call queued with Task.Run starts only when the pool has a free thread, which on a busy machine can take
-    // seconds, and while it blocks it holds that thread.
-    private static Task<T> RunOnOwnThread<T>(Func<T> call) =>
-        Task.Factory.StartNew(call, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
     private static CachePlaybackPlan CreatePlan(string root, string sourcePath)
     {

@@ -71,13 +71,15 @@ public sealed class BundledFfmpegBootstrapperTests
         using var heldGate = BundledFfmpegBootstrapper.EnterInitializationGate(CancellationToken.None);
         using var cancellationSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
 
-        var waitTask = Task.Run(() =>
+        // The wait blocks its thread, so it gets one of its own; see OwnThread. The bound only keeps a broken run
+        // from hanging.
+        var waitTask = OwnThread.Run(() =>
         {
             using var ignored = BundledFfmpegBootstrapper.EnterInitializationGate(cancellationSource.Token);
         });
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            waitTask.WaitAsync(TimeSpan.FromSeconds(5)));
+            waitTask.WaitAsync(TimeSpan.FromSeconds(30)));
     }
 
     [Fact]
