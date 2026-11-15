@@ -197,12 +197,22 @@ it('keeps results in memory and warns when persistence fails', async () => {
 
 it('serializes concurrent completions, bounds history, and expires old records', async () => {
   let now = Date.now();
+  // Fill the history to capacity from one real record rather than 100 start/finish pairs: each call saves the file
+  // with an fsync, and on Windows CI some 200 saves took longer than the 5 s test timeout.
+  const seed = new TaskHistoryStore(file, () => now);
+  await seed.start('seed', 'play', {});
+  await seed.finish('seed', 'play', { queued: 1, failures: [] });
+  const [record] = JSON.parse(await readFile(file, 'utf8')).entries;
+  await writeFile(file, JSON.stringify({ schemaVersion: 1,
+    entries: Array.from({ length: 100 }, (_, index) => ({ ...record, id: String(99 - index) })) }));
   const history = new TaskHistoryStore(file, () => now);
-  for (let index = 0; index < 103; index++) {
+  for (let index = 100; index < 103; index++) {
     await history.start(String(index), 'play', {});
     await history.finish(String(index), 'play', { queued: 1, failures: [] });
   }
-  expect((await history.snapshot()).entries).toHaveLength(100);
+  const entries = (await history.snapshot()).entries;
+  expect(entries).toHaveLength(100);
+  expect([entries[0].id, entries[99].id]).toEqual(['102', '3']);
   await Promise.all(['a', 'b'].map(id => history.start(id, 'play', {})));
   await Promise.all(['b', 'a'].map(id => history.finish(id, 'play', { queued: 2, failures: [] })));
   expect((await new TaskHistoryStore(file).snapshot()).entries.slice(0, 2)).toMatchObject([{ id: 'b', succeeded: 2 }, { id: 'a', succeeded: 2 }]);

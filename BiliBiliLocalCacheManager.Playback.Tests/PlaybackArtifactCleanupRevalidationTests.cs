@@ -5,6 +5,10 @@ namespace BiliBiliLocalCacheManager.Playback.Tests;
 
 public sealed class PlaybackArtifactCleanupRevalidationTests
 {
+    // Bounds the hand-offs between the test and the cleanup it parks. A passing run never comes near it; it only
+    // keeps a broken run from hanging.
+    private static readonly TimeSpan CoordinationTimeout = TimeSpan.FromSeconds(30);
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -33,7 +37,7 @@ public sealed class PlaybackArtifactCleanupRevalidationTests
             }
 
             candidateReady.Set();
-            allowCleanupToLock.Wait(TimeSpan.FromSeconds(5));
+            allowCleanupToLock.Wait(CoordinationTimeout);
         };
         var options = retentionCandidate
             ? new PlaybackArtifactCleanupOptions
@@ -48,10 +52,14 @@ public sealed class PlaybackArtifactCleanupRevalidationTests
                 CapacityEvictionGracePeriod = TimeSpan.FromMinutes(5)
             };
 
-        var cleanupTask = Task.Run(() => store.Cleanup(options));
+        // The cleanup parks in the hook while the test blocks below, so it must not wait for a pool thread.
+        var cleanupTask = OwnThread.Run(() => store.Cleanup(options));
         try
         {
-            Assert.True(candidateReady.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(
+                candidateReady.Wait(CoordinationTimeout),
+                $"The cleanup did not reach the candidate (task {cleanupTask.Status}). " +
+                $"{cleanupTask.Exception?.GetBaseException()}");
             var reused = new PlaybackArtifactStore(fixture.CacheRoot).GetOrCreate(
                 plan,
                 ".mp4",
@@ -63,7 +71,7 @@ public sealed class PlaybackArtifactCleanupRevalidationTests
             allowCleanupToLock.Set();
         }
 
-        var result = await cleanupTask.WaitAsync(TimeSpan.FromSeconds(5));
+        var result = await cleanupTask.WaitAsync(CoordinationTimeout);
 
         Assert.Equal(0, result.DeletedFileCount);
         Assert.Equal(32, result.RemainingBytes);
