@@ -52,5 +52,13 @@
     "vite": "8.3.5",
     "vitest": "4.1.12",
     "wait-on": "9.1.0"
+  },
+  "overrides": {
+    "@electron/universal": {
+      "minimatch@^9.0.3": "^11.0.8"
+    },
+    "app-builder-lib": {
+      "minimatch@^10.2.5": "^11.0.8"
+    }
   }
 }
