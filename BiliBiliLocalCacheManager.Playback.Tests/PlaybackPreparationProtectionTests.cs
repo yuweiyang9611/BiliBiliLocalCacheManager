@@ -4,6 +4,7 @@ namespace BiliBiliLocalCacheManager.Playback.Tests;
 
 public sealed class PlaybackPreparationProtectionTests : IDisposable
 {
+    private static readonly TimeSpan CoordinationTimeout = TimeSpan.FromSeconds(30);
     private readonly string _root = Path.Combine(Path.GetTempPath(), "blcm-preparation-" + Guid.NewGuid().ToString("N"));
 
     [Fact]
@@ -100,16 +101,44 @@ public sealed class PlaybackPreparationProtectionTests : IDisposable
     {
         var clock = new ManualClock();
         var store = new PlaybackArtifactStore(_root, timeProvider: clock);
-        await using var protection = new PlaybackPreparationProtection(store, timeProvider: clock);
+        var protection = new PlaybackPreparationProtection(store, timeProvider: clock);
         var path = Media(1);
         protection.Register(path);
         using var heldLock = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        var renewal = Task.Run(() => clock.Advance(TimeSpan.FromMinutes(1)));
-        await Task.Delay(100);
-        Assert.Null(await Task.Run(() => protection.Failure).WaitAsync(TimeSpan.FromSeconds(2)));
-        await protection.StopAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
-        await renewal.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.Null(protection.Failure);
+        var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.CrossProcessLockWaitStartedForTesting = () => waiting.TrySetResult();
+        var renewal = OwnThread.Run(() => clock.Advance(TimeSpan.FromMinutes(1)));
+        Task<Exception?>? stateRead = null;
+        Task? stopping = null;
+        try
+        {
+            var observed = await Task.WhenAny(waiting.Task, renewal).WaitAsync(CoordinationTimeout);
+            if (observed == renewal) await renewal;
+            Assert.Same(waiting.Task, observed);
+            Assert.False(renewal.IsCompleted);
+            stateRead = OwnThread.Run(() => protection.Failure);
+            Assert.Null(await stateRead.WaitAsync(CoordinationTimeout));
+            // StopAsync can block synchronously before returning its ValueTask if state access regresses.
+            stopping = OwnThread.Run(() => protection.StopAsync().AsTask().GetAwaiter().GetResult());
+            await stopping.WaitAsync(CoordinationTimeout);
+            await renewal.WaitAsync(CoordinationTimeout);
+            Assert.Null(protection.Failure);
+        }
+        finally
+        {
+            // Release the real lock before joining, including when cancellation has regressed.
+            heldLock.Dispose();
+            try
+            {
+                await Task.WhenAll(OwnThread.JoinAsync(renewal, CoordinationTimeout),
+                    OwnThread.JoinAsync(stateRead, CoordinationTimeout), OwnThread.JoinAsync(stopping, CoordinationTimeout));
+            }
+            finally
+            {
+                await OwnThread.Run(() => protection.DisposeAsync().AsTask().GetAwaiter().GetResult())
+                    .WaitAsync(CoordinationTimeout);
+            }
+        }
     }
 
     [Fact]
@@ -161,24 +190,52 @@ public sealed class PlaybackPreparationProtectionTests : IDisposable
         }
         private sealed class ManualTimer(ManualClock clock, TimerCallback callback, object? state, TimeSpan due, TimeSpan period) : ITimer
         {
+            private readonly object _sync = new();
             private DateTimeOffset _next = clock.GetUtcNow() + due;
             private TimeSpan _period = period;
-            public bool Disposed { get; private set; }
+            private bool _disposed;
+            private int _activeCallbacks;
+            private TaskCompletionSource? _idle;
+            public bool Disposed { get { lock (_sync) return _disposed; } }
             public bool Change(TimeSpan dueTime, TimeSpan nextPeriod)
             {
-                if (Disposed) return false;
-                _next = clock.GetUtcNow() + dueTime;
-                _period = nextPeriod;
-                return true;
+                lock (_sync)
+                {
+                    if (_disposed) return false;
+                    _next = clock.GetUtcNow() + dueTime;
+                    _period = nextPeriod;
+                    return true;
+                }
             }
             public void Tick()
             {
-                if (Disposed || clock.GetUtcNow() < _next) return;
-                _next = clock.GetUtcNow() + _period;
-                callback(state);
+                lock (_sync)
+                {
+                    if (_disposed || clock.GetUtcNow() < _next) return;
+                    _next = clock.GetUtcNow() + _period;
+                    if (_activeCallbacks++ == 0)
+                        _idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+                try { callback(state); }
+                finally
+                {
+                    lock (_sync)
+                    {
+                        if (--_activeCallbacks == 0) _idle!.TrySetResult();
+                    }
+                }
             }
-            public void Dispose() => Disposed = true;
-            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+            public void Dispose() { lock (_sync) _disposed = true; }
+            public ValueTask DisposeAsync()
+            {
+                // Like System.Threading.Timer, async disposal joins callbacks already in progress. This catches
+                // stopping in the wrong order: the callback's lock wait must be cancelled before it can be joined.
+                lock (_sync)
+                {
+                    _disposed = true;
+                    return _activeCallbacks == 0 ? ValueTask.CompletedTask : new ValueTask(_idle!.Task);
+                }
+            }
         }
     }
 }

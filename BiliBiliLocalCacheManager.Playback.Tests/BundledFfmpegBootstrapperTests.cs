@@ -7,6 +7,8 @@ namespace BiliBiliLocalCacheManager.Playback.Tests;
 
 public sealed class BundledFfmpegBootstrapperTests
 {
+    private static readonly TimeSpan CoordinationTimeout = TimeSpan.FromSeconds(30);
+
     [Fact]
     public void EmbeddedBundleManifest_ShouldUseExactVerifiedReleaseAsset()
     {
@@ -69,52 +71,63 @@ public sealed class BundledFfmpegBootstrapperTests
     public async Task InitializationGateWait_ShouldObserveCancellation()
     {
         using var heldGate = BundledFfmpegBootstrapper.EnterInitializationGate(CancellationToken.None);
-        using var cancellationSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        using var cancellationSource = new CancellationTokenSource();
 
-        // The wait blocks its thread, so it gets one of its own; see OwnThread. The bound only keeps a broken run
-        // from hanging.
-        var waitTask = OwnThread.Run(() =>
+        var waiter = OwnThread.Start(() =>
         {
             using var ignored = BundledFfmpegBootstrapper.EnterInitializationGate(cancellationSource.Token);
         });
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            waitTask.WaitAsync(TimeSpan.FromSeconds(30)));
+        try
+        {
+            OwnThread.WaitUntilBlocked(waiter, CoordinationTimeout);
+            cancellationSource.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                waiter.Completion.WaitAsync(CoordinationTimeout));
+        }
+        finally
+        {
+            cancellationSource.Cancel();
+            heldGate.Dispose();
+            await OwnThread.JoinAsync(waiter, CoordinationTimeout);
+        }
     }
 
     [Fact]
-    public void ProcessMutexWait_ShouldObserveCancellation()
+    public async Task ProcessMutexWait_ShouldObserveCancellation()
     {
         var mutexName = $@"Local\BiliBiliLocalCacheManager.FFmpegBootstrap.Tests.{Guid.NewGuid():N}";
         using var holderReady = new ManualResetEventSlim();
         using var releaseHolder = new ManualResetEventSlim();
-        var holderThread = new Thread(() =>
+        using var cancellationSource = new CancellationTokenSource();
+        var holder = OwnThread.Start(() =>
         {
             using var holderMutex = new Mutex(false, mutexName);
-            holderMutex.WaitOne();
-            holderReady.Set();
-            releaseHolder.Wait();
-            holderMutex.ReleaseMutex();
+            Assert.True(holderMutex.WaitOne(CoordinationTimeout));
+            try
+            {
+                holderReady.Set();
+                Assert.True(releaseHolder.Wait(CoordinationTimeout * 3));
+            }
+            finally { holderMutex.ReleaseMutex(); }
         });
-        holderThread.IsBackground = true;
-        holderThread.Start();
-
+        using var waitingMutex = new Mutex(false, mutexName);
         try
         {
-            Assert.True(holderReady.Wait(TimeSpan.FromSeconds(5)));
-            using var waitingMutex = new Mutex(false, mutexName);
-            using var cancellationSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
-
-            Assert.ThrowsAny<OperationCanceledException>(() =>
-                BundledFfmpegBootstrapper.WaitForProcessMutex(
-                    waitingMutex,
-                    TimeSpan.FromSeconds(5),
-                    cancellationSource.Token));
+            Assert.True(holderReady.Wait(CoordinationTimeout));
+            // Cancel only after a real mutex poll has timed out while the other thread still owns the lock.
+            var error = Assert.ThrowsAny<OperationCanceledException>(() =>
+            {
+                if (BundledFfmpegBootstrapper.WaitForProcessMutex(
+                    waitingMutex, CoordinationTimeout, cancellationSource.Token, cancellationSource.Cancel))
+                    waitingMutex.ReleaseMutex();
+            });
+            Assert.True(cancellationSource.IsCancellationRequested);
+            Assert.Equal(cancellationSource.Token, error.CancellationToken);
         }
         finally
         {
             releaseHolder.Set();
-            Assert.True(holderThread.Join(TimeSpan.FromSeconds(5)));
+            await OwnThread.JoinAsync(holder, CoordinationTimeout);
         }
     }
 

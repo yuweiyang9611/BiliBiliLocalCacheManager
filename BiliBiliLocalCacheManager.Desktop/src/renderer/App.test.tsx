@@ -61,7 +61,7 @@ const initial: InitialState = {
 
 function createCachePage(
   items: CacheEntry[] = initial.items,
-  overrides: Partial<CachePage> = {},
+  overrides: Partial<ScanResult> = {},
 ): ScanResult {
   return {
     indexToken,
@@ -266,6 +266,90 @@ describe('desktop renderer', () => {
 
   afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
+  it('distinguishes an unscanned directory from an empty scan and can include skipped incomplete caches', async () => {
+    vi.mocked(api.getInitialState).mockResolvedValue({ ...initial, items: [] });
+    vi.mocked(api.scan).mockResolvedValueOnce(createCachePage([], { skippedIncompleteEntries: 3 }))
+      .mockResolvedValueOnce(createCachePage([{ ...initialItem, isAllCompleted: false }]));
+    render(<App />);
+    const scan = await screen.findByRole('button', { name: '扫描当前目录' });
+    await waitFor(() => expect(scan).toBeEnabled());
+    expect(screen.getByRole('heading', { name: '尚未加载缓存' })).toBeInTheDocument();
+    fireEvent.click(scan);
+    expect(await screen.findByRole('heading', { name: '当前目录没有可显示的缓存' })).toBeInTheDocument();
+    expect(screen.getByText(/本次扫描跳过了 3 条未完成缓存/)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '未找到匹配缓存' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '包含未完成并扫描' }));
+    expect(await screen.findByLabelText('选择 测试缓存')).toBeVisible();
+    expect(api.scan).toHaveBeenLastCalledWith(expect.objectContaining({ includeIncomplete: true }));
+    expect(screen.getByLabelText('包含未完成缓存')).toBeChecked();
+  });
+
+  it.each([['failed', new Error('Scan failed')], ['cancelled', new IpcError('Cancelled', 'cancelled')]] as const)
+  ('keeps the previous empty index and scan mode when including incomplete caches is %s', async (_kind, error) => {
+    vi.mocked(api.scan).mockResolvedValueOnce(createCachePage([], { skippedIncompleteEntries: 3 }));
+    vi.mocked(api.search).mockResolvedValue(createCachePage([]));
+    await renderScannedLibrary();
+    const pending = deferred<ScanResult>();
+    vi.mocked(api.scan).mockReturnValueOnce(pending.promise);
+    fireEvent.click(screen.getByRole('button', { name: '包含未完成并扫描' }));
+    expect(screen.getByLabelText('包含未完成缓存')).not.toBeChecked();
+    expect(screen.getByRole('heading', { name: '当前目录没有可显示的缓存' })).toBeInTheDocument();
+    await act(async () => pending.reject(error));
+    expect(screen.getByRole('button', { name: '包含未完成并扫描' })).toBeEnabled();
+    expect(screen.getByLabelText('包含未完成缓存')).not.toBeChecked();
+    expect(screen.getByText(/本次扫描跳过了 3 条未完成缓存/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '筛选' }));
+    await waitFor(() => expect(api.search).toHaveBeenCalledWith(expect.objectContaining({ indexToken })));
+    expect(api.scan).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows query progress before empty search results and clears the keyword without rescanning', async () => {
+    await renderScannedLibrary();
+    const pending = deferred<CachePage>();
+    vi.mocked(api.search).mockReturnValueOnce(pending.promise).mockResolvedValueOnce(createCachePage());
+    const input = screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号');
+    fireEvent.change(input, { target: { value: 'missing' } });
+    expect(screen.getByText('正在更新结果，当前显示上次查询内容。')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '未找到匹配缓存' })).not.toBeInTheDocument();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await act(async () => pending.resolve(createCachePage([])));
+    expect(await screen.findByRole('heading', { name: '未找到匹配缓存' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '清除搜索词' }));
+    expect(input).toHaveValue('');
+    expect(input).toHaveFocus();
+    expect(screen.getByRole('heading', { name: '正在查找缓存' })).toBeInTheDocument();
+    expect(await screen.findByLabelText('选择 测试缓存')).toBeVisible();
+    expect(api.search).toHaveBeenLastCalledWith(expect.objectContaining({ keyword: '', indexToken }));
+    expect(api.scan).toHaveBeenCalledOnce();
+  });
+
+  it('restores the cleared-state action when a query is erased before its debounce starts', async () => {
+    await renderScannedLibrary();
+    fireEvent.click(screen.getByRole('button', { name: '清空结果' }));
+    const input = screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号');
+    fireEvent.change(input, { target: { value: 'short lived' } });
+    expect(screen.getByRole('heading', { name: '正在查找缓存' })).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '' } });
+    expect(screen.getByRole('heading', { name: '已清空显示结果' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重新显示结果' }));
+    expect(await screen.findByLabelText('选择 测试缓存')).toBeVisible();
+    expect(api.scan).toHaveBeenCalledOnce();
+    expect(api.search).toHaveBeenCalledOnce();
+  });
+
+  it.each([['failed', new Error('Read failed'), '查询未完成', '重试查询'],
+    ['cancelled', new IpcError('Cancelled', 'cancelled'), '查询已取消', '重新显示结果']] as const)
+  ('offers recovery after an empty %s query without calling scan', async (_kind, error, heading, action) => {
+    await renderScannedLibrary();
+    fireEvent.click(screen.getByRole('button', { name: '清空结果' }));
+    vi.mocked(api.search).mockRejectedValueOnce(error).mockResolvedValueOnce(createCachePage());
+    fireEvent.click(screen.getByRole('button', { name: '重新显示结果' }));
+    expect(await screen.findByRole('heading', { name: heading })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: action }));
+    expect(await screen.findByLabelText('选择 测试缓存')).toBeVisible();
+    expect(api.scan).toHaveBeenCalledOnce();
+  });
+
   it('keeps cleared results empty after both a pending search and its debounce deadline', async () => {
     await renderScannedLibrary();
     const delayed = deferred<CachePage>();
@@ -281,8 +365,10 @@ describe('desktop renderer', () => {
     });
     expect(api.search).toHaveBeenCalledOnce();
     expect(screen.queryByLabelText('选择 测试缓存')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '筛选' }));
+    expect(screen.getByRole('heading', { name: '已清空显示结果' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重新显示结果' }));
     expect(await screen.findByLabelText('选择 测试缓存')).toBeVisible();
+    expect(api.scan).toHaveBeenCalledOnce();
   });
 
   it('restores all rows when an Enter-submitted filter is cleared before the debounce deadline', async () => {
@@ -509,6 +595,65 @@ describe('desktop renderer', () => {
       [{ avid: '100', pageIndexes: [1] }, { avid: '200', pageIndexes: [3] }], 'system', false, indexToken));
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 Second video' }));
     expect(screen.getByRole('checkbox', { name: '选择分段 Third part' })).not.toBeChecked();
+  });
+
+  it('selects and clears only current-page videos with a native mixed header', async () => {
+    const videos = [initialItem, ...['101', '200', '201'].map(id => ({ ...initialItem, id, avid: id, title: `Video ${id}` }))];
+    vi.mocked(api.scan).mockResolvedValue(createCachePage(videos.slice(0, 2), { pageSize: 2, totalItems: 4, hasMore: true }));
+    vi.mocked(api.search).mockImplementation(async request => createCachePage(videos.slice(request.offset, request.offset + 2),
+      { pageSize: 2, totalItems: 4, offset: request.offset, hasMore: request.offset === 0 }));
+    await renderScannedLibrary();
+    const header = () => screen.getByRole('checkbox', { name: '选择当前页视频' });
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    expect(header()).toBePartiallyChecked();
+    expect(header()).toHaveAttribute('title', '选择当前页视频');
+    fireEvent.click(header());
+    expect(header()).toBeChecked();
+    expect(header()).not.toBePartiallyChecked();
+    fireEvent.click(within(screen.getByLabelText('缓存分页')).getByRole('button', { name: '下一页' }));
+    await screen.findByLabelText('选择 Video 200');
+    expect(header()).not.toBeChecked();
+    expect(header()).not.toBePartiallyChecked();
+    fireEvent.click(screen.getByLabelText('选择 Video 200'));
+    expect(header()).toBePartiallyChecked();
+    fireEvent.click(header());
+    expect(screen.getByLabelText('选择 Video 201')).toBeChecked();
+    fireEvent.click(header());
+    expect(screen.getByLabelText('选择 Video 200')).not.toBeChecked();
+    fireEvent.click(within(screen.getByLabelText('缓存分页')).getByRole('button', { name: '上一页' }));
+    await screen.findByLabelText('选择 测试缓存');
+    expect(header()).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: '播放' }));
+    await waitFor(() => expect(api.play).toHaveBeenCalledWith(initial.settings.rootPath,
+      [{ avid: '100' }, { avid: '101' }], 'system', false, indexToken));
+  });
+
+  it('preserves other detail pages when toggling the mixed current-page part header', async () => {
+    const parts = [1, 2, 3].map(pageIndex => ({ ...initialSegments[0], id: `100:${pageIndex}`, pageIndex, partName: `Part ${pageIndex}` }));
+    vi.mocked(api.getCacheDetails).mockImplementation(async request => createCacheDetails(parts.slice(request.offset, request.offset + 2),
+      { offset: request.offset, pageSize: 2, totalItems: 3, hasMore: request.offset === 0 }));
+    await renderScannedLibrary();
+    fireEvent.click(screen.getByRole('button', { name: '查看 测试缓存 的分 P' }));
+    fireEvent.click(await screen.findByLabelText('选择分段 Part 1'));
+    const header = () => screen.getByRole('checkbox', { name: '选择当前页分 P' });
+    expect(header()).toBePartiallyChecked();
+    expect(header()).toHaveAttribute('title', '选择当前页分 P');
+    fireEvent.click(header());
+    expect(header()).toBeChecked();
+    fireEvent.click(within(screen.getByLabelText('分段分页')).getByRole('button', { name: '下一页' }));
+    await screen.findByLabelText('选择分段 Part 3');
+    expect(header()).not.toBeChecked();
+    expect(header()).not.toBePartiallyChecked();
+    fireEvent.click(header());
+    fireEvent.click(within(screen.getByLabelText('分段分页')).getByRole('button', { name: '上一页' }));
+    await screen.findByLabelText('选择分段 Part 1');
+    expect(header()).toBeChecked();
+    fireEvent.click(header());
+    expect(screen.getByLabelText('选择分段 Part 1')).not.toBeChecked();
+    expect(screen.getByLabelText('选择分段 Part 2')).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: '播放' }));
+    await waitFor(() => expect(api.play).toHaveBeenCalledWith(initial.settings.rootPath,
+      [{ avid: '100', pageIndexes: [3] }], 'system', false, indexToken));
   });
 
   it('searches during export without changing the submitted targets', async () => {

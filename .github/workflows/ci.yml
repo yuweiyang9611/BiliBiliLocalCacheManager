@@ -109,9 +109,14 @@ jobs:
         run: dotnet build BiliBiliLocalCacheManager.slnx --configuration Release --no-restore --nologo
 
       - name: Test .NET
+        timeout-minutes: 10
         env:
           DOTNET_TEST_FILTER: ${{ runner.os == 'Linux' && 'Category!=FFmpegIntegration&Category!=WindowsOnly' || 'Category!=FFmpegIntegration' }}
-        run: dotnet test BiliBiliLocalCacheManager.slnx --configuration Release --no-build --no-restore --nologo --filter "${{ env.DOTNET_TEST_FILTER }}"
+        # VSTest writes to each project's TestResults directory when testing the solution.
+        run: >-
+          dotnet test BiliBiliLocalCacheManager.slnx --configuration Release --no-build --no-restore --nologo
+          --filter "${{ env.DOTNET_TEST_FILTER }}" --logger "trx;LogFilePrefix=unit"
+          --blame-hang-timeout 2m --blame-hang-dump-type none
 
       - name: Cache pinned Windows FFmpeg
         if: runner.os == 'Windows'
@@ -129,9 +134,26 @@ jobs:
 
       - name: Test real FFmpeg integration on Windows
         if: runner.os == 'Windows'
+        timeout-minutes: 20
         env:
           BILIBILI_RUN_FFMPEG_INTEGRATION_TESTS: "1"
-        run: dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj --configuration Release --no-build --no-restore --nologo --filter "Category=FFmpegIntegration"
+        # The fixture allows up to ten minutes for FFmpeg bootstrap on a cold runner.
+        run: >-
+          dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.Playback.Tests.csproj
+          --configuration Release --no-build --no-restore --nologo --filter "Category=FFmpegIntegration"
+          --results-directory BiliBiliLocalCacheManager.Playback.Tests/TestResults/ffmpeg
+          --logger "trx;LogFilePrefix=ffmpeg" --blame-hang-timeout 12m --blame-hang-dump-type none
+
+      - name: Upload .NET test results and hang sequences
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: dotnet-test-results-${{ matrix.rid }}-attempt-${{ github.run_attempt }}
+          path: |
+            *.Tests/TestResults/**/*.trx
+            *.Tests/TestResults/**/Sequence_*.xml
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Install Electron dependencies
         working-directory: BiliBiliLocalCacheManager.Desktop

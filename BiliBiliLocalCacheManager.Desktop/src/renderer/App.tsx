@@ -96,6 +96,8 @@ export function App() {
   const [inspectionBusy, setInspectionBusy] = useState<string | null>(null);
   const inspectionInFlight = useRef(false);
   const [searching, setSearching] = useState(false);
+  const [libraryQueryState, setLibraryQueryState] = useState<'idle' | 'pending' | 'failed' | 'cancelled'>('idle');
+  const [libraryResultsCleared, setLibraryResultsCleared] = useState(false);
   const [operationStates, setOperationStates] = useState<Record<string, OperationState>>({});
   const blockedOperations = useRef(false);
   const unresolved = Object.values(operationStates);
@@ -166,6 +168,8 @@ export function App() {
     void cacheManager.cancelCacheDetails().catch(() => undefined);
     setItems(nextItems);
     setCachePage(page ?? { ...initialCachePage, totalItems: nextItems.length });
+    setLibraryQueryState('idle');
+    setLibraryResultsCleared(false);
     if (!preserveSelection) { clearSelection(); displayedSearch.current = null; }
     setFocusedId(null);
     setFocusedDetails(null);
@@ -179,6 +183,7 @@ export function App() {
     void cacheManager.cancelSearch().catch(() => undefined);
     searchDrainActive.current = false;
     setSearching(false);
+    setLibraryQueryState('idle');
     latestSearchRevision.current += 1;
     pendingSearch.current = null;
   }, []);
@@ -195,6 +200,7 @@ export function App() {
     discardSearch();
     searchWasActive.current = Boolean(searchContextRef.current.request.keyword);
     replaceLibraryItems();
+    setLibraryResultsCleared(true);
   }, [discardSearch, replaceLibraryItems]);
 
   const invalidateRootViews = useCallback(() => {
@@ -462,12 +468,12 @@ export function App() {
     applyScanResult(completed.rootPath, settings.includeIncomplete, completed.result, prefix);
   }, [applyScanResult, invalidateIndex, invalidateRootViews, persistSettings, run, settings.includeIncomplete, settings.rootPath]);
 
-  const scan = useCallback(async () => {
+  const scan = useCallback(async (includeIncomplete = settings.includeIncomplete) => {
     if (!settings.rootPath.trim()) { notify('error', '请先选择 B 站缓存根目录。'); return; }
     const result = await run('正在扫描缓存…', async () => {
       const next = await cacheManager.scan({
         rootPath: activeRootPath,
-        includeIncomplete: settings.includeIncomplete,
+        includeIncomplete,
         persistSettings: canSaveSettings,
         offset: 0,
         pageSize: DEFAULT_CACHE_PAGE_SIZE,
@@ -476,7 +482,12 @@ export function App() {
       return next;
     });
     if (!result) return;
-    applyScanResult(activeRootPath, settings.includeIncomplete, result);
+    if (includeIncomplete !== settings.includeIncomplete) {
+      libraryEdits.current = { ...libraryEdits.current, includeIncomplete };
+      setSettings(current => ({ ...current, includeIncomplete }));
+      setDraftEdits(({ includeIncomplete: _previousMode, ...rest }) => rest);
+    }
+    applyScanResult(activeRootPath, includeIncomplete, result);
   }, [applyScanResult, activeRootPath, canSaveSettings, invalidateIndex, notify, run, settings.includeIncomplete]);
 
   const drainSearchQueue = useCallback(async () => {
@@ -501,7 +512,10 @@ export function App() {
       if (isStaleIndexError(error)) {
         invalidateIndex();
         notify('info', '缓存索引已失效，请重新扫描。');
-      } else if (!isCancellationError(error)) notify('error', describeError(error));
+      } else {
+        setLibraryQueryState(isCancellationError(error) ? 'cancelled' : 'failed');
+        if (!isCancellationError(error)) notify('error', describeError(error));
+      }
     } finally {
       if (queued.revision === latestSearchRevision.current) {
         searchDrainActive.current = false;
@@ -521,6 +535,7 @@ export function App() {
     searchWasActive.current = Boolean(request.keyword);
     const revision = ++latestSearchRevision.current;
     pendingSearch.current = { revision, request };
+    setLibraryQueryState('pending');
     resumePendingSearch.current();
   }, [hasActiveIndex, notify]);
 
@@ -565,6 +580,7 @@ export function App() {
       pendingSearch.current = null;
       searchDrainActive.current = false;
       setSearching(false);
+      setLibraryQueryState('cancelled');
       await cacheManager.cancelSearch().catch(error => notify('error', describeError(error)));
       return;
     }
@@ -581,6 +597,11 @@ export function App() {
 
   const updateSetting = useCallback(<K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     clearSelection();
+    if (hasActiveIndex && key !== 'includeIncomplete' && (key === 'keyword' ? String(value).trim() || searchWasActive.current : settings.keyword.trim())) {
+      setLibraryQueryState('pending');
+    } else if (key === 'keyword' && !String(value).trim()) {
+      setLibraryQueryState('idle');
+    }
     libraryEdits.current = { ...libraryEdits.current, [key]: value };
     setSettings((current) => ({ ...current, [key]: value }));
     setDraftEdits(current => {
@@ -589,7 +610,7 @@ export function App() {
       delete next[key];
       return next;
     });
-  }, [clearSelection]);
+  }, [clearSelection, hasActiveIndex, settings.keyword]);
 
   const play = useCallback(async (explicitTargets?: SelectionTarget[], retry?: BatchReport) => {
     if (retry && retry.indexToken !== currentIndexToken) return;
@@ -986,6 +1007,10 @@ export function App() {
             readBusy={!initialized || Boolean(inspectionBusy) || (Boolean(busy) && !allowReadOnly.current)}
             play={play} exportMedia={exportMedia} moveToTrash={moveToTrash}
             clear={clearLibrary}
+            resultState={!hasActiveIndex ? 'unscanned' : libraryQueryState !== 'idle' ? libraryQueryState
+              : libraryResultsCleared ? 'cleared' : scanReport?.totalItems === 0 ? 'empty' : 'no-matches'}
+            skippedIncomplete={scanReport?.indexToken === currentIndexToken ? scanReport.skippedIncompleteEntries ?? 0 : 0}
+            scan={scan}
           />}
           {page === 'storage' && <StoragePage
             storage={currentStorage?.value ?? emptyStorage}

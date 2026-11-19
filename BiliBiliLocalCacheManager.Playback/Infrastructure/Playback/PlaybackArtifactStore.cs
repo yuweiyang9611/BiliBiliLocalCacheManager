@@ -26,6 +26,8 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
 
     public string RootDirectory { get; }
 
+    internal Action? PathLockWaitStartedForTesting { get; set; }
+
     public PlaybackArtifactMaterialization GetOrCreate(
         CachePlaybackPlan plan,
         string extension,
@@ -66,7 +68,9 @@ public sealed partial class PlaybackArtifactStore : IPlaybackArtifactStore
         var pathLock = AcquirePathLock(outputPath);
         try
         {
-            await pathLock.SyncRoot.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var pathLockWait = pathLock.SyncRoot.WaitAsync(cancellationToken);
+            if (!pathLockWait.IsCompleted) PathLockWaitStartedForTesting?.Invoke();
+            await pathLockWait.ConfigureAwait(false);
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);

@@ -47,6 +47,10 @@ public sealed partial class DesktopHostContractTests
             : JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, avids = requested });
         var result = await DispatchAsync(application, restore ? "trash.restore" : "trash.move", parameters);
 
+        var outcomes = result.GetProperty("items").EnumerateArray()
+            .Select(item => (item.GetProperty("avid").GetString(), item.GetProperty("succeeded").GetBoolean()));
+        Assert.True(outcomes.SequenceEqual([("101", true), ("202", false), ("303", true)]),
+            $"Unexpected per-item outcomes after {attempts} mutation attempts: {result.GetRawText()}");
         Assert.Equal(new[] { requested[0], requested[2] },
             result.GetProperty(restore ? "restored" : "moved").EnumerateArray().Select(item => item.GetString()));
         Assert.Equal(new[] { requested[1] }, result.GetProperty("failed").EnumerateArray().Select(item => item.GetString()));

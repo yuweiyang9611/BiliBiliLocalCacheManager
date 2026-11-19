@@ -12,6 +12,7 @@
 - 默认按标题、UP 主、Bvid 或 Avid 搜索，分 P 名称可选开启，并报告损坏条目、未完成分段和不可访问目录。AV 号支持 `42` 和 `av42` 两种输入。
 - 对大缓存库使用带会话索引令牌的分页摘要；只有聚焦某条缓存时才分页解析分段和播放结构，列表采用有界虚拟渲染
 - 视频与分 P 选择互斥；同一查询中跨页保留选择，分 P 可跨视频选择，并可查看完整已选清单
+- 视频和分 P 表头的复选框作用于当前页，部分勾选时显示半选状态。搜索无匹配时，可清除搜索词并从当前索引恢复列表。
 - 使用选定的系统默认播放器、mpv 或 VLC 播放，失败不自动更换；按列表和 P 序号准备，多项生成本地 UTF-8 M3U8，只启动一次播放器。系统默认播放要求已关联支持 M3U8 的程序
 - 所有 MP4 导出统一为新批次/视频/分 P 目录，整批成功才发布且不覆盖旧内容。优先转封装，转码前需明确确认，可复用本次 Host 会话中有可信处理来源的导出产物。不同画质分别作为候选，只拼接所选画质内的分片。单文件 MP4 直接复制前检查容器及媒体流，需要可用的 FFprobe。
 - 分别统计原始缓存、转码缓存和应用回收站占用，按当前转码缓存策略预估本次清理可释放的空间
@@ -168,6 +169,8 @@ dotnet test BiliBiliLocalCacheManager.Playback.Tests/BiliBiliLocalCacheManager.P
 ```
 
 `.github/workflows/ci.yml` 使用最新的 .NET 11 SDK（`11.0.x`）与 Node.js 24 构建和测试 .NET/Electron，并在 Windows 2025 与 Ubuntu 24.04 runner 上分别打包、检查 Electron fuses、运行打包后自检。自检会加载真实渲染器、读取隔离设置、通过 Preload/IPC 调用内置 Host，并扫描一条临时缓存夹具。Ubuntu 24.04 还使用 Xvfb smoke 源码构建；Debian 13 与 Fedora 43 容器会分别安装实际 deb/rpm，再以 Xvfb smoke 强制 X11 路径。稳定的 `ci-required` 汇总检查只有在隐私检查、完整构建/测试/打包矩阵和发行版安装包自检全部成功时才通过。Xvfb 是独立 X11 server，这些检查不等同于真实 GNOME/KDE XWayland 会话验证。真实桌面检查仍需人工完成；转正流程会自动核验已提交的验收记录及安装包校验值，缺少必测记录时保持预览状态。
+
+排查 .NET 测试失败时，在该次 GitHub Actions 运行的 Artifacts 中下载 `dotnet-test-results-<rid>-attempt-<n>`。各测试项目的 TRX 记录失败用例、断言和耗时。VSTest 检测到卡死并中止运行时，再查看 `Sequence_*.xml` 中标为 `Completed="False"` 的用例。报告保留 7 天。
 
 ## 下载与发布
 

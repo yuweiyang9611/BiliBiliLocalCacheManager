@@ -66,6 +66,60 @@ require(${JSON.stringify(path.join(desktop, 'dist-electron', 'main.cjs'))});`);
       return Object.fromEntries(Object.entries(names).map(([name, suffix]) => [name,
         globalThis.__blcmKeyboardCalls.filter(channel => channel === 'cache-manager:' + suffix).length]));
     });
+    const saveScreenshot = async name => {
+      const captured = await bounded(application.evaluate(async ({ BrowserWindow }) =>
+        (await BrowserWindow.getAllWindows()[0].capturePage()).toPNG().toString('base64')), 10_000, 'Native keyboard screenshot timed out.');
+      await fs.writeFile(path.join(output, name), Buffer.from(captured, 'base64'));
+    };
+    await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1080, 720));
+    const scansBeforeFilter = (await callCounts()).scan;
+    const search = page.getByPlaceholder('搜索标题、UP 主、BV 号或 AV 号');
+    await search.fill('找不到的键盘验证视频');
+    await search.press('Enter');
+    await page.getByRole('heading', { name: '未找到匹配缓存' }).waitFor();
+    const emptyLayout = await page.locator('.cache-panel').evaluate(panel => {
+      const table = panel.querySelector('.table-scroll').getBoundingClientRect();
+      const header = panel.querySelector('thead').getBoundingClientRect();
+      const action = panel.querySelector('.library-empty button').getBoundingClientRect();
+      return { headerFullyVisible: header.bottom <= table.bottom + 1,
+        actionInsidePanel: action.top >= header.bottom && action.bottom <= panel.getBoundingClientRect().bottom };
+    });
+    assert.deepEqual(emptyLayout, { headerFullyVisible: true, actionInsidePanel: true });
+    await page.locator('.toast-stack .toast').first().waitFor({ state: 'hidden' });
+    await saveScreenshot('library-no-matches.png');
+    report.screenshots.push({ screenshot: 'library-no-matches.png', ...emptyLayout });
+    await page.getByRole('button', { name: '清除搜索词' }).click();
+    const firstVideo = page.getByRole('button', { name: '查看 键盘验证缓存 00 的分 P' });
+    await firstVideo.waitFor();
+    assert.equal(await search.inputValue(), '');
+    await page.getByRole('button', { name: '清空结果' }).click();
+    await page.getByRole('heading', { name: '已清空显示结果' }).waitFor();
+    await saveScreenshot('library-cleared.png');
+    report.screenshots.push({ screenshot: 'library-cleared.png' });
+    await page.getByRole('button', { name: '重新显示结果' }).click();
+    await firstVideo.waitFor();
+    assert.equal((await callCounts()).scan, scansBeforeFilter);
+
+    const videosOnPage = page.getByRole('checkbox', { name: '选择当前页视频', exact: true });
+    await page.getByRole('checkbox', { name: '选择 键盘验证缓存 00', exact: true }).check();
+    assert.equal(await videosOnPage.evaluate(input => input.indeterminate), true);
+    await videosOnPage.focus();
+    await page.keyboard.press('Space');
+    assert.equal(await videosOnPage.isChecked(), true);
+    await page.keyboard.press('Space');
+    assert.equal(await videosOnPage.isChecked(), false);
+
+    await firstVideo.focus();
+    await page.keyboard.press('Enter');
+    await page.getByRole('checkbox', { name: '选择分段 键盘验证 P1', exact: true }).check();
+    const partsOnPage = page.getByRole('checkbox', { name: '选择当前页分 P', exact: true });
+    assert.equal(await partsOnPage.evaluate(input => input.indeterminate), true);
+    await partsOnPage.focus();
+    await page.keyboard.press('Space');
+    assert.equal(await partsOnPage.isChecked(), true);
+    await page.keyboard.press('Space');
+    assert.equal(await partsOnPage.isChecked(), false);
+    report.checks.push({ emptyResults: ['no-matches', 'cleared'], restoredWithoutScan: true, pageSelectionMixedAndSpace: true });
     for (const [width, height] of [[1440, 900], [1080, 720]]) {
       console.log(JSON.stringify({ stage: 'keyboard-checks', width, height }));
       await application.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setSize(...size), [width, height]);
@@ -116,9 +170,7 @@ require(${JSON.stringify(path.join(desktop, 'dist-electron', 'main.cjs'))});`);
       assert.equal(layout.overflow, false); assert.equal(layout.dialogVisible, true);
       const screenshot = `keyboard-${width}.png`;
       console.log(JSON.stringify({ stage: 'capture', width, height }));
-      const captured = await bounded(application.evaluate(async ({ BrowserWindow }) =>
-        (await BrowserWindow.getAllWindows()[0].capturePage()).toPNG().toString('base64')), 10_000, 'Native keyboard screenshot timed out.');
-      await fs.writeFile(path.join(output, screenshot), Buffer.from(captured, 'base64'));
+      await saveScreenshot(screenshot);
       report.screenshots.push({ screenshot, width, height, ...layout });
       await page.keyboard.press('Escape');
       await dialog.waitFor({ state: 'detached' });
