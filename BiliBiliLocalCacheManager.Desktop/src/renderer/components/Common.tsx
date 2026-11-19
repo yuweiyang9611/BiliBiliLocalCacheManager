@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react';
 import { Icon, type IconName } from './Icon';
 import type { CachePageState } from '../ui-types';
 export { Modal } from './Modal';
@@ -5,6 +6,18 @@ export { Modal } from './Modal';
 export function Metric({ label, value, detail, color }: { label: string; value: string; detail: string; color: string }) { return <div className={`metric-card ${color}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
 
 export function Check({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange(value: boolean): void }) { return <label className="check"><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>; }
+
+export function PageSelectionCheckbox({ label, selectedCount, totalCount, onChange }: {
+  label: string; selectedCount: number; totalCount: number; onChange(checked: boolean): void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const mixed = selectedCount > 0 && selectedCount < totalCount;
+  const checked = totalCount > 0 && selectedCount === totalCount;
+  useLayoutEffect(() => { if (input.current) input.current.indeterminate = mixed; }, [mixed]);
+  return <input ref={input} type="checkbox" aria-label={label} title={label}
+    aria-checked={mixed ? 'mixed' : checked} checked={checked} disabled={totalCount === 0}
+    onChange={event => onChange(event.target.checked)} />;
+}
 
 export function Empty({ icon, title, body, compact = false }: { icon: IconName; title: string; body: string; compact?: boolean }) { return <div className={compact ? 'empty compact' : 'empty'}><Icon name={icon} /><h3>{title}</h3><p>{body}</p></div>; }
 

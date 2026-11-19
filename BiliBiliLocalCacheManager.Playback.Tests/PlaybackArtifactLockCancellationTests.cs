@@ -17,6 +17,8 @@ public sealed class PlaybackArtifactLockCancellationTests
             Path.GetTempPath(),
             $"bili_cross_process_artifact_lock_{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
+        using var cancellationSource = new CancellationTokenSource();
+        Task<PlaybackArtifactMaterialization>? materialization = null;
         try
         {
             var sourcePath = Path.Combine(root, "source.blv");
@@ -34,12 +36,11 @@ public sealed class PlaybackArtifactLockCancellationTests
                 FileMode.OpenOrCreate,
                 FileAccess.ReadWrite,
                 FileShare.None);
-            using var cancellationSource = new CancellationTokenSource();
             var producerCalled = false;
             string? reportedStage = null;
             var stopwatch = Stopwatch.StartNew();
 
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => OwnThread.Run(() =>
+            materialization = OwnThread.Run(() =>
                 store.GetOrCreate(
                     plan,
                     ".mp4",
@@ -54,7 +55,8 @@ public sealed class PlaybackArtifactLockCancellationTests
                         reportedStage = stage;
                         Assert.Null(percentage);
                         cancellationSource.Cancel();
-                    })).WaitAsync(CoordinationTimeout));
+                    }));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => materialization.WaitAsync(CoordinationTimeout));
 
             Assert.Equal("正在等待其他实例生成播放缓存", reportedStage);
             Assert.False(producerCalled);
@@ -62,9 +64,11 @@ public sealed class PlaybackArtifactLockCancellationTests
         }
         finally
         {
-            if (Directory.Exists(root))
+            cancellationSource.Cancel();
+            try { await OwnThread.JoinAsync(materialization, CoordinationTimeout); }
+            finally
             {
-                Directory.Delete(root, recursive: true);
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
             }
         }
     }
@@ -119,6 +123,9 @@ public sealed class PlaybackArtifactLockCancellationTests
         Directory.CreateDirectory(root);
         using var producerEntered = new ManualResetEventSlim(false);
         using var releaseProducer = new ManualResetEventSlim(false);
+        using var cancellationSource = new CancellationTokenSource();
+        Task<PlaybackArtifactMaterialization>? firstTask = null;
+        Task<PlaybackArtifactMaterialization>? waitingTask = null;
         try
         {
             var sourcePath = Path.Combine(root, "source.blv");
@@ -136,10 +143,10 @@ public sealed class PlaybackArtifactLockCancellationTests
                 new[] { sourcePath });
 
             // This call parks in its producer while the test blocks below, so it must not wait for a pool thread.
-            var firstTask = OwnThread.Run(() => store.GetOrCreate(plan, ".mp4", outputPath =>
+            firstTask = OwnThread.Run(() => store.GetOrCreate(plan, ".mp4", outputPath =>
             {
                 producerEntered.Set();
-                Assert.True(releaseProducer.Wait(CoordinationTimeout));
+                Assert.True(releaseProducer.Wait(CoordinationTimeout * 3));
                 File.WriteAllBytes(outputPath, new byte[32]);
             }));
             Assert.True(
@@ -147,32 +154,42 @@ public sealed class PlaybackArtifactLockCancellationTests
                 $"The first call did not reach its producer (task {firstTask.Status}). " +
                 $"{firstTask.Exception?.GetBaseException()}");
 
-            using var cancellationSource =
-                new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
             var waitingProducerCalled = false;
-            // This call blocks too, so it also gets a thread of its own. Its cancellation arrives on the thread pool,
-            // and the test's own pool thread is free for that while it awaits.
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => OwnThread.Run(() =>
-                store.GetOrCreate(
-                    plan,
-                    ".mp4",
-                    outputPath =>
-                    {
-                        waitingProducerCalled = true;
-                        File.WriteAllBytes(outputPath, new byte[32]);
-                    },
-                    cancellationSource.Token)));
+            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            store.PathLockWaitStartedForTesting = () => waiting.TrySetResult();
+            // Keep the synchronous entry point under test, including its cancellation-token forwarding.
+            waitingTask = OwnThread.Run(() => store.GetOrCreate(
+                plan,
+                ".mp4",
+                outputPath =>
+                {
+                    waitingProducerCalled = true;
+                    File.WriteAllBytes(outputPath, new byte[32]);
+                },
+                cancellationSource.Token));
+            var observed = await Task.WhenAny(waiting.Task, waitingTask).WaitAsync(CoordinationTimeout);
+            if (observed == waitingTask) await waitingTask;
+            Assert.Same(waiting.Task, observed);
+            Assert.False(waitingTask.IsCompleted);
+            cancellationSource.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waitingTask.WaitAsync(CoordinationTimeout));
 
             Assert.False(waitingProducerCalled);
             releaseProducer.Set();
-            await firstTask;
+            await firstTask.WaitAsync(CoordinationTimeout);
         }
         finally
         {
+            cancellationSource.Cancel();
             releaseProducer.Set();
-            if (Directory.Exists(root))
+            try
             {
-                Directory.Delete(root, recursive: true);
+                await Task.WhenAll(OwnThread.JoinAsync(firstTask, CoordinationTimeout),
+                    OwnThread.JoinAsync(waitingTask, CoordinationTimeout));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
             }
         }
     }

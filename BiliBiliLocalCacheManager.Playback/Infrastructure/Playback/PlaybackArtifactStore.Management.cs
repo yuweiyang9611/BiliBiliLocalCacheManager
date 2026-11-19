@@ -9,6 +9,9 @@ public sealed partial class PlaybackArtifactStore
     private const string CrossProcessLockSuffix = ".lock";
     private const string CrossProcessWaitStage = "正在等待其他实例生成播放缓存";
 
+    // Runs only after a real sharing violation has started a retry wait.
+    internal Action? CrossProcessLockWaitStartedForTesting { get; set; }
+
     public PlaybackArtifactCacheStatistics GetStatistics()
     {
         return CreateCacheStatistics(SnapshotAllManagedFilesStrict());
@@ -96,13 +99,13 @@ public sealed partial class PlaybackArtifactStore
             "TranscodeCache");
     }
 
-    private static FileStream AcquireCrossProcessLock(
+    private FileStream AcquireCrossProcessLock(
         string outputPath,
         CancellationToken cancellationToken,
         Action<string, double?>? reportProgress) =>
         AcquireCrossProcessLockAsync(outputPath, cancellationToken, reportProgress).GetAwaiter().GetResult();
 
-    private static async Task<FileStream> AcquireCrossProcessLockAsync(
+    private async Task<FileStream> AcquireCrossProcessLockAsync(
         string outputPath, CancellationToken cancellationToken, Action<string, double?>? reportProgress)
     {
         var lockPath = outputPath + CrossProcessLockSuffix;
@@ -136,7 +139,9 @@ public sealed partial class PlaybackArtifactStore
                         ex);
                 }
 
-                await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
+                var retry = Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+                CrossProcessLockWaitStartedForTesting?.Invoke();
+                await retry.ConfigureAwait(false);
             }
         }
     }

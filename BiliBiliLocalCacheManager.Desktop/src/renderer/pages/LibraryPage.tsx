@@ -3,7 +3,7 @@ import type { AppSettings, CacheEntry, CacheDetails, CacheSegment, SelectionTarg
 import { MAXIMUM_SEARCH_KEYWORD_LENGTH } from '../../shared/contracts';
 import type { CachePageState } from '../ui-types';
 import { Icon } from '../components/Icon';
-import { Check, Empty, PageControls } from '../components/Common';
+import { Check, Empty, PageControls, PageSelectionCheckbox } from '../components/Common';
 import { toggleSet, formatBytes, formatDuration, formatDate } from '../display';
 import { partSelectionKey } from '../hooks/useLibrarySelection';
 
@@ -33,6 +33,9 @@ export interface LibraryProps {
   exportMedia(): Promise<void>;
   moveToTrash(): void;
   clear(): void;
+  resultState: 'unscanned' | 'empty' | 'no-matches' | 'cleared' | 'pending' | 'failed' | 'cancelled';
+  skippedIncomplete: number;
+  scan(includeIncomplete?: boolean): Promise<void>;
 }
 
 export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
@@ -67,7 +70,9 @@ export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
     </section>
     <section className="card cache-panel">
       <div className="panel-heading"><div><h2>缓存列表</h2><span>{props.cachePage.totalItems} 项</span></div><div className="toolbar"><button className="button ghost" onClick={() => void props.play()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="play" />播放</button><button className="button ghost" onClick={() => void props.exportMedia()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="export" />导出</button><button className="button ghost danger-text" onClick={props.moveToTrash} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="delete" />删除</button><button className="button ghost" onClick={props.clear} disabled={props.readBusy}>清空结果</button></div></div>
+      {props.items.length > 0 && props.resultState === 'pending' && <p className="library-query-status" role="status">正在更新结果，当前显示上次查询内容。</p>}
       <VirtualizedCacheTable items={props.items} selectedIds={props.selectedIds} setSelectedIds={props.setSelectedIds} focusedId={props.focusedId} focus={props.focus} busy={props.busy} play={props.play} />
+      {!props.items.length && <LibraryEmptyState {...props} />}
       <PageControls
         label="缓存"
         {...props.cachePage}
@@ -79,13 +84,41 @@ export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
       {props.detailsLoading
         ? <Empty compact icon="film" title="正在加载分段" body="仅为当前页解析媒体结构与可播放状态。" />
         : props.focusedDetails
-          ? <><div className="table-scroll"><table><thead><tr><th className="check-cell"><input aria-label="选择全部分段" type="checkbox" checked={visiblePartKeys.length > 0 && visiblePartKeys.every(id => props.selectedSegmentIds.has(id))} onChange={(event) => selectVisibleParts(event.target.checked)} /></th><th>Page</th><th>分段名</th><th>结构</th><th>类型</th><th>大小</th><th>时长</th><th>可播放</th></tr></thead><tbody>{props.focusedDetails.segments.map((segment) => <SegmentRow key={segment.id} item={segment} checked={props.selectedSegmentIds.has(partSelectionKey(props.focusedDetails!.avid, segment.pageIndex))} toggle={() => props.setSelectedSegmentIds(toggleSet(props.selectedSegmentIds, partSelectionKey(props.focusedDetails!.avid, segment.pageIndex)))} play={() => { if (props.busy) return; props.setSelectedSegmentIds(new Set([partSelectionKey(props.focusedDetails!.avid, segment.pageIndex)])); void props.play([{ avid: props.focusedDetails!.avid, pageIndexes: [segment.pageIndex] }]); }} />)}</tbody></table></div><PageControls label="分段" offset={props.focusedDetails.offset} pageSize={props.focusedDetails.pageSize} totalItems={props.focusedDetails.totalItems} hasMore={props.focusedDetails.hasMore} busy={Boolean(props.readBusy)} onPage={props.setDetailsOffset} /></>
+          ? <><div className="table-scroll"><table><thead><tr><th className="check-cell"><PageSelectionCheckbox label="选择当前页分 P" totalCount={visiblePartKeys.length} selectedCount={visiblePartKeys.filter(id => props.selectedSegmentIds.has(id)).length} onChange={selectVisibleParts} /></th><th>Page</th><th>分段名</th><th>结构</th><th>类型</th><th>大小</th><th>时长</th><th>可播放</th></tr></thead><tbody>{props.focusedDetails.segments.map((segment) => <SegmentRow key={segment.id} item={segment} checked={props.selectedSegmentIds.has(partSelectionKey(props.focusedDetails!.avid, segment.pageIndex))} toggle={() => props.setSelectedSegmentIds(toggleSet(props.selectedSegmentIds, partSelectionKey(props.focusedDetails!.avid, segment.pageIndex)))} play={() => { if (props.busy) return; props.setSelectedSegmentIds(new Set([partSelectionKey(props.focusedDetails!.avid, segment.pageIndex)])); void props.play([{ avid: props.focusedDetails!.avid, pageIndexes: [segment.pageIndex] }]); }} />)}</tbody></table></div><PageControls label="分段" offset={props.focusedDetails.offset} pageSize={props.focusedDetails.pageSize} totalItems={props.focusedDetails.totalItems} hasMore={props.focusedDetails.hasMore} busy={Boolean(props.readBusy)} onPage={props.setDetailsOffset} /></>
           : props.focusedItem
             ? <Empty compact icon="film" title="分段详情不可用" body="请重新选择缓存，或重新扫描以刷新索引。" />
             : <Empty compact icon="film" title="没有选择缓存" body="单击上方缓存后按页查看媒体结构；双击分段可直接播放。" />}
     </section>
   </div>;
 });
+
+function LibraryEmptyState(props: LibraryProps) {
+  const state = props.resultState;
+  const hasRoot = Boolean(props.settings.rootPath.trim());
+  const messages = {
+    unscanned: ['尚未加载缓存', hasRoot ? '当前目录尚未扫描。扫描后可查找、播放和导出缓存。' : '选择 B 站 download 缓存目录，开始查看本地缓存。'],
+    empty: ['当前目录没有可显示的缓存', props.skippedIncomplete > 0
+      ? `本次扫描跳过了 ${props.skippedIncomplete} 条未完成缓存，可包含这些缓存后重新扫描。`
+      : '扫描已完成。请确认选择的是 B 站 download 缓存目录，并查看上方扫描报告中的问题。'],
+    'no-matches': ['未找到匹配缓存', '试试其他搜索词或调整高级筛选，也可清除搜索词查看已扫描的缓存。'],
+    cleared: ['已清空显示结果', '缓存文件和扫描索引仍保留。可以重新显示当前搜索结果。'],
+    pending: ['正在查找缓存', '正在等待当前查询结果…'],
+    failed: ['查询未完成', '可以重试当前查询；详细原因见操作提示。'],
+    cancelled: ['查询已取消', '可以重新显示当前搜索结果。'],
+  } as const;
+  const [title, body] = messages[state];
+  return <div className="empty library-empty" role="status"><Icon name={state === 'no-matches' ? 'search' : 'library'} /><h3>{title}</h3><p>{body}</p>
+    <div className="toolbar">
+      {state === 'unscanned' && <button className="button secondary" disabled={props.busy} onClick={() => void (hasRoot ? props.scan() : props.browse())}>{hasRoot ? '扫描当前目录' : '选择缓存目录'}</button>}
+      {state === 'empty' && <>
+        {!props.settings.includeIncomplete && props.skippedIncomplete > 0 && <button className="button secondary" disabled={props.busy} onClick={() => void props.scan(true)}>包含未完成并扫描</button>}
+        <button className="button ghost" disabled={props.busy} onClick={() => void props.browse()}>选择其他目录</button>
+      </>}
+      {state === 'no-matches' && Boolean(props.settings.keyword) && <button className="button secondary" disabled={props.readBusy} onClick={() => { props.updateSetting('keyword', ''); props.searchInput.current?.focus(); }}>清除搜索词</button>}
+      {(state === 'cleared' || state === 'cancelled' || state === 'failed') && <button className="button secondary" disabled={props.readBusy} onClick={() => void props.search()}>{state === 'failed' ? '重试查询' : '重新显示结果'}</button>}
+    </div>
+  </div>;
+}
 
 type CacheTableProps = Pick<LibraryProps, 'items' | 'selectedIds' | 'setSelectedIds' | 'focusedId' | 'focus' | 'busy' | 'play'>;
 export const VirtualizedCacheTable = memo(function VirtualizedCacheTable(props: CacheTableProps) {
@@ -150,12 +183,11 @@ export const VirtualizedCacheTable = memo(function VirtualizedCacheTable(props: 
       setScrollTop(event.currentTarget.scrollTop);
       setViewportHeight(event.currentTarget.clientHeight || 420);
     }}
-  ><table><thead><tr><th className="check-cell"><input aria-label="选择全部缓存" type="checkbox" checked={props.items.length > 0 && props.items.every(item => props.selectedIds.has(item.id))} onChange={(event) => { const checked = event.target.checked; props.setSelectedIds(current => { const ids = new Set(current); for (const item of props.items) { if (checked) ids.add(item.id); else ids.delete(item.id); } return ids; }); }} /></th><th>视频</th><th>UP 主</th><th>标识</th><th>时长</th><th>分段</th><th>大小</th><th>状态</th><th>更新时间</th></tr></thead><tbody>
+  ><table><thead><tr><th className="check-cell"><PageSelectionCheckbox label="选择当前页视频" totalCount={props.items.length} selectedCount={props.items.filter(item => props.selectedIds.has(item.id)).length} onChange={checked => { props.setSelectedIds(current => { const ids = new Set(current); for (const item of props.items) { if (checked) ids.add(item.id); else ids.delete(item.id); } return ids; }); }} /></th><th>视频</th><th>UP 主</th><th>标识</th><th>时长</th><th>分段</th><th>大小</th><th>状态</th><th>更新时间</th></tr></thead><tbody>
     {first > 0 && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={9} style={{ height: first * rowHeight }} /></tr>}
     {visibleItems.map(item => <CacheRow key={item.id} item={item} focused={props.focusedId === item.id} checked={props.selectedIds.has(item.id)} focus={props.focus} play={playRow} toggle={toggleRow} />)}
     {last < props.items.length && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={9} style={{ height: (props.items.length - last) * rowHeight }} /></tr>}
   </tbody></table>
-    {!props.items.length && <Empty icon="library" title="尚未加载缓存" body="选择缓存根目录后点击“扫描缓存”，这里会显示可播放与可导出的缓存。" />}
   </div>;
 });
 
