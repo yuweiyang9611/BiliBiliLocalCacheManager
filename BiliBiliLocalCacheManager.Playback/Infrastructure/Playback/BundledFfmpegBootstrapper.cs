@@ -134,7 +134,8 @@ internal static class BundledFfmpegBootstrapper
     internal static bool WaitForProcessMutex(
         Mutex processMutex,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? onContendedPoll = null)
     {
         ArgumentNullException.ThrowIfNull(processMutex);
         cancellationToken.ThrowIfCancellationRequested();
@@ -174,6 +175,8 @@ internal static class BundledFfmpegBootstrapper
             {
                 return false;
             }
+
+            onContendedPoll?.Invoke();
         }
     }
 

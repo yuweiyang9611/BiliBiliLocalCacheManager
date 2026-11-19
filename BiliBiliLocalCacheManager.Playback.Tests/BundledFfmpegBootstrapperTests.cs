@@ -110,34 +110,24 @@ public sealed class BundledFfmpegBootstrapperTests
             }
             finally { holderMutex.ReleaseMutex(); }
         });
-        (Thread Thread, Task Completion)? waiter = null;
         using var waitingMutex = new Mutex(false, mutexName);
         try
         {
             Assert.True(holderReady.Wait(CoordinationTimeout));
-            // Initialize the bootstrapper on this thread and establish contention before observing the worker.
-            Assert.False(BundledFfmpegBootstrapper.WaitForProcessMutex(
-                waitingMutex, TimeSpan.Zero, CancellationToken.None));
-            waiter = OwnThread.Start(() =>
+            // Cancel only after a real mutex poll has timed out while the other thread still owns the lock.
+            var error = Assert.ThrowsAny<OperationCanceledException>(() =>
             {
                 if (BundledFfmpegBootstrapper.WaitForProcessMutex(
-                    waitingMutex, CoordinationTimeout, cancellationSource.Token))
+                    waitingMutex, CoordinationTimeout, cancellationSource.Token, cancellationSource.Cancel))
                     waitingMutex.ReleaseMutex();
             });
-            OwnThread.WaitUntilBlocked(waiter.Value, CoordinationTimeout);
-            cancellationSource.Cancel();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-                waiter.Value.Completion.WaitAsync(CoordinationTimeout));
+            Assert.True(cancellationSource.IsCancellationRequested);
+            Assert.Equal(cancellationSource.Token, error.CancellationToken);
         }
         finally
         {
-            cancellationSource.Cancel();
             releaseHolder.Set();
-            try { await OwnThread.JoinAsync(holder, CoordinationTimeout); }
-            finally
-            {
-                if (waiter is { } worker) await OwnThread.JoinAsync(worker, CoordinationTimeout);
-            }
+            await OwnThread.JoinAsync(holder, CoordinationTimeout);
         }
     }
 
