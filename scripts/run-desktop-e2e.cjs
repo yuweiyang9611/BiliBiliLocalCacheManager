@@ -52,7 +52,8 @@ assert(argumentsList.every(value => value === '--skip-build' || value === '--kee
   try {
     await run('setup', process.execPath, [path.join(__dirname, 'setup-desktop-e2e.cjs')]);
     if (!argumentsList.includes('--skip-build')) {
-      await run('build-host', 'dotnet', ['build', path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'BiliBiliLocalCacheManager.Desktop.Host.csproj'), '--configuration', 'Release', '--nologo']);
+      const hostProject = suite === 'requirements' ? 'BiliBiliLocalCacheManager.Desktop.Host' : 'BiliBiliLocalCacheManager.Desktop.Host.Tests';
+      await run('build-host', 'dotnet', ['build', path.join(repository, hostProject, hostProject + '.csproj'), '--configuration', 'Release', '--nologo']);
       // npm_execpath avoids Windows .cmd shell quoting and works from npm on both platforms.
       assert(process.env.npm_execpath, 'Run this entry with npm run test:e2e.');
       await run('build-desktop', process.execPath, [process.env.npm_execpath, 'run', 'build'], desktop);

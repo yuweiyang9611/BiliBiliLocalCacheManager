@@ -110,7 +110,12 @@ public sealed partial class DesktopHostContractTests
                 targets = new[] { new { avid = "101" } } }));
         Assert.False(result.GetProperty("published").GetBoolean());
         Assert.Equal(0, result.GetProperty("exportedCount").GetInt32());
-        Assert.Contains("changed", Assert.Single(result.GetProperty("failures").EnumerateArray()).GetProperty("message").GetString());
+        var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+        Assert.Equal("101", failure.GetProperty("avid").GetString());
+        Assert.Equal(1, failure.GetProperty("pageIndex").GetInt32());
+        Assert.Equal("First", failure.GetProperty("title").GetString());
+        Assert.Equal("Source media or its prepared export changed before batch publication; retry the complete batch.",
+            failure.GetProperty("message").GetString());
         Assert.Empty(Directory.EnumerateFileSystemEntries(destination));
     }
 
@@ -136,23 +141,33 @@ public sealed partial class DesktopHostContractTests
     }
 
     [Fact]
-    public async Task Export_ChangedStagedBytesPreventBatchPublication()
+    public async Task Export_FinalVerificationIdentifiesTheFailedPartAndRollsBackBothVideos()
     {
         using var workspace = new HostTestWorkspace();
-        workspace.CreateCache(101, "First", 2);
+        workspace.CreateCache(101, "Same title", timestampOverride: 2_000_000);
+        workspace.CreateCache(202, "Same title", segmentCount: 2, timestampOverride: 1_000_000);
         var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
         var application = workspace.CreateCopyExportApplication();
         application.ProgressReported += (_, progress) =>
         {
-            if (progress.Current == 2 && progress.Phase == "source-hash")
+            if (progress.Current == 3 && progress.Phase == "final-output-verify")
             {
-                var staged = Directory.EnumerateFiles(destination, "P001_*.mp4", SearchOption.AllDirectories).Single();
+                // Both items have been copied. The first video is being checked; change only AV202 P2.
+                var staged = Directory.EnumerateFiles(destination, "P002_*.mp4", SearchOption.AllDirectories).Single();
                 File.WriteAllText(staged, "changed after copy");
             }
         };
         var result = await DispatchAsync(application, "export", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot,
-            outputPath = destination, targets = new[] { new { avid = "101" } } }));
+            outputPath = destination, targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } },
+                new { avid = "202", pageIndexes = new[] { 2 } } } }));
         Assert.False(result.GetProperty("published").GetBoolean());
+        Assert.Equal(0, result.GetProperty("exportedCount").GetInt32());
+        var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+        Assert.Equal("202", failure.GetProperty("avid").GetString());
+        Assert.Equal(2, failure.GetProperty("pageIndex").GetInt32());
+        Assert.Equal("Same title", failure.GetProperty("title").GetString());
+        Assert.Equal("Staged export media changed before batch publication; retry the complete batch.",
+            failure.GetProperty("message").GetString());
         Assert.Empty(Directory.EnumerateFileSystemEntries(destination));
     }
 
@@ -242,7 +257,7 @@ public sealed partial class DesktopHostContractTests
     }
 
     // Host publication tests use labelled bytes so they can assert which page was copied without FFmpeg.
-    private sealed class FixtureCopyProcessor : IExportMediaProcessor
+    internal sealed class FixtureCopyProcessor : IExportMediaProcessor
     {
         public Task ProcessAsync(CachePlaybackPlan plan, string outputPath, Action<string> requireAudioTranscode,
             IProgress<PlaybackPreparationProgress>? progress, CancellationToken cancellationToken)

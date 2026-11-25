@@ -350,6 +350,117 @@ describe('desktop renderer', () => {
     expect(api.scan).toHaveBeenCalledOnce();
   });
 
+  it.each(['failure', 'host cancellation', 'user cancellation'] as const)(
+    'identifies the displayed search after %s and retries the submitted filters', async mode => {
+      const first = { ...initialItem, id: '101', avid: '101', title: '海洋纪录片' };
+      const second = { ...initialItem, id: '202', avid: '202', title: '森林纪录片' };
+      const interrupted = deferred<CachePage>();
+      const resumed = deferred<CachePage>();
+      vi.mocked(api.search).mockResolvedValueOnce(createCachePage([first]))
+        .mockReturnValueOnce(interrupted.promise).mockReturnValueOnce(resumed.promise);
+      await renderScannedLibrary();
+      const input = screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号');
+      fireEvent.change(input, { target: { value: '海洋' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(await screen.findByLabelText('选择 海洋纪录片')).toBeVisible();
+
+      fireEvent.change(input, { target: { value: '森林' } });
+      fireEvent.change(screen.getByRole('combobox', { name: '匹配方式' }), { target: { value: 'prefix' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      const submitted = vi.mocked(api.search).mock.calls[1][0];
+      expect(submitted).toMatchObject({ keyword: '森林', matchMode: 'prefix', indexToken, offset: 0 });
+      if (mode === 'user cancellation') {
+        fireEvent.click(screen.getByRole('button', { name: '取消' }));
+      } else {
+        await act(async () => interrupted.reject(mode === 'failure' ? new Error('读取失败') : new IpcError('Cancelled', 'cancelled')));
+      }
+      const reason = mode === 'failure' ? '查询失败' : '查询已取消';
+      const message = `${reason}，当前仍显示上次搜索“海洋”的结果。`;
+      expect(await screen.findByText(message)).toBeVisible();
+      expect(input).toHaveValue('森林');
+      expect(screen.getByLabelText('选择 海洋纪录片')).toBeVisible();
+
+      fireEvent.click(screen.getByRole('button', { name: '重试查询' }));
+      expect(api.search).toHaveBeenNthCalledWith(3, submitted);
+      await act(async () => resumed.resolve(createCachePage([second])));
+      if (mode === 'user cancellation') {
+        await act(async () => interrupted.resolve(createCachePage([first])));
+      }
+      expect(screen.getByLabelText('选择 森林纪录片')).toBeVisible();
+      expect(screen.queryByLabelText('选择 海洋纪录片')).not.toBeInTheDocument();
+      expect(screen.queryByText(message)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '重试查询' })).not.toBeInTheDocument();
+      expect(api.scan).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([['failed', new Error('Read failed')], ['cancelled', new IpcError('Cancelled', 'cancelled')]] as const)(
+    'identifies a previous search with no matches after the next search is %s', async (kind, error) => {
+      vi.mocked(api.search).mockResolvedValueOnce(createCachePage([])).mockRejectedValueOnce(error)
+        .mockResolvedValueOnce(createCachePage([{ ...initialItem, title: '森林纪录片' }])).mockRejectedValueOnce(error);
+      await renderScannedLibrary();
+      const input = screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号');
+      fireEvent.change(input, { target: { value: '海洋' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      await screen.findByRole('heading', { name: '未找到匹配缓存' });
+      fireEvent.change(input, { target: { value: '森林' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(await screen.findByText(/上次搜索“海洋”没有匹配缓存/)).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: '重试查询' }));
+      expect(api.search).toHaveBeenNthCalledWith(3, expect.objectContaining({ keyword: '森林', offset: 0, indexToken }));
+      expect(await screen.findByLabelText('选择 森林纪录片')).toBeVisible();
+
+      fireEvent.click(screen.getByRole('button', { name: '清空结果' }));
+      fireEvent.click(screen.getByRole('button', { name: '重新显示结果' }));
+      expect(await screen.findByRole('heading', { name: kind === 'failed' ? '查询未完成' : '查询已取消' })).toBeVisible();
+      expect(screen.queryByText(/上次搜索/)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(['failed', 'cancelled'] as const)('retries the interrupted page after a %s page change', async mode => {
+    const nextPage = { ...initialItem, id: '203', avid: '203', title: '第二页的视频' };
+    vi.mocked(api.scan).mockResolvedValueOnce(createCachePage([initialItem], { pageSize: 1, totalItems: 2, hasMore: true }));
+    const pending = deferred<CachePage>();
+    vi.mocked(api.search).mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(createCachePage([nextPage], { pageSize: 1, totalItems: 2, offset: 1 }));
+    await renderScannedLibrary();
+    const pager = screen.getByLabelText('缓存分页');
+    fireEvent.click(within(pager).getByRole('button', { name: '下一页' }));
+    if (mode === 'failed') await act(async () => pending.reject(new Error('翻页失败')));
+    else fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(await screen.findByText(/当前仍显示未筛选的缓存列表/)).toBeVisible();
+    expect(screen.getByLabelText('选择 测试缓存')).toBeVisible();
+    expect(pager).toHaveTextContent('1–1 / 2');
+
+    fireEvent.click(screen.getByRole('button', { name: '重试查询' }));
+    expect(api.search).toHaveBeenNthCalledWith(2, expect.objectContaining({ keyword: '', offset: 1, pageSize: 1, indexToken }));
+    if (mode === 'cancelled') await act(async () => pending.reject(new IpcError('Cancelled', 'cancelled')));
+    expect(await screen.findByLabelText('选择 第二页的视频')).toBeVisible();
+    expect(pager).toHaveTextContent('2–2 / 2');
+    expect(screen.queryByRole('button', { name: '重试查询' })).not.toBeInTheDocument();
+  });
+
+  it('cancels a pending edit along with its old page request and retries the new search from page one', async () => {
+    vi.mocked(api.scan).mockResolvedValueOnce(createCachePage([initialItem], { pageSize: 1, totalItems: 2, hasMore: true }));
+    const oldPage = deferred<CachePage>();
+    const edited = { ...initialItem, id: '302', avid: '302', title: '森林特辑' };
+    vi.mocked(api.search).mockReturnValueOnce(oldPage.promise).mockResolvedValueOnce(createCachePage([edited]));
+    await renderScannedLibrary();
+    fireEvent.click(within(screen.getByLabelText('缓存分页')).getByRole('button', { name: '下一页' }));
+    fireEvent.change(screen.getByPlaceholderText('搜索标题、UP 主、BV 号或 AV 号'), { target: { value: '森林' } });
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    await act(async () => {
+      oldPage.resolve(createCachePage([{ ...initialItem, title: '过期分页内容' }]));
+      await new Promise(resolve => window.setTimeout(resolve, 400));
+    });
+    expect(api.search).toHaveBeenCalledOnce();
+    expect(screen.queryByLabelText('选择 过期分页内容')).not.toBeInTheDocument();
+    expect(screen.getByText('查询已取消，当前仍显示未筛选的缓存列表。')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '重试查询' }));
+    expect(api.search).toHaveBeenLastCalledWith(expect.objectContaining({ keyword: '森林', offset: 0, indexToken }));
+    expect(await screen.findByLabelText('选择 森林特辑')).toBeVisible();
+  });
+
   it('keeps cleared results empty after both a pending search and its debounce deadline', async () => {
     await renderScannedLibrary();
     const delayed = deferred<CachePage>();

@@ -1,4 +1,4 @@
-import type { CacheEntry, TrashEntry, ArtifactCleanupResult } from '../shared/contracts';
+import type { CacheEntry, TrashEntry, ArtifactCleanupResult, MediaFailure } from '../shared/contracts';
 import type { Notice } from './ui-types';
 
 export function toggleSet(current: Set<string>, value: string): Set<string> { const next = new Set(current); if (next.has(value)) next.delete(value); else next.add(value); return next; }
@@ -16,6 +16,14 @@ export function formatDuration(seconds: number): string { if (!Number.isFinite(s
 export function formatDate(value: string | null): string { if (!value) return '未知'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }); }
 
 export function trashTime(entry: TrashEntry): number { if (!entry.deletedAt) return 0; const value = new Date(entry.deletedAt).getTime(); return Number.isNaN(value) ? 0 : value; }
+
+export function formatFailureTarget({ title, avid, pageIndex }: MediaFailure): string {
+  const av = avid ? `av${avid}` : '';
+  const parts = [title || av || '操作失败'];
+  if (av && title && title.toLowerCase() !== av) parts.push(av);
+  if (pageIndex !== null) parts.push(`P${pageIndex}`);
+  return parts.join(' · ');
+}
 
 export type DiskOutcome = { failed: string[]; cancelled?: boolean; unprocessed?: string[] };
 

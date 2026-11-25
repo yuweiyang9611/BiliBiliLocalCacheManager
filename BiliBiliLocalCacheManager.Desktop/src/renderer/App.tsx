@@ -15,7 +15,7 @@ import { useLibrarySelection } from './hooks/useLibrarySelection';
 import type { Page, Notice, Activity, CachePageState } from './ui-types';
 import { safeName, dateStamp, formatBytes, diskOutcomeKind, diskOutcomeMessage, artifactCleanupMessage } from './display';
 import { Modal } from './components/Common';
-import { LibraryPage } from './pages/LibraryPage';
+import { LibraryPage, type InterruptedSearch } from './pages/LibraryPage';
 import { StoragePage } from './pages/StoragePage';
 import { TrashPage } from './pages/TrashPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -96,7 +96,7 @@ export function App() {
   const [inspectionBusy, setInspectionBusy] = useState<string | null>(null);
   const inspectionInFlight = useRef(false);
   const [searching, setSearching] = useState(false);
-  const [libraryQueryState, setLibraryQueryState] = useState<'idle' | 'pending' | 'failed' | 'cancelled'>('idle');
+  const [libraryQueryState, setLibraryQueryState] = useState<'idle' | 'pending' | InterruptedSearch>('idle');
   const [libraryResultsCleared, setLibraryResultsCleared] = useState(false);
   const [operationStates, setOperationStates] = useState<Record<string, OperationState>>({});
   const blockedOperations = useRef(false);
@@ -122,7 +122,7 @@ export function App() {
   const pendingSearch = useRef<QueuedSearch | null>(null);
   const latestSearchRevision = useRef(0);
   const displayedSearch = useRef<SearchRequest | null>(null);
-  const searchDrainActive = useRef(false);
+  const activeSearch = useRef<SearchRequest | null>(null);
   const resumePendingSearch = useRef<() => void>(() => undefined);
   const operationInFlight = useRef(true);
   const allowReadOnly = useRef(false);
@@ -181,7 +181,7 @@ export function App() {
   const discardSearch = useCallback(() => {
     window.clearTimeout(searchTimer.current);
     void cacheManager.cancelSearch().catch(() => undefined);
-    searchDrainActive.current = false;
+    activeSearch.current = null;
     setSearching(false);
     setLibraryQueryState('idle');
     latestSearchRevision.current += 1;
@@ -494,7 +494,7 @@ export function App() {
     if ((operationInFlight.current && !allowReadOnly.current) || !pendingSearch.current) return;
     const queued = pendingSearch.current;
     pendingSearch.current = null;
-    searchDrainActive.current = true;
+    activeSearch.current = queued.request;
     setSearching(true);
     try {
       const result = await cacheManager.search(queued.request);
@@ -513,12 +513,13 @@ export function App() {
         invalidateIndex();
         notify('info', '缓存索引已失效，请重新扫描。');
       } else {
-        setLibraryQueryState(isCancellationError(error) ? 'cancelled' : 'failed');
+        setLibraryQueryState({ status: isCancellationError(error) ? 'cancelled' : 'failed',
+          displayedKeyword: displayedSearch.current?.keyword ?? '', offset: queued.request.offset });
         if (!isCancellationError(error)) notify('error', describeError(error));
       }
     } finally {
       if (queued.revision === latestSearchRevision.current) {
-        searchDrainActive.current = false;
+        activeSearch.current = null;
         setSearching(false);
       }
     }
@@ -575,12 +576,14 @@ export function App() {
   }, [activeRootPath, hasActiveIndex, indexBinding, invalidateIndex, settings.includeIncomplete]);
 
   const cancelCurrentOperation = useCallback(async () => {
-    if (searchDrainActive.current && !operationInFlight.current) {
+    if (activeSearch.current && !operationInFlight.current) {
+      const offset = sameSearchRequest(activeSearch.current, searchContextRef.current.request) ? activeSearch.current.offset : 0;
+      window.clearTimeout(searchTimer.current);
       latestSearchRevision.current += 1;
       pendingSearch.current = null;
-      searchDrainActive.current = false;
+      activeSearch.current = null;
       setSearching(false);
-      setLibraryQueryState('cancelled');
+      setLibraryQueryState({ status: 'cancelled', displayedKeyword: displayedSearch.current?.keyword ?? '', offset });
       await cacheManager.cancelSearch().catch(error => notify('error', describeError(error)));
       return;
     }

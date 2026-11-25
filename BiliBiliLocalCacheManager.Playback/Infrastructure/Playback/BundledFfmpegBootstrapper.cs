@@ -987,30 +987,61 @@ internal static class BundledFfmpegBootstrapper
             : versionInfo.ProductVersion;
     }
 
-    internal static async Task<string?> ReadProcessVersionAsync(ProcessStartInfo startInfo, TimeSpan timeout)
+    internal static Task<string?> ReadProcessVersionAsync(ProcessStartInfo startInfo, TimeSpan timeout) =>
+        Task.Factory.StartNew(() => ReadProcessVersion(startInfo, timeout),
+            CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+    private static string? ReadProcessVersion(ProcessStartInfo startInfo, TimeSpan timeout)
     {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        if (!startInfo.RedirectStandardOutput || !startInfo.RedirectStandardError)
+            throw new ArgumentException("版本探测需要重定向标准输出和标准错误。", nameof(startInfo));
+
         using var process = Process.Start(startInfo);
         if (process is null) return null;
-        using var deadline = new CancellationTokenSource(timeout);
-        var firstLine = process.StandardOutput.ReadLineAsync(deadline.Token).AsTask();
-        var stderr = process.StandardError.BaseStream.CopyToAsync(Stream.Null, deadline.Token);
+        using var stopReading = new CancellationTokenSource();
+        using var stdout = process.StandardOutput;
+        using var stderr = process.StandardError;
         try
         {
-            var line = await firstLine.ConfigureAwait(false);
-            var stdout = process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, deadline.Token);
-            await Task.WhenAll(stdout, stderr, process.WaitForExitAsync(deadline.Token)).ConfigureAwait(false);
-            return line;
-        }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
-        {
-            try { process.Kill(entireProcessTree: true); }
-            catch (InvalidOperationException) { }
-            catch (System.ComponentModel.Win32Exception) { }
-            try { await Task.WhenAll(firstLine, stderr).ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
-            catch (IOException) { }
+            var version = ReadVersionAndDrainAsync(stdout, stopReading.Token);
+            var completion = Task.WhenAll(version, stderr.BaseStream.CopyToAsync(Stream.Null, stopReading.Token),
+                process.WaitForExitAsync(stopReading.Token));
+
+            // A timed wait on this dedicated thread can expire even when the pool cannot run timers or pipe callbacks.
+            if (Task.WaitAny([completion], timeout) != -1)
+            {
+                completion.GetAwaiter().GetResult();
+                return version.GetAwaiter().GetResult();
+            }
+
+            // A descendant can keep a pipe open after the root exits. Observe late I/O errors without waiting for EOF.
+            _ = completion.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             return null;
         }
+        finally
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    try { process.Kill(entireProcessTree: true); }
+                    catch (InvalidOperationException) when (process.HasExited) { }
+                    catch (System.ComponentModel.Win32Exception) when (process.HasExited) { }
+                    if (!process.WaitForExit(TimeSpan.FromSeconds(2)))
+                        throw new TimeoutException("等待版本探测进程退出超时。");
+                }
+            }
+            finally { stopReading.Cancel(); }
+        }
+    }
+
+    private static async Task<string?> ReadVersionAndDrainAsync(StreamReader output, CancellationToken cancellationToken)
+    {
+        var version = await output.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        await output.BaseStream.CopyToAsync(Stream.Null, cancellationToken).ConfigureAwait(false);
+        return version;
     }
 
     private static bool IsFatalException(Exception exception)

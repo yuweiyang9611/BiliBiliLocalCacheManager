@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { TaskHistorySnapshot, TaskOperation, TaskOutcome } from '../../shared/contracts';
 import { cacheManager } from '../cache-manager';
+import { formatFailureTarget } from '../display';
 import { ExportOutputActions } from './ExportOutputActions';
 
 const names: Record<TaskOperation, string> = { play: '播放', export: '导出', 'trash.move': '移入回收站',
@@ -44,7 +45,7 @@ export function TaskHistoryPanel() {
       {entry.operation === 'export' && entry.status === 'succeeded' && entry.succeeded > 0 && entry.outputPath &&
         <ExportOutputActions taskId={entry.id} outputPath={entry.outputPath} />}
       {entry.failures.length > 0 && <ul>{entry.failures.map((failure, index) => <li key={index}>
-        <strong>{failure.title || failure.avid}{failure.pageIndex !== null ? ` · P${failure.pageIndex}` : ''}</strong><p>{failure.message}</p>
+        <strong>{formatFailureTarget(failure)}</strong><p>{failure.message}</p>
       </li>)}</ul>}
       {entry.failed > entry.failures.length && <p>仅保留前 {entry.failures.length} 项失败明细，失败总数为 {entry.failed} 项。</p>}
     </details>)}

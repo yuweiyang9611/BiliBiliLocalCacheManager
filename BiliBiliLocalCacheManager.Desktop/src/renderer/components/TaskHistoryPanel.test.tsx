@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
+import { TaskHistoryStore } from '../../main/task-history';
 import type { TaskHistoryEntry, TaskHistorySnapshot } from '../../shared/contracts';
 import { TaskHistoryPanel } from './TaskHistoryPanel';
 
@@ -56,4 +60,34 @@ it('opens a retained batch by task ID and keeps the original path available when
   fireEvent.click(screen.getByRole('button', { name: '复制路径' }));
   expect(await screen.findByText('已复制导出路径。')).toBeInTheDocument();
   expect(accessExportOutput.mock.calls).toEqual([[entry.id, 'open'], [entry.id, 'copy']]);
+});
+
+it('shows which same-titled video and part failed final export verification after reopening history', async () => {
+  const folder = await mkdtemp(path.join(tmpdir(), 'blcm-export-history-'));
+  try {
+    const file = path.join(folder, 'history.json');
+    const history = new TaskHistoryStore(file);
+    const sourceChanged = 'Source media or its prepared export changed before batch publication; retry the complete batch.';
+    const stagedChanged = 'Staged export media changed before batch publication; retry the complete batch.';
+    for (const [avid, message] of [['101', sourceChanged], ['202', stagedChanged]]) {
+      await history.start(avid, 'export', {});
+      await history.finish(avid, 'export', { published: false, outputPath: null, exportedCount: 0,
+        failures: [{ avid, pageIndex: 2, title: '同名视频', message }] });
+    }
+
+    const reopened = new TaskHistoryStore(file);
+    Object.defineProperty(window, 'cacheManager', { configurable: true, value: {
+      getTaskHistory: () => reopened.snapshot(), onTaskHistoryChanged: () => () => undefined,
+    } });
+    render(<TaskHistoryPanel />);
+    for (const summary of await screen.findAllByText('导出')) fireEvent.click(summary);
+    const first = screen.getByText(sourceChanged);
+    const second = screen.getByText(stagedChanged);
+    expect(first).toBeVisible();
+    expect(second).toBeVisible();
+    expect(first.closest('li')).toHaveTextContent('同名视频 · av101 · P2');
+    expect(second.closest('li')).toHaveTextContent('同名视频 · av202 · P2');
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
 });
