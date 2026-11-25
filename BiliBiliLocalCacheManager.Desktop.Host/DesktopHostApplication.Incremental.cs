@@ -44,6 +44,10 @@ internal sealed partial class DesktopHostApplication
             source.AvidDirectories - removed.Length + changed.ScannedAvidDirectories,
             source.SegmentDirectories - removed.Sum(cache => cache.Segments.Count) + changed.ScannedSegmentDirectories,
             retained.Sum(cache => cache.Segments.Count) + changed.IncludedEntries,
-            changed.SkippedIncompleteEntries, changed.InvalidEntries, changed.InaccessibleDirectories, changed.Issues);
+            changed.SkippedIncompleteEntries, changed.InvalidEntries, changed.InaccessibleDirectories, changed.Issues)
+        {
+            // An incremental refresh is only available from a complete, warning-free baseline.
+            UnavailablePartIdentities = changed.UnavailablePartIdentities
+        };
     }
 }

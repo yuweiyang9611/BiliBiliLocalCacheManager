@@ -169,7 +169,7 @@ public sealed partial class FileSystemCacheTrashService
         string destinationPath,
         string description)
     {
-        var normalizedDestinationPath = Path.GetFullPath(destinationPath);
+        var normalizedDestinationPath = GetWindowsApiPath(Path.GetFullPath(destinationPath));
         var fileNameBytes = Encoding.Unicode.GetBytes(normalizedDestinationPath);
         var rootDirectoryOffset = IntPtr.Size;
         var fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
@@ -232,7 +232,7 @@ public sealed partial class FileSystemCacheTrashService
         FileShare shareMode = FileShare.Read | FileShare.Write)
     {
         var handle = CreateFileW(
-            path,
+            GetWindowsApiPath(path),
             desiredAccess,
             shareMode,
             IntPtr.Zero,
@@ -248,6 +248,18 @@ public sealed partial class FileSystemCacheTrashService
         handle.Dispose();
         throw new IOException(
             $"{description} could not be opened safely: {new Win32Exception(error).Message}");
+    }
+
+    internal static string GetWindowsApiPath(string path)
+    {
+        // Callers supply absolute paths. Keep the common short-path scan allocation-free.
+        if (path.Length < 260) return path;
+        var fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith(@"\\?\", StringComparison.Ordinal) ||
+            fullPath.StartsWith(@"\\.\", StringComparison.Ordinal)) return fullPath;
+        return fullPath.StartsWith(@"\\", StringComparison.Ordinal)
+            ? @"\\?\UNC\" + fullPath[2..]
+            : @"\\?\" + fullPath;
     }
 
     private static FileAttributes GetHandleAttributes(SafeFileHandle handle, string description)

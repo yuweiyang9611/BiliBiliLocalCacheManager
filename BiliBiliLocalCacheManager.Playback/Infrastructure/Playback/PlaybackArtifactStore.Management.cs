@@ -76,12 +76,12 @@ public sealed partial class PlaybackArtifactStore
     }
 
     private PlaybackArtifactCacheStatistics CreateCacheStatistics(
-        IReadOnlyCollection<ManagedFileSnapshot> files)
+        IReadOnlyCollection<ManagedFileSnapshot> files, CancellationToken cancellationToken = default)
     {
         return new PlaybackArtifactCacheStatistics(
             RootDirectory,
             files.Count,
-            SumLengths(files));
+            SumLengths(files, cancellationToken));
     }
 
     private static string GetDefaultRootDirectory()

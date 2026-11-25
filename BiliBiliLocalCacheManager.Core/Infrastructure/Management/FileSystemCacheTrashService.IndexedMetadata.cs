@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Core.Domain.Models;
@@ -12,103 +13,142 @@ public sealed partial class FileSystemCacheTrashService
 {
     private const int MaximumEntryMetadataBytes = 4 * 1024 * 1024;
 
-    internal static (byte[] Bytes, string? DirectoryIdentity, string? Error) ReadEntryForScan(
-        string root, string parent, string directory, string entryPath, bool captureIdentity, CancellationToken token)
+    // The root and AV are shared by all parts in this scan batch. A Windows directory lease
+    // pins the AV (and prevents ancestor renames); individual part leases remain short lived.
+    internal static SafeFileHandle? LeaseScanParent(string root, string parent, bool captureIdentity, out string? error)
     {
-        SafeFileHandle? parentLease = null;
+        error = null;
+        if (!captureIdentity || !OperatingSystem.IsWindows()) return null;
+        try
+        {
+            EnsureDirectChild(root, parent);
+            var lease = LeasePartDirectory(parent);
+            try
+            {
+                EnsurePhysicalDirectory(root, "The cache root directory");
+                return lease;
+            }
+            catch { lease?.Dispose(); throw; }
+        }
+        catch (Exception ex) when (IsPurgeFailure(ex))
+        {
+            error = ex.Message;
+            return null;
+        }
+    }
+
+    internal sealed class ScannedPartMetadata(ArraySegment<byte> bytes, SafeFileHandle? directoryLease, string? unixIdentity, string? error)
+        : IDisposable
+    {
+        public string ReadText()
+        {
+            // The common UTF-8 object needs only its decoded string. Preserve StreamReader's BOM detection otherwise.
+            if (bytes.Count > 0 && bytes[0] == (byte)'{') return Encoding.UTF8.GetString(bytes.AsSpan());
+            using var reader = new StreamReader(new MemoryStream(bytes.Array!, bytes.Offset, bytes.Count, writable: false));
+            return reader.ReadToEnd();
+        }
+
+        public CacheScanPartIdentity Bind(BiliSegment segment)
+        {
+            if (error is not null) return new(null, error);
+            try
+            {
+                if (Path.GetFileName(Path.GetDirectoryName(segment.SegmentDirectory)) != segment.Avid.ToString(CultureInfo.InvariantCulture) ||
+                    !string.Equals(Path.GetFullPath(segment.EntryJsonPath), Path.Combine(segment.SegmentDirectory, "entry.json"),
+                        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    throw new InvalidDataException("The indexed metadata is outside its canonical part location.");
+                var identity = GetPartDirectoryIdentity(segment.SegmentDirectory, directoryLease);
+                if (directoryLease is null && unixIdentity != identity)
+                    throw new InvalidDataException("The selected part directory changed while indexing.");
+                var hash = HashPartEntry(bytes, segment.Avid, segment.PageIndex, segment.Cid);
+                return new(new(segment.Avid, segment.PageIndex, segment.SegmentDirectory, hash, identity), null);
+            }
+            catch (Exception ex) when (IsPurgeFailure(ex) || ex is JsonException)
+            {
+                return new(null, ex.Message);
+            }
+        }
+
+        public void Dispose() => directoryLease?.Dispose();
+    }
+
+    internal static ScannedPartMetadata ReadEntryForScan(
+        string root, string parent, string directory, string entryPath, bool captureIdentity, string? parentError,
+        byte[] smallEntryBuffer, CancellationToken token)
+    {
         SafeFileHandle? directoryLease = null;
         FileStream? entry = null;
         try
         {
-            string? identity = null;
-            string? error = null;
-            if (captureIdentity)
+            string? unixIdentity = null;
+            var error = parentError;
+            if (captureIdentity && error is null)
             {
                 try
                 {
-                    EnsurePhysicalDirectory(root, "The cache root directory");
-                    EnsureDirectChild(root, parent);
-                    EnsureDirectChild(parent, directory);
-                    if (!OperatingSystem.IsWindows())
+                    if (OperatingSystem.IsWindows())
+                        directoryLease = LeasePartDirectory(directory);
+                    else
                     {
+                        EnsurePhysicalDirectory(root, "The cache root directory");
                         EnsurePhysicalDirectory(parent, "The parent video directory");
-                        EnsurePhysicalDirectory(directory, "The selected part directory");
+                        unixIdentity = GetPartDirectoryIdentity(directory, null);
                     }
-                    parentLease = LeasePartDirectory(parent);
-                    directoryLease = LeasePartDirectory(directory);
-                    identity = GetPartDirectoryIdentity(directory, directoryLease);
-                    entry = OpenPartMetadata(entryPath);
+                    entry = OpenPartMetadata(entryPath, bufferSize: 1);
                 }
                 catch (FileNotFoundException) { throw; }
                 catch (Exception ex) when (IsPurgeFailure(ex))
                 {
                     // A readable entry can still be displayed if its deletion identity cannot be bound.
-                    identity = null;
-                    error = ex.Message;
-                    if (!IsPhysicalScanDirectory(root) || !IsPhysicalScanDirectory(parent) || !IsPhysicalScanDirectory(directory))
-                        throw new InvalidDataException("The metadata is not inside physical cache directories.", ex);
-                }
-            }
-            entry ??= OpenPartMetadata(entryPath, requireDeleteAccess: false);
-            var bytes = ReadEntryBytes(entry, token);
-            if (identity is not null && directoryLease is null)
-            {
-                // Unix permits renames during the read. Never bind bytes from a replaced directory.
-                try
-                {
-                    if (identity != GetPartDirectoryIdentity(directory, null))
-                        throw new InvalidDataException("The selected part directory changed while indexing.");
-                }
-                catch (Exception ex) when (IsPurgeFailure(ex))
-                {
-                    identity = null;
                     error = ex.Message;
                 }
             }
-            return (bytes, identity, error);
+            if (error is not null && (!IsPhysicalScanDirectory(root) || !IsPhysicalScanDirectory(parent) || !IsPhysicalScanDirectory(directory)))
+                throw new InvalidDataException("The metadata is not inside physical cache directories.");
+            entry ??= OpenPartMetadata(entryPath, requireDeleteAccess: false, bufferSize: 1);
+            return new(ReadEntryBytes(entry, token, smallEntryBuffer), directoryLease, unixIdentity, error);
         }
-        finally
+        catch
         {
-            entry?.Dispose();
             directoryLease?.Dispose();
-            parentLease?.Dispose();
+            throw;
         }
+        finally { entry?.Dispose(); }
     }
 
     private static bool IsPhysicalScanDirectory(string path) =>
         (File.GetAttributes(path) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == FileAttributes.Directory;
 
-    internal static CacheScanPartIdentity BindScannedPart(BiliSegment segment, byte[] bytes, string directoryIdentity)
-    {
-        try
-        {
-            if (Path.GetFileName(Path.GetDirectoryName(segment.SegmentDirectory)) != segment.Avid.ToString(CultureInfo.InvariantCulture) ||
-                !string.Equals(Path.GetFullPath(segment.EntryJsonPath), Path.Combine(segment.SegmentDirectory, "entry.json"),
-                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
-                throw new InvalidDataException("The indexed metadata is outside its canonical part location.");
-            var hash = HashPartEntry(bytes, segment.Avid, segment.PageIndex, segment.Cid);
-            return new(new(segment.Avid, segment.PageIndex, segment.SegmentDirectory, hash, directoryIdentity), null);
-        }
-        catch (Exception ex) when (IsPurgeFailure(ex) || ex is JsonException)
-        {
-            return new(null, ex.Message);
-        }
-    }
-
-    private static byte[] ReadEntryBytes(FileStream stream, CancellationToken token)
+    private static ArraySegment<byte> ReadEntryBytes(FileStream stream, CancellationToken token, byte[]? smallEntryBuffer = null)
     {
         token.ThrowIfCancellationRequested();
         if (!stream.CanSeek) throw new InvalidDataException("Part metadata must be a regular file.");
+        var offset = 0;
+        if (smallEntryBuffer is not null)
+        {
+            // A newly opened file starts at zero. Most entries fit in this scan-local buffer, so read to EOF
+            // without querying length, allocating a per-entry I/O buffer, or seeking the handle.
+            while (offset < smallEntryBuffer.Length)
+            {
+                var count = stream.Read(smallEntryBuffer.AsSpan(offset));
+                if (count == 0) return new(smallEntryBuffer, 0, offset);
+                offset += count;
+            }
+        }
+        else
+        {
+            stream.Position = 0;
+            // Revalidation rereads the same lease; an externally opened Unix fd also needs its native offset reset.
+            if (OperatingSystem.IsLinux() && SeekLinuxFile(stream.SafeFileHandle, 0, 0) < 0)
+                throw new IOException($"The part metadata could not be rewound: {new Win32Exception(Marshal.GetLastPInvokeError()).Message}");
+        }
         var length = stream.Length;
         if (length > MaximumEntryMetadataBytes)
             throw new InvalidDataException($"entry.json exceeds the {MaximumEntryMetadataBytes}-byte metadata limit.");
-        stream.Position = 0;
-        // A FileStream constructed from a Unix fd can track Position independently of the native read offset.
-        // Rewind the fd as well when moving a part: both checks must read the actual bytes through the same lease.
-        if (OperatingSystem.IsLinux() && SeekLinuxFile(stream.SafeFileHandle, 0, 0) < 0)
-            throw new IOException($"The part metadata could not be rewound: {new Win32Exception(Marshal.GetLastPInvokeError()).Message}");
+        if (length < offset) throw new EndOfStreamException("Part metadata changed while reading.");
         var bytes = new byte[(int)length];
-        for (var offset = 0; offset < bytes.Length;)
+        if (offset != 0) smallEntryBuffer!.AsSpan(0, offset).CopyTo(bytes);
+        while (offset < bytes.Length)
         {
             token.ThrowIfCancellationRequested();
             var count = stream.Read(bytes.AsSpan(offset, Math.Min(bytes.Length - offset, 64 * 1024)));
@@ -119,11 +159,11 @@ public sealed partial class FileSystemCacheTrashService
         return bytes;
     }
 
-    private static FileStream OpenPartMetadata(string path, bool requireDeleteAccess = true)
+    private static FileStream OpenPartMetadata(string path, bool requireDeleteAccess = true, int bufferSize = 4096)
     {
         if (!OperatingSystem.IsLinux())
         {
-            try { return OpenStateFileLease(path, "The part metadata", requireDeleteAccess); }
+            try { return OpenStateFileLease(path, "The part metadata", requireDeleteAccess, bufferSize); }
             catch (IOException)
             {
                 // The native lease reports IOException for all open failures. Preserve the scan's missing-file behavior.

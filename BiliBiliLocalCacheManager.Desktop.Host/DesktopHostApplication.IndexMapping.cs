@@ -201,9 +201,12 @@ internal sealed partial class DesktopHostApplication
         IReadOnlyDictionary<BiliSegment, CacheScanPartIdentity>? scannedParts = null)
     {
         var orderedIndex = new CacheIndex(report.Index.VideoCaches.OrderByDescending(GetLastUpdatedUtc).ThenBy(cache => cache.Avid));
-        var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, report.Issues, maximumIssues);
+        scannedParts ??= report.PartIdentities;
+        // The snapshot reports identity issues for its published selections, including ambiguous and legacy targets.
+        var issues = scannedParts is null ? report.Issues : report.Issues.Where(issue => issue.Kind != CacheScanIssueKind.PartIdentityUnavailable);
+        var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, issues, maximumIssues);
         snapshot.CaptureTrashPartTargets(_trashService, cancellationToken, partCaptureProgress, previous, changedAvids,
-            scannedParts ?? report.PartIdentities);
+            scannedParts);
         return snapshot;
     }
 

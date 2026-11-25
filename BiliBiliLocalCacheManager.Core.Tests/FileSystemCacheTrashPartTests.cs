@@ -9,6 +9,23 @@ public sealed class FileSystemCacheTrashPartTests : IDisposable
     private readonly string _root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"part-trash-{Guid.NewGuid():N}")).FullName;
 
     [Fact]
+    [Trait("Category", "WindowsOnly")]
+    public void LongWindowsPaths_PreserveDriveUncAndDevicePrefixes()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var tail = string.Join("\\", Enumerable.Repeat(new string('a', 80), 4)) + @"\entry.json";
+        var disk = @"C:\cache\" + tail;
+        var unc = @"\\server\share\cache\" + tail;
+        var extendedUnc = @"\\?\UNC\server\share\cache\" + tail;
+        var device = @"\\.\C:\cache\" + tail;
+        Assert.Equal(@"C:\cache\entry.json", FileSystemCacheTrashService.GetWindowsApiPath(@"C:\cache\entry.json"));
+        Assert.Equal(@"\\?\" + disk, FileSystemCacheTrashService.GetWindowsApiPath(disk));
+        Assert.Equal(extendedUnc, FileSystemCacheTrashService.GetWindowsApiPath(unc));
+        Assert.Equal(extendedUnc, FileSystemCacheTrashService.GetWindowsApiPath(extendedUnc));
+        Assert.Equal(device, FileSystemCacheTrashService.GetWindowsApiPath(device));
+    }
+
+    [Fact]
     public void PartMetadata_ExclusiveWriterPreventsCaptureAndMoveUntilItReleasesTheFile()
     {
         var part = CreatePart(100, "c1", 1);

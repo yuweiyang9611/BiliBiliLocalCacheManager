@@ -51,7 +51,11 @@ public sealed class CacheIndexBuildResult
     /// <summary>Physical identities (or the reason binding failed) for segments read during this build.</summary>
     public IReadOnlyDictionary<BiliSegment, CacheScanPartIdentity>? PartIdentities { get; internal init; }
 
-    public bool HasWarnings => SkippedIncompleteEntries > 0 || InvalidEntries > 0 || InaccessibleDirectories > 0;
+    /// <summary>Logical AV/page selections that could not be bound, including issues beyond the detail limit.</summary>
+    public int UnavailablePartIdentities { get; init; }
+
+    public bool HasWarnings => SkippedIncompleteEntries > 0 || InvalidEntries > 0 ||
+        InaccessibleDirectories > 0 || UnavailablePartIdentities > 0;
 
     public static CacheIndexBuildResult FromIndex(CacheIndex index)
     {

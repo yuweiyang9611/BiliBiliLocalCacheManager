@@ -624,7 +624,7 @@ public sealed partial class FileSystemCacheTrashService
         progress.CompleteDeletion();
     }
 
-    private static FileStream OpenStateFileLease(string path, string description, bool requireDeleteAccess = true)
+    private static FileStream OpenStateFileLease(string path, string description, bool requireDeleteAccess = true, int bufferSize = 4096)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -641,7 +641,7 @@ public sealed partial class FileSystemCacheTrashService
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
-                bufferSize: 4096,
+                bufferSize: bufferSize,
                 FileOptions.SequentialScan);
         }
 
@@ -664,7 +664,7 @@ public sealed partial class FileSystemCacheTrashService
             return new FileStream(
                 handle,
                 FileAccess.Read,
-                bufferSize: 4096,
+                bufferSize: bufferSize,
                 isAsync: false);
         }
         catch

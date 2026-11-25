@@ -14,13 +14,14 @@ public sealed partial class PlaybackArtifactStore
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var files = SnapshotAllManagedFilesStrict();
+        var files = SnapshotAllManagedFilesStrict(cancellationToken);
         // Storage can still report the measured usage if evaluating the cleanup policy fails.
-        statistics = CreateCacheStatistics(files);
+        statistics = CreateCacheStatistics(files, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        var plan = CreateCleanupPlan(CreateCleanupPolicy(options), _timeProvider.GetUtcNow().UtcDateTime, files);
+        var policy = CreateCleanupPolicy(options, cancellationToken);
+        var plan = CreateCleanupPlan(policy, _timeProvider.GetUtcNow().UtcDateTime, files, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        return CreateCleanupPreview(plan);
+        return CreateCleanupPreview(plan, cancellationToken);
     }
 
     public PlaybackArtifactCleanupPreview PreviewCleanup(
@@ -109,7 +110,7 @@ public sealed partial class PlaybackArtifactStore
         }
     }
 
-    private CleanupPolicy CreateCleanupPolicy(PlaybackArtifactCleanupOptions? options)
+    private CleanupPolicy CreateCleanupPolicy(PlaybackArtifactCleanupOptions? options, CancellationToken cancellationToken = default)
     {
         var effectiveOptions = options ?? new PlaybackArtifactCleanupOptions();
         if (effectiveOptions.MaxAge < TimeSpan.Zero)
@@ -138,7 +139,7 @@ public sealed partial class PlaybackArtifactStore
             effectiveOptions.MaxAge,
             effectiveOptions.MaxTotalBytes,
             effectiveOptions.CapacityEvictionGracePeriod,
-            SnapshotProtectedPaths(effectiveOptions.ProtectedPaths));
+            SnapshotProtectedPaths(EnumerateWithCancellation(effectiveOptions.ProtectedPaths, cancellationToken)));
     }
 
     private CleanupPlan CreateCleanupPlan(CleanupPolicy policy, DateTime nowUtc)
@@ -149,13 +150,16 @@ public sealed partial class PlaybackArtifactStore
     private CleanupPlan CreateCleanupPlan(
         CleanupPolicy policy,
         DateTime nowUtc,
-        IReadOnlyList<ManagedFileSnapshot> allManagedFiles)
+        IReadOnlyList<ManagedFileSnapshot> allManagedFiles,
+        CancellationToken cancellationToken = default)
     {
         var candidates = new List<CleanupCandidate>();
+        var managedFiles = new List<ManagedFileSnapshot>();
         var staleBuildCutoff = nowUtc - StaleBuildMaxAge;
-        foreach (var file in allManagedFiles.Where(file => IsManagedBuildFile(file.File)))
+        foreach (var file in allManagedFiles)
         {
-            if (file.LastWriteTimeUtc < staleBuildCutoff)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (IsManagedBuildFile(file.File) && file.LastWriteTimeUtc < staleBuildCutoff)
             {
                 candidates.Add(new CleanupCandidate(
                     file.File,
@@ -163,27 +167,28 @@ public sealed partial class PlaybackArtifactStore
                     IsStaleBuild: true,
                     staleBuildCutoff));
             }
+            else if (IsManagedArtifactFile(file.File) && !HasActiveProtection(file.File.FullName))
+            {
+                managedFiles.Add(file);
+            }
         }
 
-        var managedFiles = allManagedFiles
-            .Where(file => IsManagedArtifactFile(file.File) && !HasActiveProtection(file.File.FullName))
-            .ToList();
-        var projectedRemainingBytes = SumLengths(allManagedFiles);
+        var projectedRemainingBytes = SumLengths(allManagedFiles, cancellationToken);
         foreach (var staleBuild in candidates)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             projectedRemainingBytes = SubtractFloor(
                 projectedRemainingBytes,
                 staleBuild.Length);
         }
 
         var retentionCutoff = nowUtc - policy.MaxAge;
-        var retentionCandidates = managedFiles
-            .Where(file =>
-                !policy.ProtectedPaths.Contains(file.File.FullName) &&
-                file.LastWriteTimeUtc < retentionCutoff)
-            .ToList();
-        foreach (var file in retentionCandidates)
+        var retentionPaths = new HashSet<string>(PlaybackFileSystem.PathComparer);
+        foreach (var file in managedFiles)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (policy.ProtectedPaths.Contains(file.File.FullName) || file.LastWriteTimeUtc >= retentionCutoff) continue;
+            retentionPaths.Add(file.File.FullName);
             candidates.Add(new CleanupCandidate(
                 file.File,
                 file.Length,
@@ -192,11 +197,11 @@ public sealed partial class PlaybackArtifactStore
             projectedRemainingBytes = SubtractFloor(projectedRemainingBytes, file.Length);
         }
 
-        var retentionPaths = retentionCandidates
-            .Select(file => file.File.FullName)
-            .ToHashSet(PlaybackFileSystem.PathComparer);
+        if (projectedRemainingBytes <= policy.MaxTotalBytes)
+            return new CleanupPlan(candidates, projectedRemainingBytes);
+
         var capacityCutoff = nowUtc - policy.CapacityEvictionGracePeriod;
-        foreach (var file in managedFiles
+        foreach (var file in EnumerateWithCancellation(managedFiles, cancellationToken)
                      .Where(file =>
                          !retentionPaths.Contains(file.File.FullName) &&
                          !policy.ProtectedPaths.Contains(file.File.FullName) &&
@@ -204,6 +209,7 @@ public sealed partial class PlaybackArtifactStore
                      .OrderBy(file => file.LastWriteTimeUtc)
                      .ThenBy(file => file.File.FullName, PlaybackFileSystem.PathComparer))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (projectedRemainingBytes <= policy.MaxTotalBytes)
             {
                 break;
@@ -317,11 +323,12 @@ public sealed partial class PlaybackArtifactStore
             ref freedBytes);
     }
 
-    private static long SumCandidateLengths(IEnumerable<CleanupCandidate> candidates)
+    private static long SumCandidateLengths(IEnumerable<CleanupCandidate> candidates, CancellationToken cancellationToken)
     {
         var total = 0L;
         foreach (var candidate in candidates)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             total = candidate.Length > long.MaxValue - total
                 ? long.MaxValue
                 : total + candidate.Length;
@@ -330,11 +337,11 @@ public sealed partial class PlaybackArtifactStore
         return total;
     }
 
-    private static PlaybackArtifactCleanupPreview CreateCleanupPreview(CleanupPlan plan)
+    private static PlaybackArtifactCleanupPreview CreateCleanupPreview(CleanupPlan plan, CancellationToken cancellationToken = default)
     {
         return new PlaybackArtifactCleanupPreview(
             plan.Candidates.Count,
-            SumCandidateLengths(plan.Candidates),
+            SumCandidateLengths(plan.Candidates, cancellationToken),
             plan.ProjectedRemainingBytes);
     }
 

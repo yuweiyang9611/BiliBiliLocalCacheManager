@@ -69,7 +69,7 @@ internal sealed partial class DesktopHostApplication
         public IReadOnlyDictionary<long, CacheSummaryDto> Summaries { get; }
         private readonly Dictionary<(long Avid, int PageIndex), (CacheTrashPartTarget? Target, string? Error)> _trashParts = new();
 
-        public CurrentIndexSnapshot(CacheIndex index, string token, string root, IReadOnlyList<CacheScanIssue> issues,
+        public CurrentIndexSnapshot(CacheIndex index, string token, string root, IEnumerable<CacheScanIssue> issues,
             int maximumIssues = 100)
         {
             Index = index;

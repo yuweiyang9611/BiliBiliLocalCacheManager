@@ -6,6 +6,27 @@ namespace BiliBiliLocalCacheManager.Playback.Tests;
 public sealed class PlaybackArtifactConcurrentManagementTests
 {
     [Fact]
+    public void MeasureStorage_CancelledSnapshotDoesNotRetryTransientFailures()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var attempts = 0;
+        var cacheRoot = Path.Combine(Path.GetTempPath(), $"bili_artifact_cancelled_retry_{Guid.NewGuid():N}");
+        var store = new PlaybackArtifactStore(cacheRoot)
+        {
+            BeforeStrictSnapshotAttemptForTesting = _ =>
+            {
+                attempts++;
+                cancellation.Cancel();
+                throw new IOException("Directory is temporarily unavailable.");
+            }
+        };
+
+        var error = Assert.Throws<OperationCanceledException>(() => store.MeasureStorage(new(), out _, cancellation.Token));
+        Assert.Equal(cancellation.Token, error.CancellationToken);
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
     public void Statistics_ShouldRetryTransientUnauthorizedAccess()
     {
         var cacheRoot = Path.Combine(

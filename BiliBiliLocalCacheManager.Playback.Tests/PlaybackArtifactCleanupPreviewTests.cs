@@ -6,6 +6,54 @@ namespace BiliBiliLocalCacheManager.Playback.Tests;
 public sealed class PlaybackArtifactCleanupPreviewTests
 {
     [Fact]
+    public void MeasureStorage_CancellationAtFirstFileStopsSnapshot()
+    {
+        using var fixture = new PreviewFixture();
+        fixture.CreateArtifact("first.blv", 1, 8);
+        fixture.CreateArtifact("second.blv", 2, 16);
+        using var cancellation = new CancellationTokenSource();
+        var visits = 0;
+        var store = new PlaybackArtifactStore(fixture.Store.RootDirectory, () =>
+        {
+            visits++;
+            cancellation.Cancel();
+        });
+
+        var error = Assert.Throws<OperationCanceledException>(() => store.MeasureStorage(new(), out _, cancellation.Token));
+        Assert.Equal(cancellation.Token, error.CancellationToken);
+        Assert.Equal(1, visits);
+    }
+
+    [Fact]
+    public void MeasureStorage_CancellationDuringProtectionCheckSkipsRemainingFiles()
+    {
+        using var fixture = new PreviewFixture();
+        fixture.CreateArtifact("first.blv", 1, 8);
+        fixture.CreateArtifact("second.blv", 2, 16);
+        using var cancellation = new CancellationTokenSource();
+        var clock = new CancelOnProtectionCheck(cancellation);
+        var store = new PlaybackArtifactStore(fixture.Store.RootDirectory, timeProvider: clock);
+
+        var error = Assert.Throws<OperationCanceledException>(() => store.MeasureStorage(new(), out _, cancellation.Token));
+        Assert.Equal(cancellation.Token, error.CancellationToken);
+        Assert.Equal(0, clock.ChecksAfterCancellation);
+    }
+
+    private sealed class CancelOnProtectionCheck(CancellationTokenSource cancellation) : TimeProvider
+    {
+        private int _reads;
+        public int ChecksAfterCancellation { get; private set; }
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            if (cancellation.IsCancellationRequested) ChecksAfterCancellation++;
+            // The first read establishes the policy time; the next reads check per-file protection.
+            if (++_reads == 2) cancellation.Cancel();
+            return DateTimeOffset.UnixEpoch;
+        }
+    }
+
+    [Fact]
     public void MeasureStorage_VisitsEachFileOnceAndExcludesProtectedBytesFromReclaimableSpace()
     {
         using var fixture = new PreviewFixture();
