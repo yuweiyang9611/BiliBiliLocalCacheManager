@@ -674,6 +674,27 @@ public sealed partial class DesktopHostContractTests
     }
 
     [Fact]
+    public async Task StorageGet_DistinguishesMissingArtifactRootFromAFileAtThatPath()
+    {
+        using var workspace = new HostTestWorkspace();
+        Directory.Delete(workspace.TranscodeRoot);
+        var application = workspace.CreateApplication();
+        var parameters = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot });
+
+        var missing = await DispatchAsync(application, "storage.get", parameters);
+        Assert.Equal(0L, missing.GetProperty("transcodeCache").GetProperty("bytes").GetInt64());
+        Assert.Equal(0L, missing.GetProperty("policyReclaimableBytes").GetInt64());
+        Assert.False(missing.TryGetProperty("measurementWarning", out var notice) && notice.ValueKind == JsonValueKind.String);
+
+        File.WriteAllText(workspace.TranscodeRoot, "user data");
+        var invalid = await DispatchAsync(application, "storage.get", parameters);
+        Assert.False(invalid.TryGetProperty("policyReclaimableBytes", out var reclaimable) && reclaimable.ValueKind == JsonValueKind.Number);
+        Assert.Contains("Transcode cache statistics failed", invalid.GetProperty("measurementWarning").GetString());
+        Assert.Contains("directory", invalid.GetProperty("measurementWarning").GetString());
+        Assert.Equal("user data", File.ReadAllText(workspace.TranscodeRoot));
+    }
+
+    [Fact]
     public async Task StorageGet_UsesOneArtifactSnapshotForUsageAndReclaimableSpace()
     {
         using var workspace = new HostTestWorkspace();

@@ -63,6 +63,8 @@ try {
     New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
     Expand-Archive -LiteralPath $archivePath -DestinationPath $portableRoot
     Invoke-PackagedSmoke (Join-Path $portableRoot "哔哩哔哩本地缓存管理器.exe")
+    node (Join-Path $PSScriptRoot "test-windows-published-host-paths.mjs") (Join-Path $portableRoot "resources/host/BiliBiliLocalCacheManager.Desktop.Host.exe")
+    if ($LASTEXITCODE -ne 0) { throw "Packaged Windows Host long-path test failed ($LASTEXITCODE)." }
 
     $installParameters = @{
         FilePath = $installerPath

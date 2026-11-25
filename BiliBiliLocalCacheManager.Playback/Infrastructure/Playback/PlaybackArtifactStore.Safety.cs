@@ -34,37 +34,34 @@ public sealed partial class PlaybackArtifactStore
         return snapshots;
     }
 
-    private IReadOnlyList<ManagedFileSnapshot> SnapshotAllManagedFilesStrict()
+    private IReadOnlyList<ManagedFileSnapshot> SnapshotAllManagedFilesStrict(CancellationToken cancellationToken = default)
     {
         const int maximumAttempts = 5;
         for (var attempt = 1; ; attempt++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 BeforeStrictSnapshotAttemptForTesting?.Invoke(attempt);
-                return SnapshotAllManagedFilesStrictOnce();
+                return SnapshotAllManagedFilesStrictOnce(cancellationToken);
             }
-            catch (Exception ex) when (
-                (ex is IOException or UnauthorizedAccessException) &&
-                attempt < maximumAttempts)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (attempt == maximumAttempts) throw;
                 // Windows can briefly report delete-pending managed directories
                 // as inaccessible while another instance removes empty folders.
                 // Restart the whole snapshot so reparse checks and totals all
                 // describe one fresh traversal. Persistent ACL failures still
                 // escape after the bounded retry budget.
-                Thread.Sleep(TimeSpan.FromMilliseconds(attempt * attempt));
+                cancellationToken.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(attempt * attempt));
             }
         }
     }
 
-    private IReadOnlyList<ManagedFileSnapshot> SnapshotAllManagedFilesStrictOnce()
+    private IReadOnlyList<ManagedFileSnapshot> SnapshotAllManagedFilesStrictOnce(CancellationToken cancellationToken)
     {
-        if (!Directory.Exists(RootDirectory))
-        {
-            return Array.Empty<ManagedFileSnapshot>();
-        }
-
+        cancellationToken.ThrowIfCancellationRequested();
         if (!TryGetAttributesStrict(RootDirectory, out var rootAttributes))
         {
             return Array.Empty<ManagedFileSnapshot>();
@@ -75,10 +72,15 @@ public sealed partial class PlaybackArtifactStore
             throw new InvalidOperationException(
                 "The playback artifact root must not be a symbolic link or directory junction.");
         }
+        if (!rootAttributes.HasFlag(FileAttributes.Directory))
+        {
+            throw new InvalidOperationException("The playback artifact root must be a directory.");
+        }
 
         var snapshots = new List<ManagedFileSnapshot>();
-        foreach (var avidDirectory in GetDirectoriesStrict(RootDirectory))
+        foreach (var avidDirectory in GetEntriesStrict(RootDirectory, Directory.EnumerateDirectories, cancellationToken))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var avidName = Path.GetFileName(Path.TrimEndingDirectorySeparator(avidDirectory));
             if (!IsAvidDirectory(avidName))
             {
@@ -96,8 +98,9 @@ public sealed partial class PlaybackArtifactStore
                     "A managed playback artifact directory must not be a symbolic link or directory junction.");
             }
 
-            foreach (var pageDirectory in GetDirectoriesStrict(avidDirectory))
+            foreach (var pageDirectory in GetEntriesStrict(avidDirectory, Directory.EnumerateDirectories, cancellationToken))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var pageName = Path.GetFileName(Path.TrimEndingDirectorySeparator(pageDirectory));
                 if (!IsManagedLocation(avidName, pageName))
                 {
@@ -115,11 +118,13 @@ public sealed partial class PlaybackArtifactStore
                         "A managed playback artifact page must not be a symbolic link or directory junction.");
                 }
 
-                var pageFiles = GetFilesStrict(pageDirectory);
+                var pageFiles = GetEntriesStrict(pageDirectory, Directory.EnumerateFiles, cancellationToken);
                 AfterStrictFileEnumerationForTesting?.Invoke();
                 foreach (var path in pageFiles)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     _activity?.Invoke();
+                    cancellationToken.ThrowIfCancellationRequested();
                     var file = new FileInfo(path);
                     if (!IsManagedArtifactFile(file) && !IsManagedBuildFile(file))
                     {
@@ -154,27 +159,26 @@ public sealed partial class PlaybackArtifactStore
         return snapshots;
     }
 
-    private static string[] GetDirectoriesStrict(string path)
+    private static List<string> GetEntriesStrict(string path, Func<string, IEnumerable<string>> enumerate,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            return Directory.GetDirectories(path, "*", SearchOption.TopDirectoryOnly);
+            return EnumerateWithCancellation(enumerate(path), cancellationToken).ToList();
         }
         catch (DirectoryNotFoundException)
         {
-            return Array.Empty<string>();
+            return [];
         }
     }
 
-    private static string[] GetFilesStrict(string path)
+    private static IEnumerable<T> EnumerateWithCancellation<T>(IEnumerable<T> items, CancellationToken cancellationToken)
     {
-        try
+        foreach (var item in items)
         {
-            return Directory.GetFiles(path, "*", SearchOption.TopDirectoryOnly);
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return Array.Empty<string>();
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return item;
         }
     }
 
@@ -262,11 +266,12 @@ public sealed partial class PlaybackArtifactStore
         }
     }
 
-    private static long SumLengths(IEnumerable<ManagedFileSnapshot> files)
+    private static long SumLengths(IEnumerable<ManagedFileSnapshot> files, CancellationToken cancellationToken = default)
     {
         var total = 0L;
         foreach (var file in files)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             total = file.Length > long.MaxValue - total
                 ? long.MaxValue
                 : total + file.Length;

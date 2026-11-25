@@ -84,6 +84,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
             .Select(group => new BiliVideoCache(group.Key, group))
             .ToList();
 
+        var unavailableParts = state.CollectIdentityIssues(cancellationToken);
         return new CacheIndexBuildResult(
             new CacheIndex(caches),
             state.ScannedAvidDirectories,
@@ -92,7 +93,11 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
             state.SkippedIncompleteEntries,
             state.InvalidEntries,
             state.InaccessibleDirectories,
-            state.Issues) { PartIdentities = state.PartIdentities?.AsReadOnly() };
+            state.Issues)
+        {
+            PartIdentities = state.PartIdentities?.AsReadOnly(),
+            UnavailablePartIdentities = unavailableParts
+        };
     }
 
     private static void ScanAvidDirectory(
@@ -105,7 +110,8 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         CancellationToken cancellationToken,
         IProgress<CacheScanProgress>? progress)
     {
-        if (!TryValidatePhysicalDirectory(avidDirectory, state))
+        using var parentLease = FileSystemCacheTrashService.LeaseScanParent(root, avidDirectory, options.CapturePartIdentities, out var parentError);
+        if (parentLease is null && !TryValidatePhysicalDirectory(avidDirectory, state))
         {
             return;
         }
@@ -117,25 +123,25 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
             var entryPath = Path.Combine(segmentDirectory, options.EntryFileName);
             try
             {
-                if (!TryValidatePhysicalDirectory(segmentDirectory, state))
+                // With a pinned Windows AV, ReadEntryForScan validates the part through its no-follow directory handle.
+                if (parentLease is null && !TryValidatePhysicalDirectory(segmentDirectory, state))
                 {
                     continue;
                 }
 
-                (byte[] Bytes, string? DirectoryIdentity, string? Error) metadata;
+                FileSystemCacheTrashService.ScannedPartMetadata metadata;
                 try
                 {
                     metadata = FileSystemCacheTrashService.ReadEntryForScan(root, avidDirectory, segmentDirectory,
-                        entryPath, options.CapturePartIdentities, cancellationToken);
+                        entryPath, options.CapturePartIdentities, parentError, state.SmallEntryBuffer, cancellationToken);
                 }
                 catch (FileNotFoundException)
                 {
                     continue;
                 }
+                using var partLease = metadata;
                 cancellationToken.ThrowIfCancellationRequested();
-                // Keep the legacy BOM-aware text decoding, but derive the deletion fingerprint from the original bytes.
-                using var reader = new StreamReader(new MemoryStream(metadata.Bytes, writable: false));
-                var raw = CacheEntryRaw.FromJson(reader.ReadToEnd());
+                var raw = CacheEntryRaw.FromJson(metadata.ReadText());
                 ValidateRawEntry(raw, directoryAvid, options.MaximumCacheBytes);
 
                 if (!options.IncludeIncompleteEntries && !raw.IsCompleted)
@@ -158,15 +164,16 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                     state.IncludedCacheBytes[directoryAvid] = includedBytes + segment.TotalBytes;
                 }
 
-                if (state.PartIdentities is not null)
-                    state.PartIdentities.Add(segment, metadata.DirectoryIdentity is { } identity
-                        ? FileSystemCacheTrashService.BindScannedPart(segment, metadata.Bytes, identity)
-                        : new(null, metadata.Error));
+                state.CaptureIncludedPart(segment, metadata);
                 accumulator.Add(segment);
                 state.IncludedEntries++;
             }
-            catch (Exception ex) when (!options.ThrowOnInvalidEntry && IsEntryFailure(ex))
+            catch (Exception ex) when (IsEntryFailure(ex))
             {
+                // A part can vanish or become a link after enumeration. The Windows lease performs
+                // the normal check; classify its failed directory check the same way as the portable path.
+                if (parentLease is not null && !TryValidatePhysicalDirectory(segmentDirectory, state)) continue;
+                if (options.ThrowOnInvalidEntry) throw;
                 state.InvalidEntries++;
                 state.AddIssue(new CacheScanIssue(
                     CacheScanIssueKind.InvalidEntry,
@@ -190,15 +197,15 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         try
         {
             var directories = new List<string>();
-            foreach (var directory in Directory.GetDirectories(path)
-                         .OrderBy(item => item, StringComparer.OrdinalIgnoreCase))
+            foreach (var directory in new DirectoryInfo(path).GetDirectories()
+                         .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (avidFilter is not null && (!TryGetDirectoryAvid(directory, out var avid) || !avidFilter.Contains(avid))) continue;
-                if (TryValidatePhysicalDirectory(directory, state))
-                {
-                    directories.Add(directory);
-                }
+                if (avidFilter is not null && (!TryGetDirectoryAvid(directory.FullName, out var avid) || !avidFilter.Contains(avid))) continue;
+                // DirectoryInfo already carries the attributes observed during enumeration.
+                // Revalidate the path immediately before use in ScanAvidDirectory.
+                if (!directory.Attributes.HasFlag(FileAttributes.ReparsePoint)) directories.Add(directory.FullName);
+                else ReportLinkedDirectory(directory.FullName, state);
             }
 
             return directories;
@@ -248,13 +255,12 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                 return true;
             }
 
-            state.InaccessibleDirectories++;
-            state.AddIssue(new CacheScanIssue(
-                CacheScanIssueKind.InaccessibleDirectory,
-                path,
-                attributes.HasFlag(FileAttributes.ReparsePoint)
-                    ? "已跳过符号链接或目录联接，避免扫描缓存根目录以外的内容。"
-                    : "该路径不是物理目录，已跳过。"));
+            if (attributes.HasFlag(FileAttributes.ReparsePoint)) ReportLinkedDirectory(path, state);
+            else
+            {
+                state.InaccessibleDirectories++;
+                state.AddIssue(new(CacheScanIssueKind.InaccessibleDirectory, path, "该路径不是物理目录，已跳过。"));
+            }
             return false;
         }
         catch (Exception ex) when (IsDirectoryFailure(ex))
@@ -266,6 +272,12 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                 ex.Message));
             return false;
         }
+    }
+
+    private static void ReportLinkedDirectory(string path, ScanAccumulator state)
+    {
+        state.InaccessibleDirectories++;
+        state.AddIssue(new(CacheScanIssueKind.InaccessibleDirectory, path, "已跳过符号链接或目录联接，避免扫描缓存根目录以外的内容。"));
     }
 
     private static void ReportProgress(
@@ -394,8 +406,24 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         public int InvalidEntries { get; set; }
         public int InaccessibleDirectories { get; set; }
         public List<CacheScanIssue> Issues { get; } = new();
+        public byte[] SmallEntryBuffer { get; } = new byte[4096];
         public Dictionary<long, long> IncludedCacheBytes { get; } = new();
         public Dictionary<BiliSegment, CacheScanPartIdentity>? PartIdentities { get; } = capturePartIdentities ? new() : null;
+        private readonly Dictionary<(long Avid, int Page), BiliSegment>? _firstCandidates = capturePartIdentities ? new() : null;
+
+        public void CaptureIncludedPart(BiliSegment segment, FileSystemCacheTrashService.ScannedPartMetadata metadata)
+        {
+            if (PartIdentities is null) return;
+            var key = (segment.Avid, segment.PageIndex);
+            if (_firstCandidates!.TryAdd(key, segment))
+                PartIdentities.Add(segment, metadata.Bind(segment));
+            else
+            {
+                var ambiguous = new CacheScanPartIdentity(null, "该分 P 对应多个物理目录，无法安全确定删除范围。");
+                PartIdentities[_firstCandidates[key]] = ambiguous;
+                PartIdentities.Add(segment, ambiguous);
+            }
+        }
 
         public void AddIssue(CacheScanIssue issue)
         {
@@ -403,6 +431,21 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
             {
                 Issues.Add(issue);
             }
+        }
+
+        public int CollectIdentityIssues(CancellationToken cancellationToken)
+        {
+            if (_firstCandidates is null) return 0;
+            var count = 0;
+            foreach (var first in _firstCandidates.Values)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (PartIdentities![first].Error is not { } error) continue;
+                count++;
+                if (Issues.Count < maxReportedIssues)
+                    Issues.Add(new(CacheScanIssueKind.PartIdentityUnavailable, first.EntryJsonPath, error));
+            }
+            return count;
         }
     }
 }

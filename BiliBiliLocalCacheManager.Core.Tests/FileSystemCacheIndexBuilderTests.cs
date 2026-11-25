@@ -8,6 +8,81 @@ namespace BiliBiliLocalCacheManager.Core.Tests;
 public sealed class FileSystemCacheIndexBuilderTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildIndex_OnlyBindsUniqueIncludedCandidates(bool includeIncomplete)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            foreach (var (directory, page, completed) in new[]
+            {
+                ("a", 1, true), ("b", 1, false), ("c", 1, true), ("d", 2, true), ("e", 2, false),
+            })
+            {
+                var path = Directory.CreateDirectory(Path.Combine(root, "101", directory)).FullName;
+                var json = System.Text.Json.Nodes.JsonNode.Parse(BuildEntryJson(101, "Video", directory, completed))!;
+                json["page_data"]!["page"] = page;
+                File.WriteAllText(Path.Combine(path, "entry.json"), json.ToJsonString());
+            }
+
+            var report = new FileSystemCacheIndexBuilder().BuildIndexWithReport(root,
+                new CacheIndexBuildOptions { CapturePartIdentities = true, IncludeIncompleteEntries = includeIncomplete });
+            Assert.Equal(includeIncomplete ? 5 : 3, report.IncludedEntries);
+            Assert.Equal(includeIncomplete ? 0 : 2, report.SkippedIncompleteEntries);
+            foreach (var (segment, identity) in report.PartIdentities!)
+            {
+                if (segment.PageIndex == 2 && !includeIncomplete)
+                {
+                    Assert.Equal(segment.SegmentDirectory, identity.Target?.SourcePath);
+                    Assert.Null(identity.Error);
+                }
+                else
+                {
+                    Assert.Null(identity.Target);
+                    Assert.Contains("多个", identity.Error);
+                }
+            }
+            Assert.Equal(report.IncludedEntries, report.PartIdentities.Count);
+            Assert.Equal(includeIncomplete ? 2 : 1, report.UnavailablePartIdentities);
+            Assert.Equal(report.UnavailablePartIdentities, report.Issues.Count(issue => issue.Kind == CacheScanIssueKind.PartIdentityUnavailable));
+        }
+        finally { SafeDeleteDirectory(root); }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void CapturePartIdentities_MissingCidWarnsEvenWhenIssueDetailsAreLimited(int issueLimit)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var directory = Directory.CreateDirectory(Path.Combine(root, "101", "c_1")).FullName;
+            var path = Path.Combine(directory, "entry.json");
+            var entry = System.Text.Json.Nodes.JsonNode.Parse(BuildEntryJson(101, "Missing CID", "P1", true))!;
+            Assert.True(entry["page_data"]!.AsObject().Remove("cid"));
+            File.WriteAllText(path, entry.ToJsonString());
+            var report = new FileSystemCacheIndexBuilder().BuildIndexWithReport(root,
+                new CacheIndexBuildOptions { CapturePartIdentities = true, MaxReportedIssues = issueLimit });
+
+            Assert.Single(report.Index.VideoCaches);
+            Assert.True(report.HasWarnings);
+            Assert.Equal(1, report.UnavailablePartIdentities);
+            Assert.Equal(0, report.InvalidEntries);
+            Assert.Equal(issueLimit, report.Issues.Count);
+            if (issueLimit > 0)
+            {
+                var issue = Assert.Single(report.Issues);
+                Assert.Equal(CacheScanIssueKind.PartIdentityUnavailable, issue.Kind);
+                Assert.Equal(path, issue.Path);
+                Assert.Contains("cid", issue.Message);
+            }
+        }
+        finally { SafeDeleteDirectory(root); }
+    }
+
+    [Theory]
     [InlineData("0100", "entry.json")]
     [InlineData("100", "other.json")]
     public void BuildIndex_NoncanonicalMetadataCanBeListedWithoutCreatingADeletionTarget(string avidDirectory, string entryFile)

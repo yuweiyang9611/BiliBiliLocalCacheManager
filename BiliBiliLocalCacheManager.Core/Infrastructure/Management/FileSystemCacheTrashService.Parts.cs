@@ -124,12 +124,12 @@ public sealed partial class FileSystemCacheTrashService
     private static string HashPartEntry(FileStream stream, long avid, int pageIndex, long? cid = null)
         => HashPartEntry(ReadEntryBytes(stream, CancellationToken.None), avid, pageIndex, cid);
 
-    private static string HashPartEntry(byte[] bytes, long avid, int pageIndex, long? cid)
+    private static string HashPartEntry(ReadOnlyMemory<byte> bytes, long avid, int pageIndex, long? cid)
     {
         // The stream parser accepted UTF-8 BOMs. Strip one for parsing only;
         // the identity hash must still cover every original byte.
-        var jsonBytes = bytes.AsMemory();
-        if (bytes.AsSpan().StartsWith("\uFEFF"u8)) jsonBytes = jsonBytes[3..];
+        var jsonBytes = bytes;
+        if (bytes.Span.StartsWith("\uFEFF"u8)) jsonBytes = jsonBytes[3..];
         using var document = JsonDocument.Parse(jsonBytes);
         var root = document.RootElement;
         if (!root.TryGetProperty("avid", out var avidValue) || !avidValue.TryGetInt64(out var actualAvid) || actualAvid != avid ||
@@ -139,7 +139,7 @@ public sealed partial class FileSystemCacheTrashService
         if (cid is { } expectedCid && (!page.TryGetProperty("cid", out var cidValue) ||
             cidValue.ValueKind != JsonValueKind.Number || !cidValue.TryGetInt64(out var actualCid) || actualCid != expectedCid))
             throw new InvalidDataException("entry.json 的 page_data/cid 缺失、无效或已变化，请检查文件并重新扫描。");
-        return Convert.ToHexString(SHA256.HashData(bytes));
+        return Convert.ToHexString(SHA256.HashData(bytes.Span));
     }
 
     private static PartTrashMetadata? ReadPartMetadata(string directory)

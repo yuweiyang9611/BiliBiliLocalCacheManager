@@ -7,6 +7,53 @@ namespace BiliBiliLocalCacheManager.Core.Tests;
 
 public sealed class ReparsePointSafetyTests
 {
+    [Fact]
+    public void Scan_RejectsAPartDirectoryThatBecomesALinkAfterEnumeration()
+    {
+        var root = CreateTempRoot("directory-changes");
+        var outside = CreateTempRoot("directory-link-target");
+        var part = Path.Combine(root, "101", "b");
+        var readyLink = Path.Combine(outside, "pending-link");
+        var target = Directory.CreateDirectory(Path.Combine(outside, "target")).FullName;
+        try
+        {
+            if (!TryCreateDirectoryLink(readyLink, target))
+            {
+                Assert.True(OperatingSystem.IsWindows(), "This Linux filesystem must support directory symlinks.");
+                return;
+            }
+            var first = Directory.CreateDirectory(Path.Combine(root, "101", "a")).FullName;
+            Directory.CreateDirectory(part);
+            File.WriteAllText(Path.Combine(first, "entry.json"), BuildEntryJson(101));
+            File.WriteAllText(Path.Combine(target, "entry.json"), BuildEntryJson(101));
+            var progress = new ScanProgress(update =>
+            {
+                if (update.CurrentPath != first) return;
+                Directory.Move(part, Path.Combine(outside, "original"));
+                Directory.Move(readyLink, part);
+            });
+            var report = new FileSystemCacheIndexBuilder().BuildIndexWithReport(root,
+                new CacheIndexBuildOptions { CapturePartIdentities = true, ThrowOnInvalidEntry = true }, default, progress);
+            Assert.Equal(first, Assert.Single(report.Index.ByAvid[101].Segments).SegmentDirectory);
+            Assert.Equal(1, report.InaccessibleDirectories);
+            var issue = Assert.Single(report.Issues);
+            Assert.Equal(CacheScanIssueKind.InaccessibleDirectory, issue.Kind);
+            Assert.Equal(part, issue.Path);
+        }
+        finally
+        {
+            DeleteDirectoryLink(readyLink);
+            DeleteDirectoryLink(part);
+            SafeDeleteDirectory(root);
+            SafeDeleteDirectory(outside);
+        }
+    }
+
+    private sealed class ScanProgress(Action<CacheScanProgress> report) : IProgress<CacheScanProgress>
+    {
+        public void Report(CacheScanProgress value) => report(value);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

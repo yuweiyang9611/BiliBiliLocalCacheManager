@@ -51,6 +51,27 @@ public sealed class FileSystemCacheIndexByteBoundsTests : IDisposable
         Assert.Equal(byteCount, new FileInfo(path).Length);
     }
 
+    [Fact]
+    public void Scan_BindsExactBytesAcrossTheSmallBufferBoundaryAndItsNextReuse()
+    {
+        var sizes = new[] { 4097, 4096, 4095, 800 };
+        for (var i = 0; i < sizes.Length; i++)
+        {
+            var avid = (i + 1).ToString(CultureInfo.InvariantCulture);
+            WritePaddedMetadata(WriteEntry(avid, "part", 1, title: $"Video {avid}"), sizes[i]);
+        }
+        var report = new FileSystemCacheIndexBuilder().BuildIndexWithReport(_root,
+            new CacheIndexBuildOptions { CapturePartIdentities = true });
+        Assert.Empty(report.Issues);
+        Assert.Equal(sizes.Length, report.IncludedEntries);
+        foreach (var (segment, identity) in report.PartIdentities!)
+        {
+            Assert.Equal($"Video {segment.Avid}", segment.Title);
+            Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(segment.EntryJsonPath))),
+                identity.Target?.EntryHash);
+        }
+    }
+
     [Theory]
     [InlineData(0L)]
     [InlineData(MaximumSafeInteger)]
