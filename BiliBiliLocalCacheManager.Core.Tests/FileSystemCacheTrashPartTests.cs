@@ -8,6 +8,30 @@ public sealed class FileSystemCacheTrashPartTests : IDisposable
 {
     private readonly string _root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"part-trash-{Guid.NewGuid():N}")).FullName;
 
+    [Fact]
+    public void PartMetadata_ExclusiveWriterPreventsCaptureAndMoveUntilItReleasesTheFile()
+    {
+        var part = CreatePart(100, "c1", 1);
+        var path = Path.Combine(part, "entry.json");
+        var original = File.ReadAllBytes(path);
+        var service = new FileSystemCacheTrashService();
+        var segment = Assert.Single(new FileSystemCacheIndexBuilder().BuildIndex(_root).ByAvid[100].Segments);
+        var target = service.CapturePartTarget(_root, segment);
+
+        using (var writer = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
+        {
+            Assert.ThrowsAny<IOException>(() => service.CapturePartTarget(_root, segment));
+            var result = service.MovePartToTrash(_root, target);
+            Assert.False(result.Succeeded);
+            Assert.True(File.Exists(path));
+            Assert.False(File.Exists(Path.Combine(part, ".trash-info.json")));
+        }
+        Assert.Empty(service.ListEntries(_root));
+        var retry = service.MovePartToTrash(_root, target);
+        Assert.True(retry.Succeeded, retry.ErrorMessage);
+        Assert.Equal(original, File.ReadAllBytes(Path.Combine(retry.TrashPath!, "entry.json")));
+    }
+
     [Theory]
     [InlineData("episode:1")]
     [InlineData("episode.")]

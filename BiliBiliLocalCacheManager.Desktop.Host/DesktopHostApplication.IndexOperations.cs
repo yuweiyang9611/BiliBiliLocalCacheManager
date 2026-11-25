@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using BiliBiliLocalCacheManager.Core.Application.Models;
+using BiliBiliLocalCacheManager.Core.Infrastructure.Management;
 using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host;
@@ -38,6 +39,7 @@ internal sealed partial class DesktopHostApplication
             {
                 IncludeIncompleteEntries = includeIncomplete,
                 RequireCanonicalAvidDirectory = true,
+                CapturePartIdentities = _trashService is FileSystemCacheTrashService,
                 MaxReportedIssues = maxReportedIssues,
                 MaximumCacheBytes = MaximumWireBytes,
                 AvidFilter = refresh?.Avids
@@ -67,12 +69,14 @@ internal sealed partial class DesktopHostApplication
             cancellationToken.ThrowIfCancellationRequested();
             var buildMilliseconds = Stopwatch.GetElapsedTime(buildStarted).TotalMilliseconds;
             var readEntries = report.IncludedEntries;
+            var scannedParts = report.PartIdentities;
             if (refresh is not null) report = MergeMutationRefresh(refresh, report);
 
             var completedAt = DateTimeOffset.UtcNow;
             var snapshotStarted = Stopwatch.GetTimestamp();
             var snapshot = CreateIndexSnapshot(report, root, cancellationToken,
-                count => ReportPartCaptureProgress(requestId, "scan", count), refresh?.Snapshot, refresh?.Avids, maxReportedIssues);
+                count => ReportPartCaptureProgress(requestId, "scan", count), refresh?.Snapshot, refresh?.Avids, maxReportedIssues,
+                scannedParts);
             var snapshotMilliseconds = Stopwatch.GetElapsedTime(snapshotStarted).TotalMilliseconds;
             var pageStarted = Stopwatch.GetTimestamp();
             var page = CreateCachePage(

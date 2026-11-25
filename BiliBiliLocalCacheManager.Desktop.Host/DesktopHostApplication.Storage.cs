@@ -80,9 +80,7 @@ internal sealed partial class DesktopHostApplication
 
             try
             {
-                transcodeCache = store.GetStatistics();
-                cancellationToken.ThrowIfCancellationRequested();
-                transcodePreview = store.PreviewCleanup(cleanupOptions);
+                transcodePreview = store.MeasureStorage(cleanupOptions, out transcodeCache, cancellationToken);
             }
             catch (OperationCanceledException)
             {

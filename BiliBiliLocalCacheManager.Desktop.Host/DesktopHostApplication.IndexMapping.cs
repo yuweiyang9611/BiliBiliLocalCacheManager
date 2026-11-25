@@ -1,6 +1,7 @@
 using System.Text.Json;
 using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Core.Domain.Models;
+using BiliBiliLocalCacheManager.Core.Infrastructure.Management;
 using BiliBiliLocalCacheManager.Desktop.Host.Rpc;
 using BiliBiliLocalCacheManager.Playback.Models;
 
@@ -48,6 +49,7 @@ internal sealed partial class DesktopHostApplication
             {
                 IncludeIncompleteEntries = includeIncomplete,
                 RequireCanonicalAvidDirectory = true,
+                CapturePartIdentities = _trashService is FileSystemCacheTrashService,
                 MaximumCacheBytes = MaximumWireBytes
             };
             var report = await Task.Run(
@@ -195,11 +197,13 @@ internal sealed partial class DesktopHostApplication
         Action<int> partCaptureProgress,
         CurrentIndexSnapshot? previous = null,
         IReadOnlySet<long>? changedAvids = null,
-        int maximumIssues = 100)
+        int maximumIssues = 100,
+        IReadOnlyDictionary<BiliSegment, CacheScanPartIdentity>? scannedParts = null)
     {
         var orderedIndex = new CacheIndex(report.Index.VideoCaches.OrderByDescending(GetLastUpdatedUtc).ThenBy(cache => cache.Avid));
         var snapshot = new CurrentIndexSnapshot(orderedIndex, Guid.NewGuid().ToString("N"), root, report.Issues, maximumIssues);
-        snapshot.CaptureTrashPartTargets(_trashService, cancellationToken, partCaptureProgress, previous, changedAvids);
+        snapshot.CaptureTrashPartTargets(_trashService, cancellationToken, partCaptureProgress, previous, changedAvids,
+            scannedParts ?? report.PartIdentities);
         return snapshot;
     }
 
@@ -214,7 +218,11 @@ internal sealed partial class DesktopHostApplication
             cancellationToken.ThrowIfCancellationRequested();
             _indexSnapshot?.Invalidate();
             _mutationRefresh = null;
-            _lastScanReport = scanReport;
+            // Retain only complete baseline counts. The snapshot now owns the published identities.
+            _completeScanCounts = scanReport is { IssuesCollected: true, HasWarnings: false } &&
+                snapshot.PartIdentityIssueCount == 0 && scanReport.ScannedAvidDirectories == snapshot.Index.VideoCaches.Count &&
+                scanReport.ScannedSegmentDirectories == scanReport.IncludedEntries
+                    ? (scanReport.ScannedAvidDirectories, scanReport.ScannedSegmentDirectories) : null;
             _indexSnapshot = snapshot;
             _currentIndex = snapshot.Index;
             _currentIndexToken = snapshot.IndexToken;

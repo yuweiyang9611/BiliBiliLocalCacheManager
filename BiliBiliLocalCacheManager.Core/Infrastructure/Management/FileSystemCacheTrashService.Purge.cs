@@ -624,7 +624,7 @@ public sealed partial class FileSystemCacheTrashService
         progress.CompleteDeletion();
     }
 
-    private static FileStream OpenStateFileLease(string path, string description)
+    private static FileStream OpenStateFileLease(string path, string description, bool requireDeleteAccess = true)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -647,7 +647,7 @@ public sealed partial class FileSystemCacheTrashService
 
         var handle = OpenWindowsHandle(
             path,
-            GenericRead | DeleteAccess | FileReadAttributes,
+            GenericRead | FileReadAttributes | (requireDeleteAccess ? DeleteAccess : 0),
             FileFlagOpenReparsePoint,
             description,
             FileShare.Read);

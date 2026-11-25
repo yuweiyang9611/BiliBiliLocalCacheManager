@@ -6,6 +6,111 @@ namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 
 public sealed partial class DesktopHostContractTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Scan_BindsTheUtf8BomEntryBeforeTheSnapshotIsPublished(bool incremental)
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Original", incremental ? 2 : 1);
+        var video = Path.Combine(workspace.CacheRoot, "101");
+        var entry = Path.Combine(video, "c_1", "entry.json");
+        var application = workspace.CreateApplication();
+        if (incremental)
+        {
+            var previous = await RefreshDispatchAsync(application, "scan", new { rootPath = workspace.CacheRoot });
+            var removed = await RefreshDispatchAsync(application, "trash.move", new { rootPath = workspace.CacheRoot,
+                indexToken = previous.GetProperty("indexToken").GetString(), targets = new[] { new { avid = "101", pageIndexes = new[] { 2 } } } });
+            Assert.True(removed.GetProperty("moved").EnumerateArray().Select(item => item.GetString()).SequenceEqual(["101:P2"]),
+                removed.GetRawText());
+        }
+        File.WriteAllText(entry, File.ReadAllText(entry), new System.Text.UTF8Encoding(true));
+        var original = File.ReadAllBytes(entry);
+        var parked = Path.Combine(workspace.Root, "parked-entry.json");
+        application.ProgressReported += (_, progress) =>
+        {
+            if (progress.Operation == "scan" && progress.Stage == "scanning" && progress.Message == video)
+                File.Move(entry, parked);
+        };
+
+        var scan = await RefreshDispatchAsync(application, "scan", new { rootPath = workspace.CacheRoot, incremental });
+        Assert.True(File.Exists(parked));
+        Assert.Equal("Original", Assert.Single(scan.GetProperty("items").EnumerateArray()).GetProperty("title").GetString());
+        Assert.Equal(0, scan.GetProperty("unavailablePartIdentities").GetInt32());
+        File.Move(parked, entry);
+        var result = await RefreshDispatchAsync(application, "trash.move", new { rootPath = workspace.CacheRoot,
+            indexToken = scan.GetProperty("indexToken").GetString(), targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } } } });
+        Assert.True(result.GetProperty("moved").EnumerateArray().Select(item => item.GetString()).SequenceEqual(["101:P1"]),
+            result.GetRawText());
+        var trashEntry = Assert.Single(result.GetProperty("entryIds").EnumerateArray()).GetString()!;
+        Assert.Equal(original, File.ReadAllBytes(Path.Combine(trashEntry, "entry.json")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Scan_DoesNotRebindAnIndexedPartToAReplacementAfterReading(bool replaceDirectory)
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Before");
+        var video = Path.Combine(workspace.CacheRoot, "101");
+        var part = Path.Combine(video, "c_1");
+        var entry = Path.Combine(part, "entry.json");
+        var original = File.ReadAllText(entry);
+        // Directory replacement keeps the metadata identical; in-place mutation changes only same-length bytes.
+        var replacement = replaceDirectory ? original : original.Replace("Before", "After!", StringComparison.Ordinal);
+        var fileSize = new FileInfo(entry).Length;
+        var fileTime = File.GetLastWriteTimeUtc(entry);
+        var application = workspace.CreateApplication();
+        var replaced = false;
+        application.ProgressReported += (_, progress) =>
+        {
+            if (progress.Operation != "scan" || progress.Stage != "scanning" || progress.Message != video) return;
+            if (replaceDirectory)
+            {
+                Directory.Move(part, Path.Combine(workspace.Root, "original-part"));
+                Directory.CreateDirectory(part);
+            }
+            File.WriteAllText(entry, replacement);
+            File.SetLastWriteTimeUtc(entry, fileTime);
+            replaced = true;
+        };
+
+        var scan = await RefreshDispatchAsync(application, "scan", new { rootPath = workspace.CacheRoot });
+        Assert.True(replaced);
+        Assert.Equal("Before", Assert.Single(scan.GetProperty("items").EnumerateArray()).GetProperty("title").GetString());
+        Assert.Equal(fileSize, new FileInfo(entry).Length);
+        Assert.Equal(fileTime, File.GetLastWriteTimeUtc(entry));
+        var result = await RefreshDispatchAsync(application, "trash.move", new { rootPath = workspace.CacheRoot,
+            indexToken = scan.GetProperty("indexToken").GetString(), targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } } } });
+        Assert.Empty(result.GetProperty("moved").EnumerateArray());
+        Assert.Equal("101:P1", Assert.Single(result.GetProperty("failed").EnumerateArray()).GetString());
+        Assert.Contains(replaceDirectory ? "replaced" : "changed after indexing", result.GetProperty("items")[0].GetProperty("error").GetString());
+        Assert.Equal(replacement, File.ReadAllText(entry));
+    }
+
+    [Fact]
+    public async Task Scan_KeepsUtf16MetadataVisibleWithoutAuthorizingPartRemoval()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "原始标题");
+        var entry = Path.Combine(workspace.CacheRoot, "101", "c_1", "entry.json");
+        File.WriteAllText(entry, File.ReadAllText(entry), System.Text.Encoding.Unicode);
+        var original = File.ReadAllBytes(entry);
+        var application = workspace.CreateApplication();
+
+        var scan = await RefreshDispatchAsync(application, "scan", new { rootPath = workspace.CacheRoot });
+        Assert.Equal("原始标题", Assert.Single(scan.GetProperty("items").EnumerateArray()).GetProperty("title").GetString());
+        var issue = Assert.Single(scan.GetProperty("issues").EnumerateArray());
+        Assert.Equal("PartIdentityUnavailable", issue.GetProperty("kind").GetString());
+        Assert.Equal(entry, issue.GetProperty("path").GetString());
+        var result = await RefreshDispatchAsync(application, "trash.move", new { rootPath = workspace.CacheRoot,
+            indexToken = scan.GetProperty("indexToken").GetString(), targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } } } });
+        Assert.Empty(result.GetProperty("moved").EnumerateArray());
+        Assert.Equal("101:P1", Assert.Single(result.GetProperty("failed").EnumerateArray()).GetString());
+        Assert.Equal(original, File.ReadAllBytes(entry));
+    }
+
     [Fact]
     public async Task Scan_MissingCidKeepsOtherPartsUsableAndIdentifiesTheUnmovablePart()
     {

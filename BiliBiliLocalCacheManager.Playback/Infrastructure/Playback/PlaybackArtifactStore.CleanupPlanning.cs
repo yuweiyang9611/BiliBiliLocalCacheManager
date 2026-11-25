@@ -8,6 +8,21 @@ public sealed partial class PlaybackArtifactStore
 
     internal Action<string>? BeforeCleanupCandidateLockForTesting { get; set; }
 
+    public PlaybackArtifactCleanupPreview MeasureStorage(
+        PlaybackArtifactCleanupOptions options,
+        out PlaybackArtifactCacheStatistics statistics,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var files = SnapshotAllManagedFilesStrict();
+        // Storage can still report the measured usage if evaluating the cleanup policy fails.
+        statistics = CreateCacheStatistics(files);
+        cancellationToken.ThrowIfCancellationRequested();
+        var plan = CreateCleanupPlan(CreateCleanupPolicy(options), _timeProvider.GetUtcNow().UtcDateTime, files);
+        cancellationToken.ThrowIfCancellationRequested();
+        return CreateCleanupPreview(plan);
+    }
+
     public PlaybackArtifactCleanupPreview PreviewCleanup(
         PlaybackArtifactCleanupOptions? options = null)
     {

@@ -1,6 +1,7 @@
 // Reuses only a synthetic fixture retained by verify-desktop-requirements.cjs.
-// Does not accept real cache roots. Build the Release Host before running.
+// Does not accept real cache roots. An optional second argument selects a separately built Host DLL for comparison.
 const fs = require('node:fs/promises');
+const { createHash } = require('node:crypto');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn, execFileSync } = require('node:child_process');
@@ -18,11 +19,10 @@ const repository = path.resolve(__dirname, '..');
   assert.equal(previous.kind, 'development-electron-real-host-synthetic-cache');
   assert.equal(previous.data.syntheticMedia, true);
   const output = await fs.mkdtemp(path.join(artifacts, 'scan-measurement-'));
-  const hostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net11.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll');
-  await fs.access(hostPath);
+  const hostPath = await fs.realpath(process.argv[3] ?? path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net11.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll'));
   const report = { scope: 'Synthetic cache, sequential scans in one Host process; first sample is not an OS cold-cache guarantee.',
     source: { commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim(),
-      dirty: Boolean(execFileSync('git', ['status', '--porcelain'], { cwd: repository, encoding: 'utf8' }).trim()) },
+      dirty: Boolean(execFileSync('git', ['status', '--porcelain'], { cwd: repository, encoding: 'utf8' }).trim()), hostPath },
     machine: { platform: process.platform, os: os.release(), cpu: os.cpus()[0]?.model, memoryBytes: os.totalmem() },
     data: previous.data, scans: [], diagnosticsPath: path.join(output, 'diagnostics.zip') };
   const child = spawn('dotnet', [hostPath], { cwd: repository, windowsHide: true,
@@ -48,22 +48,55 @@ const repository = path.resolve(__dirname, '..');
       else call.resolve(value.result);
     } catch (error) { fail(error); }
   });
-  const request = (method, params) => new Promise((resolve, reject) => {
-    const id = `measurement-${++sequence}`;
+  const request = (method, params, id = `measurement-${++sequence}`) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} exceeded ten minutes`)); }, 600000);
     pending.set(id, { resolve, reject, timer });
     child.stdin.write(JSON.stringify({ id, method, params }) + '\n', error => { if (error) fail(error); });
   });
   try {
+    let lastScan;
     for (let index = 0; index < 3; index++) {
+      const requestId = `scan-${index + 1}`;
       const start = performance.now();
-      const result = await request('scan', { rootPath: path.join(fixture, 'cache'), includeIncomplete: false, persistSettings: false, offset: 0, pageSize: 100 });
+      const result = await request('scan', { rootPath: path.join(fixture, 'cache'), includeIncomplete: false, persistSettings: false, offset: 0, pageSize: 100 }, requestId);
+      const milliseconds = performance.now() - start;
       assert.equal(result.totalItems, previous.data.videos);
       assert.equal(result.includedEntries, previous.data.segments);
-      report.scans.push({ sample: index + 1, milliseconds: performance.now() - start, videos: result.totalItems, segments: result.includedEntries });
+      report.scans.push({ sample: index + 1, requestId, milliseconds, videos: result.totalItems, segments: result.includedEntries,
+        invalidEntries: result.invalidEntries, unavailablePartIdentities: result.unavailablePartIdentities });
       console.log(JSON.stringify(report.scans.at(-1)));
+      lastScan = result;
     }
     await request('diagnostics.export', { outputPath: report.diagnosticsPath, rootPath: path.join(fixture, 'cache') });
+    const contents = process.platform === 'win32'
+      ? execFileSync('tar.exe', ['-xOf', report.diagnosticsPath, 'recent-events.json'], { encoding: 'utf8', windowsHide: true })
+      : execFileSync('unzip', ['-p', report.diagnosticsPath, 'recent-events.json'], { encoding: 'utf8' });
+    const events = JSON.parse(contents);
+    for (const sample of report.scans) {
+      const event = events.find(e => e.category === 'ScanTiming' && e.message.startsWith(`request=${sample.requestId};`));
+      assert(event, `Missing ScanTiming for ${sample.requestId}`);
+      const fields = Object.fromEntries(event.message.split('; ').map(field => field.split('=')));
+      sample.timings = {};
+      for (const name of ['waitMs', 'buildMs', 'snapshotMs', 'pageMs', 'totalMs']) {
+        const value = Number(fields[name]);
+        assert(Number.isFinite(value), `Missing ${name} for ${sample.requestId}`);
+        sample.timings[name] = value;
+      }
+    }
+    // Compare every published summary between implementations without adding paging to a timed scan.
+    const digest = createHash('sha256');
+    let page = lastScan;
+    let offset = 0;
+    for (;;) {
+      digest.update(JSON.stringify(page.items));
+      offset += page.items.length;
+      if (!page.hasMore) break;
+      assert(page.items.length > 0 && offset < lastScan.totalItems);
+      page = await request('search', { keyword: '', indexToken: lastScan.indexToken, pageSize: 100, offset });
+      assert.equal(page.indexToken, lastScan.indexToken);
+    }
+    assert.equal(offset, lastScan.totalItems);
+    report.summarySha256 = digest.digest('hex');
   } finally {
     child.stdin.end();
     const timer = setTimeout(() => child.kill(), 5000);

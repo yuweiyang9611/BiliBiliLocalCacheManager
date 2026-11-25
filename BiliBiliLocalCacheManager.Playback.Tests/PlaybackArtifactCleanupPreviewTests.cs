@@ -6,6 +6,31 @@ namespace BiliBiliLocalCacheManager.Playback.Tests;
 public sealed class PlaybackArtifactCleanupPreviewTests
 {
     [Fact]
+    public void MeasureStorage_VisitsEachFileOnceAndExcludesProtectedBytesFromReclaimableSpace()
+    {
+        using var fixture = new PreviewFixture();
+        var expired = fixture.CreateArtifact("expired.blv", 1, 32);
+        var leased = fixture.CreateArtifact("leased.blv", 2, 16);
+        var protectedBySession = fixture.CreateArtifact("selected.blv", 3, 8);
+        var now = DateTimeOffset.UtcNow;
+        foreach (var path in new[] { expired, leased, protectedBySession })
+            File.SetLastWriteTimeUtc(path, now.AddDays(-45).UtcDateTime);
+        fixture.Store.ProtectUntilIfManaged(leased, now.AddHours(6));
+        var visits = 0;
+        var store = new PlaybackArtifactStore(fixture.Store.RootDirectory, () => visits++);
+
+        var preview = store.MeasureStorage(new PlaybackArtifactCleanupOptions { ProtectedPaths = [protectedBySession] },
+            out var statistics);
+
+        Assert.Equal(4, visits); // Three artifacts and the lease marker.
+        Assert.Equal(3, statistics.FileCount);
+        Assert.Equal(56, statistics.TotalBytes);
+        Assert.Equal(1, preview.CandidateFileCount);
+        Assert.Equal(32, preview.ReclaimableBytes);
+        Assert.Equal(24, preview.RemainingBytes);
+    }
+
+    [Fact]
     public void PreviewCleanup_ShouldMatchCleanupForExpiredArtifacts_WithoutChangingFiles()
     {
         using var fixture = new PreviewFixture();

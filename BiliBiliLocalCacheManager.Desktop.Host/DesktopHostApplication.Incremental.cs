@@ -4,9 +4,9 @@ namespace BiliBiliLocalCacheManager.Desktop.Host;
 
 internal sealed partial class DesktopHostApplication
 {
-    private CacheIndexBuildResult? _lastScanReport;
+    private (int AvidDirectories, int SegmentDirectories)? _completeScanCounts;
     private MutationRefresh? _mutationRefresh;
-    private sealed record MutationRefresh(CurrentIndexSnapshot Snapshot, CacheIndexBuildResult Report,
+    private sealed record MutationRefresh(CurrentIndexSnapshot Snapshot, int AvidDirectories, int SegmentDirectories,
         string Root, bool IncludeIncomplete, HashSet<long> Avids);
 
     private void InvalidateAfterMutation(string root, long avid)
@@ -14,14 +14,9 @@ internal sealed partial class DesktopHostApplication
         lock (_stateSync)
         {
             var refresh = _mutationRefresh;
-            // A clean, fully represented baseline lets us subtract per-video counts exactly.
-            // Missing metadata, skipped entries and bounded issue lists require a full scan.
-            if (refresh is null && _indexSnapshot is { } snapshot && _lastScanReport is { } report &&
-                snapshot.PartIdentityIssueCount == 0 &&
-                PathsEqual(_currentRoot, root) && report.IssuesCollected && !report.HasWarnings &&
-                report.ScannedAvidDirectories == report.Index.VideoCaches.Count &&
-                report.ScannedSegmentDirectories == report.IncludedEntries)
-                refresh = new(snapshot, report, root, _currentIncludeIncomplete, []);
+            if (refresh is null && _indexSnapshot is { } snapshot && _completeScanCounts is { } counts &&
+                PathsEqual(_currentRoot, root))
+                refresh = new(snapshot, counts.AvidDirectories, counts.SegmentDirectories, root, _currentIncludeIncomplete, []);
             ClearCurrentIndex();
             if (refresh is not null && PathsEqual(refresh.Root, root))
             {
@@ -43,11 +38,11 @@ internal sealed partial class DesktopHostApplication
 
     private static CacheIndexBuildResult MergeMutationRefresh(MutationRefresh source, CacheIndexBuildResult changed)
     {
-        var retained = source.Report.Index.VideoCaches.Where(cache => !source.Avids.Contains(cache.Avid)).ToArray();
-        var removed = source.Report.Index.VideoCaches.Where(cache => source.Avids.Contains(cache.Avid)).ToArray();
+        var retained = source.Snapshot.Index.VideoCaches.Where(cache => !source.Avids.Contains(cache.Avid)).ToArray();
+        var removed = source.Snapshot.Index.VideoCaches.Where(cache => source.Avids.Contains(cache.Avid)).ToArray();
         return new(new CacheIndex(retained.Concat(changed.Index.VideoCaches)),
-            source.Report.ScannedAvidDirectories - removed.Length + changed.ScannedAvidDirectories,
-            source.Report.ScannedSegmentDirectories - removed.Sum(cache => cache.Segments.Count) + changed.ScannedSegmentDirectories,
+            source.AvidDirectories - removed.Length + changed.ScannedAvidDirectories,
+            source.SegmentDirectories - removed.Sum(cache => cache.Segments.Count) + changed.ScannedSegmentDirectories,
             retained.Sum(cache => cache.Segments.Count) + changed.IncludedEntries,
             changed.SkippedIncompleteEntries, changed.InvalidEntries, changed.InaccessibleDirectories, changed.Issues);
     }

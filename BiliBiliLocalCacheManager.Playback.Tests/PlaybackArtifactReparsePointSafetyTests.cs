@@ -55,6 +55,7 @@ public sealed class PlaybackArtifactReparsePointSafetyTests
                 ".mp4",
                 path => File.WriteAllBytes(path, new byte[32])));
             Assert.Throws<InvalidOperationException>(() => store.GetStatistics());
+            Assert.Throws<InvalidOperationException>(() => store.MeasureStorage(new(), out _));
 
             var clearResult = store.Clear();
             Assert.Equal(0, clearResult.DeletedFileCount);

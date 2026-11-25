@@ -674,6 +674,43 @@ public sealed partial class DesktopHostContractTests
     }
 
     [Fact]
+    public async Task StorageGet_UsesOneArtifactSnapshotForUsageAndReclaimableSpace()
+    {
+        using var workspace = new HostTestWorkspace();
+        var page = Directory.CreateDirectory(Path.Combine(workspace.TranscodeRoot, "42", "Page_1")).FullName;
+        var expired = Path.Combine(page, "aaaaaaaaaaaaaaaaaaaaaaaa.mp4");
+        var added = Path.Combine(page, "bbbbbbbbbbbbbbbbbbbbbbbb.mp4");
+        var expiredTime = DateTime.UtcNow.AddDays(-45);
+        File.WriteAllBytes(expired, new byte[17]);
+        File.SetLastWriteTimeUtc(expired, expiredTime);
+        var application = workspace.CreateApplication();
+        application.ProgressReported += (_, progress) =>
+        {
+            // With no original cache root, the first activity follows enumeration of the artifact page.
+            if (progress.Operation != "storage.get" || File.Exists(added)) return;
+            File.WriteAllBytes(added, new byte[43]);
+            File.SetLastWriteTimeUtc(added, expiredTime);
+        };
+
+        var first = await DispatchAsync(application, "storage.get", """{"rootPath":""}""");
+        Assert.True(File.Exists(added));
+        Assert.Equal(1, first.GetProperty("transcodeCache").GetProperty("itemCount").GetInt32());
+        Assert.Equal(17L, first.GetProperty("transcodeCache").GetProperty("bytes").GetInt64());
+        Assert.Equal(17L, first.GetProperty("policyReclaimableBytes").GetInt64());
+
+        var second = await DispatchAsync(application, "storage.get", """{"rootPath":""}""");
+        Assert.Equal(2, second.GetProperty("transcodeCache").GetProperty("itemCount").GetInt32());
+        Assert.Equal(60L, second.GetProperty("transcodeCache").GetProperty("bytes").GetInt64());
+        Assert.Equal(60L, second.GetProperty("policyReclaimableBytes").GetInt64());
+
+        File.SetLastWriteTimeUtc(expired, DateTime.UtcNow);
+        var cleanup = await DispatchAsync(application, "artifacts.cleanup", "{}");
+        Assert.Equal(43L, cleanup.GetProperty("freedBytes").GetInt64());
+        Assert.True(File.Exists(expired));
+        Assert.False(File.Exists(added));
+    }
+
+    [Fact]
     public async Task StoragePolicyPreview_ExcludesTheTrashAndMatchesPolicyCleanup()
     {
         using var workspace = new HostTestWorkspace();
