@@ -1,5 +1,5 @@
 // Actual Electron + preload + Host round trip, using a newly created synthetic
-// cache only. Moves one fixture part to application trash, then restores it.
+// cache only. Checks a failed export and a part move/restore across a full restart.
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -12,22 +12,26 @@ const { repository, desktop, projectRequire, createOutput, electronExecutable, e
   const root = path.join(fixture, 'cache');
   const settingsPath = path.join(fixture, 'settings.json');
   const profile = path.join(fixture, 'profile');
-  const report = { scope: 'Real Electron/Host, synthetic part trash move and restore, two app launches; no player or permanent deletion.', status: 'running', checks: [], screenshots: [], errors: [] };
+  const exportDirectory = path.join(fixture, 'export');
+  const report = { scope: 'Real Electron/Host task history across two app launches, including synthetic export final verification and part move/restore.', status: 'running', checks: [], screenshots: [], errors: [] };
   let application, page;
   try {
   await fs.mkdir(root, { recursive: true });
+  await fs.mkdir(exportDirectory);
   const hostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host', 'bin', 'Release', 'net11.0', 'BiliBiliLocalCacheManager.Desktop.Host.dll');
+  const historyHostPath = path.join(repository, 'BiliBiliLocalCacheManager.Desktop.Host.Tests', 'bin', 'Release', 'net11.0', 'BiliBiliLocalCacheManager.Desktop.Host.Tests.dll');
   await fs.access(hostPath);
+  await fs.access(historyHostPath);
   await fs.access(path.join(desktop, 'dist-electron', 'main.cjs'));
-  for (let page = 1; page <= 2; page++) {
-    const segment = path.join(root, '990002', `c_${page}`);
+  for (const [avid, page] of [[990001, 2], [990002, 1], [990002, 2]]) {
+    const segment = path.join(root, String(avid), `c_${page}`);
     const media = path.join(segment, 'lua.flv.bb2api.80');
     await fs.mkdir(media, { recursive: true });
     await fs.writeFile(path.join(segment, 'entry.json'), JSON.stringify({ is_completed: true, total_bytes: 16, downloaded_bytes: 16,
       title: '任务历史验证缓存', type_tag: '80', cover: 'synthetic', prefered_video_quality: 80, total_time_milli: 1000,
-      danmaku_count: 0, time_update_stamp: 1750000000000, time_create_stamp: 1750000000000,
-      avid: 990002, bvid: 'BVHistoryFixture', owner_name: 'Fixture',
-      page_data: { cid: 9900020 + page, page, part: `Fixture P${page}`, from: 'local', vid: 'fixture', tid: 0 } }));
+      danmaku_count: 0, time_update_stamp: avid === 990001 ? 1750001000000 : 1750000000000, time_create_stamp: 1750000000000,
+      avid, bvid: `BVHistoryFixture${avid}`, owner_name: 'Fixture',
+      page_data: { cid: avid * 10 + page, page, part: `Fixture P${page}`, from: 'local', vid: 'fixture', tid: 0 } }));
     await fs.writeFile(path.join(media, '0.mp4'), 'synthetic-media');
   }
   await fs.writeFile(settingsPath, JSON.stringify({ SchemaVersion: 2, RootPath: root, RememberRootPath: true, ScanOnStartup: true }));
@@ -37,9 +41,9 @@ if(app.isPackaged)throw new Error('Development build required');
 app.setPath('userData',${JSON.stringify(profile)});app.disableHardwareAcceleration();
 require(${JSON.stringify(path.join(desktop, 'dist-electron', 'main.cjs'))});`);
   const { _electron } = projectRequire('playwright');
-  const env = electronEnvironment({ CACHE_MANAGER_HOST_PATH: hostPath,
-    BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH: settingsPath, BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT: path.join(fixture, 'transcode') });
-  const launch = async () => {
+  const launch = async selectedHost => {
+    const env = electronEnvironment({ CACHE_MANAGER_HOST_PATH: selectedHost, BLCM_E2E_EXPORT_DIRECTORY: exportDirectory,
+      BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH: settingsPath, BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT: path.join(fixture, 'transcode') });
     application = await _electron.launch({ executablePath: electronExecutable(), args: [wrapper], env, cwd: desktop, chromiumSandbox: true, timeout: 60_000 });
     page = await application.firstWindow({ timeout: 60_000 });
     page.setDefaultTimeout(30_000);
@@ -47,7 +51,7 @@ require(${JSON.stringify(path.join(desktop, 'dist-electron', 'main.cjs'))});`);
     await page.waitForFunction(() => document.querySelector('[data-renderer-bootstrap]')?.getAttribute('data-renderer-bootstrap') === 'ready', undefined, { timeout: 60_000 });
     return page;
   };
-    page = await launch();
+    page = await launch(historyHostPath);
     // Exercise the real registered IPC guard while a native dialog is pending,
     // before any HostCall exists. The stub never opens an OS dialog.
     await application.evaluate(({ dialog }) => {
@@ -83,6 +87,24 @@ require(${JSON.stringify(path.join(desktop, 'dist-electron', 'main.cjs'))});`);
     await page.waitForFunction(() => document.querySelector('[data-renderer-bootstrap]')?.getAttribute('data-renderer-bootstrap') === 'ready', undefined, { timeout: 60_000 });
     assert.equal(await page.evaluate(() => window.__blcmE2EReloadMarker), undefined);
     report.checks.push('Real main-process IPC refuses reload during a pending native dialog, then reloads after it settles.');
+    await application.evaluate(({ dialog }, directory) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
+    }, exportDirectory);
+    const failedExport = await page.evaluate(async rootPath => {
+      const api = window.cacheManager;
+      const scan = await api.scan({ rootPath, includeIncomplete: false });
+      const result = await api.exportMedia(rootPath, [
+        { avid: '990001', pageIndexes: [2] }, { avid: '990002', pageIndexes: [2] },
+      ], 'cache-export', false, undefined, scan.indexToken);
+      return { result, entry: (await api.getTaskHistory()).entries.find(item => item.operation === 'export') };
+    }, root);
+    const expectedFailure = { avid: '990002', pageIndex: 2, title: '任务历史验证缓存',
+      message: 'Staged export media changed before batch publication; retry the complete batch.' };
+    assert.equal(failedExport.result.published, false);
+    assert.equal(failedExport.result.exportedCount, 0);
+    assert.deepEqual(failedExport.result.failures, [expectedFailure]);
+    assert.deepEqual(await fs.readdir(exportDirectory), []);
+    assert.equal(failedExport.entry.status, 'failed');
     const result = await page.evaluate(async rootPath => {
       const api = window.cacheManager;
       const scan = await api.scan({ rootPath, includeIncomplete: false });
@@ -97,13 +119,16 @@ require(${JSON.stringify(path.join(desktop, 'dist-electron', 'main.cjs'))});`);
     const movedId = result.history.entries[0].id;
     report.checks.push('Actual Host part move is persisted before its IPC response completes.');
     await application.close(); application = undefined;
-    page = await launch();
+    page = await launch(hostPath);
     const restored = await page.evaluate(async ({ rootPath, entryIds }) => {
       const before = await window.cacheManager.getTaskHistory();
       const restored = await window.cacheManager.restoreTrash(rootPath, entryIds);
       return { before, restored, after: await window.cacheManager.getTaskHistory() };
     }, { rootPath: root, entryIds: result.moved.entryIds });
     assert(restored.before.entries.some(item => item.id === movedId && item.status === 'succeeded'));
+    const reopenedExport = restored.before.entries.find(item => item.id === failedExport.entry.id);
+    assert.equal(reopenedExport.status, 'failed');
+    assert.deepEqual(reopenedExport.failures, [expectedFailure]);
     assert.equal(restored.restored.restored.length, 1);
     assert.equal(restored.after.entries[0].operation, 'trash.restore');
     assert.equal(restored.after.entries[0].status, 'succeeded');
@@ -111,7 +136,15 @@ require(${JSON.stringify(path.join(desktop, 'dist-electron', 'main.cjs'))});`);
     report.checks.push('History survives a full application restart; the real fixture part is restored.');
     await page.getByRole('button', { name: '诊断', exact: true }).click();
     await page.getByRole('heading', { name: '任务历史' }).waitFor();
-    await page.locator('.history-entry').first().locator('summary').click();
+    const exportEntry = page.locator('.history-entry').filter({ has: page.locator('summary strong', { hasText: '导出' }) });
+    await exportEntry.locator('summary').click();
+    const failedItem = exportEntry.getByRole('listitem');
+    assert.equal(await failedItem.count(), 1);
+    const failureText = await failedItem.innerText();
+    for (const detail of [expectedFailure.title, 'av990002', 'P2', expectedFailure.message])
+      assert(failureText.includes(detail), `Missing export failure detail after restart: ${detail}`);
+    assert(!failureText.includes('av990001'));
+    report.checks.push('A real final digest mismatch rolls back both same-title exports; the exact failed AV, part and reason remain visible after restart.');
     await page.waitForFunction(() => document.querySelectorAll('.toast').length === 0);
     for (const [width, height] of [[1440, 900], [1080, 720]]) {
       await application.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setSize(...size), [width, height]);
@@ -119,7 +152,7 @@ require(${JSON.stringify(path.join(desktop, 'dist-electron', 'main.cjs'))});`);
       const layout = await page.evaluate(() => ({ overflow: document.documentElement.scrollWidth > innerWidth,
         historyOverflow: document.querySelector('.task-history').scrollWidth > document.querySelector('.task-history').clientWidth,
         count: document.querySelectorAll('.history-entry').length }));
-      assert.equal(layout.overflow, false); assert.equal(layout.historyOverflow, false); assert.equal(layout.count, 2);
+      assert.equal(layout.overflow, false); assert.equal(layout.historyOverflow, false); assert.equal(layout.count, 3);
       const screenshot = `history-${width}.png`;
       await page.screenshot({ path: path.join(output, screenshot) });
       report.screenshots.push({ screenshot, width, height, ...layout });

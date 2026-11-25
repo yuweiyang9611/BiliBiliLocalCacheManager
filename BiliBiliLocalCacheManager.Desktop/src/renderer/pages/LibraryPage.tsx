@@ -7,6 +7,12 @@ import { Check, Empty, PageControls, PageSelectionCheckbox } from '../components
 import { toggleSet, formatBytes, formatDuration, formatDate } from '../display';
 import { partSelectionKey } from '../hooks/useLibrarySelection';
 
+export interface InterruptedSearch {
+  status: 'failed' | 'cancelled';
+  displayedKeyword: string;
+  offset: number;
+}
+
 export interface LibraryProps {
   settings: AppSettings;
   updateSetting<K extends keyof AppSettings>(key: K, value: AppSettings[K]): void;
@@ -33,13 +39,14 @@ export interface LibraryProps {
   exportMedia(): Promise<void>;
   moveToTrash(): void;
   clear(): void;
-  resultState: 'unscanned' | 'empty' | 'no-matches' | 'cleared' | 'pending' | 'failed' | 'cancelled';
+  resultState: 'unscanned' | 'empty' | 'no-matches' | 'cleared' | 'pending' | InterruptedSearch;
   skippedIncomplete: number;
   scan(includeIncomplete?: boolean): Promise<void>;
 }
 
 export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
-  const { settings, updateSetting } = props;
+  const { settings, updateSetting, resultState } = props;
+  const interrupted = typeof resultState === 'object' ? resultState : null;
   const visiblePartKeys = props.focusedDetails?.segments.map(segment => partSelectionKey(props.focusedDetails!.avid, segment.pageIndex)) ?? [];
   const selectVisibleParts = (checked: boolean) => {
     const ids = new Set(props.selectedSegmentIds);
@@ -71,6 +78,11 @@ export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
     <section className="card cache-panel">
       <div className="panel-heading"><div><h2>缓存列表</h2><span>{props.cachePage.totalItems} 项</span></div><div className="toolbar"><button className="button ghost" onClick={() => void props.play()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="play" />播放</button><button className="button ghost" onClick={() => void props.exportMedia()} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="export" />导出</button><button className="button ghost danger-text" onClick={props.moveToTrash} disabled={props.busy || (!props.selectedIds.size && !props.selectedSegmentIds.size)}><Icon name="delete" />删除</button><button className="button ghost" onClick={props.clear} disabled={props.readBusy}>清空结果</button></div></div>
       {props.items.length > 0 && props.resultState === 'pending' && <p className="library-query-status" role="status">正在更新结果，当前显示上次查询内容。</p>}
+      {props.items.length > 0 && interrupted && <div className="library-query-status library-query-recovery">
+        <span role="status" title={interrupted.displayedKeyword || undefined}>{interrupted.status === 'failed' ? '查询失败' : '查询已取消'}，当前仍显示{interrupted.displayedKeyword
+          ? `上次搜索“${interrupted.displayedKeyword}”的结果` : '未筛选的缓存列表'}。</span>
+        <button className="button secondary" disabled={props.readBusy} onClick={() => void props.search(interrupted.offset)}>重试查询</button>
+      </div>}
       <VirtualizedCacheTable items={props.items} selectedIds={props.selectedIds} setSelectedIds={props.setSelectedIds} focusedId={props.focusedId} focus={props.focus} busy={props.busy} play={props.play} />
       {!props.items.length && <LibraryEmptyState {...props} />}
       <PageControls
@@ -93,7 +105,10 @@ export const LibraryPage = memo(function LibraryPage(props: LibraryProps) {
 });
 
 function LibraryEmptyState(props: LibraryProps) {
-  const state = props.resultState;
+  const { resultState } = props;
+  const interrupted = typeof resultState === 'object' ? resultState : null;
+  const state = typeof resultState === 'object' ? resultState.status : resultState;
+  const previousEmpty = interrupted?.displayedKeyword ? `上次搜索“${interrupted.displayedKeyword}”没有匹配缓存。` : null;
   const hasRoot = Boolean(props.settings.rootPath.trim());
   const messages = {
     unscanned: ['尚未加载缓存', hasRoot ? '当前目录尚未扫描。扫描后可查找、播放和导出缓存。' : '选择 B 站 download 缓存目录，开始查看本地缓存。'],
@@ -103,11 +118,12 @@ function LibraryEmptyState(props: LibraryProps) {
     'no-matches': ['未找到匹配缓存', '试试其他搜索词或调整高级筛选，也可清除搜索词查看已扫描的缓存。'],
     cleared: ['已清空显示结果', '缓存文件和扫描索引仍保留。可以重新显示当前搜索结果。'],
     pending: ['正在查找缓存', '正在等待当前查询结果…'],
-    failed: ['查询未完成', '可以重试当前查询；详细原因见操作提示。'],
-    cancelled: ['查询已取消', '可以重新显示当前搜索结果。'],
+    failed: ['查询未完成', previousEmpty ?? '可以重试当前查询；详细原因见操作提示。'],
+    cancelled: ['查询已取消', previousEmpty ?? '可以重新显示当前搜索结果。'],
   } as const;
   const [title, body] = messages[state];
-  return <div className="empty library-empty" role="status"><Icon name={state === 'no-matches' ? 'search' : 'library'} /><h3>{title}</h3><p>{body}</p>
+  return <div className="empty library-empty" role="status"><Icon name={state === 'no-matches' ? 'search' : 'library'} /><h3>{title}</h3>
+    <p className={previousEmpty ? 'previous-empty-query' : undefined} title={previousEmpty ?? undefined}>{body}</p>
     <div className="toolbar">
       {state === 'unscanned' && <button className="button secondary" disabled={props.busy} onClick={() => void (hasRoot ? props.scan() : props.browse())}>{hasRoot ? '扫描当前目录' : '选择缓存目录'}</button>}
       {state === 'empty' && <>
@@ -115,7 +131,7 @@ function LibraryEmptyState(props: LibraryProps) {
         <button className="button ghost" disabled={props.busy} onClick={() => void props.browse()}>选择其他目录</button>
       </>}
       {state === 'no-matches' && Boolean(props.settings.keyword) && <button className="button secondary" disabled={props.readBusy} onClick={() => { props.updateSetting('keyword', ''); props.searchInput.current?.focus(); }}>清除搜索词</button>}
-      {(state === 'cleared' || state === 'cancelled' || state === 'failed') && <button className="button secondary" disabled={props.readBusy} onClick={() => void props.search()}>{state === 'failed' ? '重试查询' : '重新显示结果'}</button>}
+      {(state === 'cleared' || interrupted) && <button className="button secondary" disabled={props.readBusy} onClick={() => void props.search(interrupted?.offset)}>{state === 'failed' || previousEmpty ? '重试查询' : '重新显示结果'}</button>}
     </div>
   </div>;
 }

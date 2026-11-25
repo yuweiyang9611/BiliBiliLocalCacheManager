@@ -150,6 +150,9 @@ code { color: #8eb7f8; font: 10px ui-monospace, SFMono-Regular, Consolas, monosp
 .library-empty { flex: 1; min-height: 0; padding: 14px; }
 .library-empty .toolbar { margin-top: 16px; flex-wrap: wrap; justify-content: center; }
 .library-query-status { margin: 0; padding: 8px 20px; color: var(--subtle); }
+.library-query-recovery { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.library-query-recovery span, .previous-empty-query { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.library-query-recovery button { flex: none; }
 .page-controls { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; min-height: 38px; padding: 5px 12px; color: var(--muted); background: #0e1727; border-top: 1px solid var(--border); font-size: 10px; }
 .page-controls > div { display: flex; gap: 6px; }
 .page-controls .button { min-height: 27px; padding: 4px 9px; font-size: 10px; }

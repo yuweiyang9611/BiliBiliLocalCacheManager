@@ -112,6 +112,13 @@ internal sealed partial class DesktopHostApplication
         var preparedCount = 0;
         var prepared = new List<(CachePlaybackPlan Plan, PlaybackMaterializationResult Result, string Output)>();
         var outputLeases = new List<FileStream>();
+        ExportBatchResultDto FailedBatch(Exception exception, CachePlaybackPlan? plan = null)
+        {
+            failures.Add(new(plan?.Avid.ToString() ?? "", plan?.PageIndex,
+                BoundWireString(plan?.Title), BoundWireString(exception.Message)));
+            return new(null, 0, failures, false, requirements);
+        }
+
         try
         {
             for (var ordinal = 0; ordinal < requests.Count; ordinal++)
@@ -167,12 +174,19 @@ internal sealed partial class DesktopHostApplication
             for (var ordinal = 0; ordinal < prepared.Count; ordinal++)
             {
                 var item = prepared[ordinal];
-                PlaybackBatchLauncher.ValidateLocalFile(item.Output);
-                outputLeases.Add(new FileStream(item.Output, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
-                var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
-                    ReportProgress(new HostProgressEvent(requestId, "export", value.Stage, Current: requests.Count + ordinal + 1,
-                        Total: requests.Count * 2, Details: new { bytesProcessed = value.ProcessedBytes }, Phase: value.Phase)));
-                await exportService.ValidatePreparedAsync(item.Plan, item.Result, progress, protection.Token, item.Output);
+                try
+                {
+                    PlaybackBatchLauncher.ValidateLocalFile(item.Output);
+                    outputLeases.Add(new FileStream(item.Output, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
+                    var progress = new InlineProgress<PlaybackPreparationProgress>(value =>
+                        ReportProgress(new HostProgressEvent(requestId, "export", value.Stage, Current: requests.Count + ordinal + 1,
+                            Total: requests.Count * 2, Details: new { bytesProcessed = value.ProcessedBytes }, Phase: value.Phase)));
+                    await exportService.ValidatePreparedAsync(item.Plan, item.Result, progress, protection.Token, item.Output);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    return FailedBatch(exception, item.Plan);
+                }
             }
             await protection.StopAsync();
             if (protection.Failure is not null) throw new IOException("Export preparation protection failed: " + protection.Failure.Message);
@@ -183,11 +197,18 @@ internal sealed partial class DesktopHostApplication
             outputLeases.Clear();
             while (true)
             {
+                destinationGuard.Validate();
+                stagingGuard.Validate();
+                foreach (var item in prepared)
+                {
+                    try { PlaybackBatchLauncher.ValidateLocalFile(item.Output); }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        return FailedBatch(exception, item.Plan);
+                    }
+                }
                 try
                 {
-                    destinationGuard.Validate();
-                    stagingGuard.Validate();
-                    foreach (var item in prepared) PlaybackBatchLauncher.ValidateLocalFile(item.Output);
                     Directory.Move(stagingDirectory!, destination);
                     stagingDirectory = null;
                     break;
@@ -203,8 +224,7 @@ internal sealed partial class DesktopHostApplication
         catch (OperationCanceledException) { throw; }
         catch (Exception exception)
         {
-            failures.Add(new("", null, "", BoundWireString(exception.Message)));
-            return new ExportBatchResultDto(null, 0, failures, false, requirements);
+            return FailedBatch(exception);
         }
         finally
         {
