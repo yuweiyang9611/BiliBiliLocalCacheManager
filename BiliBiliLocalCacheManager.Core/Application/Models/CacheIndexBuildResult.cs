@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using BiliBiliLocalCacheManager.Core.Domain.Models;
 
 namespace BiliBiliLocalCacheManager.Core.Application.Models;
 
@@ -47,6 +48,9 @@ public sealed class CacheIndexBuildResult
     /// <summary>False when a legacy builder supplied only an index, not scan diagnostics.</summary>
     public bool IssuesCollected { get; }
 
+    /// <summary>Physical identities (or the reason binding failed) for segments read during this build.</summary>
+    public IReadOnlyDictionary<BiliSegment, CacheScanPartIdentity>? PartIdentities { get; internal init; }
+
     public bool HasWarnings => SkippedIncompleteEntries > 0 || InvalidEntries > 0 || InaccessibleDirectories > 0;
 
     public static CacheIndexBuildResult FromIndex(CacheIndex index)
@@ -63,3 +67,5 @@ public sealed class CacheIndexBuildResult
             issuesCollected: false);
     }
 }
+
+public readonly record struct CacheScanPartIdentity(CacheTrashPartTarget? Target, string? Error);

@@ -7,6 +7,31 @@ namespace BiliBiliLocalCacheManager.Core.Tests;
 
 public sealed class FileSystemCacheIndexBuilderTests
 {
+    [Theory]
+    [InlineData("0100", "entry.json")]
+    [InlineData("100", "other.json")]
+    public void BuildIndex_NoncanonicalMetadataCanBeListedWithoutCreatingADeletionTarget(string avidDirectory, string entryFile)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var part = Directory.CreateDirectory(Path.Combine(root, avidDirectory, "c_1")).FullName;
+            var path = Path.Combine(part, entryFile);
+            File.WriteAllText(path, BuildEntryJson(100, "Listed video", "P1", true));
+
+            var report = new FileSystemCacheIndexBuilder().BuildIndexWithReport(root,
+                new CacheIndexBuildOptions { EntryFileName = entryFile, CapturePartIdentities = true });
+            var cache = Assert.Single(report.Index.VideoCaches);
+            Assert.Equal("Listed video", cache.Title);
+            var segment = Assert.Single(cache.Segments);
+            Assert.Equal(path, segment.EntryJsonPath);
+            var identity = report.PartIdentities![segment];
+            Assert.Null(identity.Target);
+            Assert.False(string.IsNullOrWhiteSpace(identity.Error));
+        }
+        finally { SafeDeleteDirectory(root); }
+    }
+
     [Fact]
     public void BuildIndex_ShouldIncludeCompletedSegmentAndVideoFiles()
     {

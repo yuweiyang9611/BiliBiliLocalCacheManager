@@ -591,7 +591,7 @@ internal sealed partial class DesktopHostApplication
         {
             _indexGeneration++;
             _mutationRefresh = null;
-            _lastScanReport = null;
+            _completeScanCounts = null;
             _indexSnapshot?.Invalidate();
             _indexSnapshot = null;
             _currentIndex = null;

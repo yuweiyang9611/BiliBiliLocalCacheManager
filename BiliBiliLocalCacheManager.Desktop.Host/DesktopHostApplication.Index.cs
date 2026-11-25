@@ -81,7 +81,8 @@ internal sealed partial class DesktopHostApplication
         }
 
         public void CaptureTrashPartTargets(ICacheTrashService trashService, CancellationToken cancellationToken, Action<int>? progress,
-            CurrentIndexSnapshot? previous = null, IReadOnlySet<long>? changedAvids = null)
+            CurrentIndexSnapshot? previous = null, IReadOnlySet<long>? changedAvids = null,
+            IReadOnlyDictionary<BiliSegment, CacheScanPartIdentity>? scannedParts = null)
         {
             var processed = 0;
             foreach (var cache in Index.VideoCaches)
@@ -105,6 +106,12 @@ internal sealed partial class DesktopHostApplication
                         overlapping.Contains(segments[0].SegmentDirectory))
                     {
                         _trashParts[key] = (null, "该分 P 对应多个或重叠物理目录，无法安全确定删除范围。");
+                    }
+                    else if (scannedParts is not null)
+                    {
+                        _trashParts[key] = scannedParts.TryGetValue(segments[0], out var captured)
+                            ? (captured.Target, captured.Error is null ? null : $"无法安全绑定分 P 目录：{captured.Error}")
+                            : (null, "本次扫描未捕获该分 P 的身份，请重新扫描。");
                     }
                     else
                     {

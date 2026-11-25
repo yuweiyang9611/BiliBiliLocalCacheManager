@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Core.Infrastructure.Scanning;
@@ -14,6 +15,40 @@ public sealed class FileSystemCacheIndexByteBoundsTests : IDisposable
     public FileSystemCacheIndexByteBoundsTests()
     {
         Directory.CreateDirectory(_root);
+    }
+
+    [Fact]
+    public void EntryFileSize_IncludesExactLimitWithBomAndRejectsOnlyTheOversizedPart()
+    {
+        const int maximum = 4 * 1024 * 1024;
+        var atLimit = WriteEntry("1", "valid", 9, title: "Exact boundary");
+        var overLimit = WriteEntry("1", "oversized", 3);
+        WriteEntry("2", "other", 1, title: "Other video");
+        WritePaddedMetadata(atLimit, maximum);
+        WritePaddedMetadata(overLimit, maximum + 1);
+
+        var builder = new FileSystemCacheIndexBuilder();
+        var report = builder.BuildIndexWithReport(_root);
+
+        Assert.Equal(2, report.IncludedEntries);
+        Assert.Equal(1, report.InvalidEntries);
+        Assert.Equal("Exact boundary", report.Index.ByAvid[1].Title);
+        Assert.Equal(atLimit, Assert.Single(report.Index.ByAvid[1].Segments).EntryJsonPath);
+        Assert.Equal("Other video", report.Index.ByAvid[2].Title);
+        var issue = Assert.Single(report.Issues);
+        Assert.Equal(CacheScanIssueKind.InvalidEntry, issue.Kind);
+        Assert.Equal(overLimit, issue.Path);
+        Assert.Throws<InvalidDataException>(() => builder.BuildIndexWithReport(_root,
+            new CacheIndexBuildOptions { ThrowOnInvalidEntry = true }));
+    }
+
+    private static void WritePaddedMetadata(string path, int byteCount)
+    {
+        var json = File.ReadAllText(path);
+        var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
+        var padding = byteCount - encoding.GetPreamble().Length - encoding.GetByteCount(json);
+        File.WriteAllText(path, json + new string(' ', padding), encoding);
+        Assert.Equal(byteCount, new FileInfo(path).Length);
     }
 
     [Theory]

@@ -41,7 +41,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
 
         NormalizeVideoExtensions(effectiveOptions);
 
-        var state = new ScanAccumulator(effectiveOptions.MaxReportedIssues);
+        var state = new ScanAccumulator(effectiveOptions.MaxReportedIssues, effectiveOptions.CapturePartIdentities);
         var segments = new List<BiliSegment>();
         var avidDirectories = new List<(string Path, long Avid)>();
         foreach (var path in EnumerateDirectories(root, state, cancellationToken, effectiveOptions.AvidFilter))
@@ -67,6 +67,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         {
             cancellationToken.ThrowIfCancellationRequested();
             ScanAvidDirectory(
+                root,
                 avidDirectory.Path,
                 avidDirectory.Avid,
                 effectiveOptions,
@@ -91,10 +92,11 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
             state.SkippedIncompleteEntries,
             state.InvalidEntries,
             state.InaccessibleDirectories,
-            state.Issues);
+            state.Issues) { PartIdentities = state.PartIdentities?.AsReadOnly() };
     }
 
     private static void ScanAvidDirectory(
+        string root,
         string avidDirectory,
         long directoryAvid,
         CacheIndexBuildOptions options,
@@ -120,17 +122,20 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                     continue;
                 }
 
-                string json;
+                (byte[] Bytes, string? DirectoryIdentity, string? Error) metadata;
                 try
                 {
-                    json = File.ReadAllText(entryPath);
+                    metadata = FileSystemCacheTrashService.ReadEntryForScan(root, avidDirectory, segmentDirectory,
+                        entryPath, options.CapturePartIdentities, cancellationToken);
                 }
                 catch (FileNotFoundException)
                 {
                     continue;
                 }
                 cancellationToken.ThrowIfCancellationRequested();
-                var raw = CacheEntryRaw.FromJson(json);
+                // Keep the legacy BOM-aware text decoding, but derive the deletion fingerprint from the original bytes.
+                using var reader = new StreamReader(new MemoryStream(metadata.Bytes, writable: false));
+                var raw = CacheEntryRaw.FromJson(reader.ReadToEnd());
                 ValidateRawEntry(raw, directoryAvid, options.MaximumCacheBytes);
 
                 if (!options.IncludeIncompleteEntries && !raw.IsCompleted)
@@ -153,6 +158,10 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                     state.IncludedCacheBytes[directoryAvid] = includedBytes + segment.TotalBytes;
                 }
 
+                if (state.PartIdentities is not null)
+                    state.PartIdentities.Add(segment, metadata.DirectoryIdentity is { } identity
+                        ? FileSystemCacheTrashService.BindScannedPart(segment, metadata.Bytes, identity)
+                        : new(null, metadata.Error));
                 accumulator.Add(segment);
                 state.IncludedEntries++;
             }
@@ -375,7 +384,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                    OverflowException or ArgumentException or InvalidDataException;
     }
 
-    private sealed class ScanAccumulator(int maxReportedIssues)
+    private sealed class ScanAccumulator(int maxReportedIssues, bool capturePartIdentities)
     {
         public int ScannedAvidDirectories { get; set; }
         public int ProcessedAvidDirectories { get; set; }
@@ -386,6 +395,7 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         public int InaccessibleDirectories { get; set; }
         public List<CacheScanIssue> Issues { get; } = new();
         public Dictionary<long, long> IncludedCacheBytes { get; } = new();
+        public Dictionary<BiliSegment, CacheScanPartIdentity>? PartIdentities { get; } = capturePartIdentities ? new() : null;
 
         public void AddIssue(CacheScanIssue issue)
         {

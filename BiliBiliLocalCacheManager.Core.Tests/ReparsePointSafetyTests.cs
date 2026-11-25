@@ -7,6 +7,41 @@ namespace BiliBiliLocalCacheManager.Core.Tests;
 
 public sealed class ReparsePointSafetyTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildIndex_SkipsMetadataLinksWithoutFollowingTheExternalFile(bool capturePartIdentities)
+    {
+        var root = CreateTempRoot("metadata-link-root");
+        var external = CreateTempRoot("metadata-link-external");
+        var link = Path.Combine(root, "101", "c_1", "entry.json");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(link)!);
+            CreateSegment(Path.Combine(root, "202"), 202);
+            var target = Path.Combine(external, "valid.json");
+            File.WriteAllText(target, BuildEntryJson(101));
+            try { File.CreateSymbolicLink(link, target); }
+            catch (UnauthorizedAccessException) when (OperatingSystem.IsWindows()) { return; }
+            catch (IOException ex) when (OperatingSystem.IsWindows() && (ex.HResult & 0xffff) == 1314) { return; }
+
+            var report = new FileSystemCacheIndexBuilder().BuildIndexWithReport(root,
+                new CacheIndexBuildOptions { CapturePartIdentities = capturePartIdentities });
+            Assert.Equal(202, Assert.Single(report.Index.VideoCaches).Avid);
+            Assert.Equal(1, report.InvalidEntries);
+            var issue = Assert.Single(report.Issues);
+            Assert.Equal(CacheScanIssueKind.InvalidEntry, issue.Kind);
+            Assert.Equal(link, issue.Path);
+            Assert.Equal(BuildEntryJson(101), File.ReadAllText(target));
+        }
+        finally
+        {
+            if (File.Exists(link)) File.Delete(link);
+            SafeDeleteDirectory(root);
+            SafeDeleteDirectory(external);
+        }
+    }
+
     [Fact]
     public void BuildIndex_ShouldReportAndSkipLinkedAvidAndSegmentDirectories()
     {

@@ -29,7 +29,7 @@ public sealed partial class FileSystemCacheTrashService
         if (!string.Equals(Path.GetFullPath(segment.EntryJsonPath), Path.Combine(path, "entry.json"),
                 OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             throw new InvalidDataException("The indexed entry is not in the selected part directory.");
-        using var entry = OpenStateFileLease(segment.EntryJsonPath, "The indexed part metadata");
+        using var entry = OpenPartMetadata(segment.EntryJsonPath);
         var hash = HashPartEntry(entry, segment.Avid, segment.PageIndex, segment.Cid);
         return new CacheTrashPartTarget(segment.Avid, segment.PageIndex, path, hash,
             GetPartDirectoryIdentity(path, lease));
@@ -55,7 +55,7 @@ public sealed partial class FileSystemCacheTrashService
             using var lease = LeasePartDirectory(path, allowDelete: true);
             EnsurePartTargetIdentity(path, lease, target);
             // Keep entry contents stable through validation; Windows requires closing child files before a directory rename.
-            using var entryLease = OpenStateFileLease(Path.Combine(path, "entry.json"), "The selected part metadata");
+            using var entryLease = OpenPartMetadata(Path.Combine(path, "entry.json"));
             if (HashPartEntry(entryLease, target.Avid, target.PageIndex) != target.EntryHash)
                 throw new InvalidDataException("The selected part changed after indexing; scan again.");
 
@@ -122,13 +122,10 @@ public sealed partial class FileSystemCacheTrashService
     }
 
     private static string HashPartEntry(FileStream stream, long avid, int pageIndex, long? cid = null)
+        => HashPartEntry(ReadEntryBytes(stream, CancellationToken.None), avid, pageIndex, cid);
+
+    private static string HashPartEntry(byte[] bytes, long avid, int pageIndex, long? cid)
     {
-        if (stream.Length > 4 * 1024 * 1024) throw new InvalidDataException("Part metadata is too large.");
-        stream.Position = 0;
-        // Validate and hash the same bounded bytes, avoiding a second filesystem read.
-        var bytes = new byte[checked((int)stream.Length)];
-        stream.ReadExactly(bytes);
-        if (stream.ReadByte() != -1) throw new InvalidDataException("Part metadata changed while reading.");
         // The stream parser accepted UTF-8 BOMs. Strip one for parsing only;
         // the identity hash must still cover every original byte.
         var jsonBytes = bytes.AsMemory();
