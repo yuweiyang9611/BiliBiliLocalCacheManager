@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -101,7 +101,8 @@ async function verifyExport(request, fixture) {
     });
     assert.equal(success.published, true, JSON.stringify(success));
     assert.equal(success.exportedCount, 1);
-    assert.equal(success.outputPath, path.join(outputPath, 'cache-export'));
+    // The runner's TEMP may use an 8.3 alias while the Host returns its long name.
+    assert.equal(await realpath(success.outputPath), await realpath(path.join(outputPath, 'cache-export')));
     const published = path.join(success.outputPath, 'Clip_AV101', 'P001_P1.mp4');
     assert.deepEqual(await readFile(published), clip);
     const failed = await run([1, 2]);
