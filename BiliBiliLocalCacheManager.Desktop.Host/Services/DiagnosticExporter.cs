@@ -51,7 +51,7 @@ internal sealed class DiagnosticExporter(
                     artifactStore.RootDirectory)
             })
             .ToArray();
-        var artifactStatistics = artifactStore.GetStatistics();
+        var transcodeCache = ReadArtifactStatistics(settingsState.Settings.RootPath, sessionRootPath, cancellationToken);
         try
         {
             await using (var output = new FileStream(
@@ -106,12 +106,7 @@ internal sealed class DiagnosticExporter(
                                     artifactStore.RootDirectory)
                         },
                         ffmpeg = RedactFfmpeg(ffmpegDiagnosticsProvider.GetSnapshot()),
-                        transcodeCache = new
-                        {
-                            rootDirectory = "[TRANSCODE_CACHE_ROOT]",
-                            artifactStatistics.FileCount,
-                            artifactStatistics.TotalBytes
-                        },
+                        transcodeCache,
                         session = sessionState
                     };
 
@@ -142,6 +137,28 @@ internal sealed class DiagnosticExporter(
         finally
         {
             TryDelete(temporaryPath);
+        }
+    }
+
+    private object ReadArtifactStatistics(string? savedRoot, string? sessionRoot, CancellationToken cancellationToken)
+    {
+        const string rootDirectory = "[TRANSCODE_CACHE_ROOT]";
+        try
+        {
+            var statistics = artifactStore.GetStatistics(cancellationToken);
+            return new { rootDirectory, statistics.FileCount, statistics.TotalBytes };
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            System.Security.SecurityException or InvalidOperationException)
+        {
+            // Native errors can name inaccessible ancestors outside the configured root.
+            var warning = ex switch
+            {
+                IOException => $"Transcode cache statistics could not be read (I/O error 0x{ex.HResult:X8}).",
+                UnauthorizedAccessException or System.Security.SecurityException => "Access to transcode cache statistics was denied.",
+                _ => RedactText(ex.Message, savedRoot, sessionRoot, artifactStore.RootDirectory)
+            };
+            return new { rootDirectory, measurementWarning = warning };
         }
     }
 

@@ -2,7 +2,8 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
+const { readScanTimings } = require('./scan-measurement-support.cjs');
 const { createInterface } = require('node:readline');
 const { performance } = require('node:perf_hooks');
 const { repository, createOutput, removeFixture } = require('./desktop-e2e-support.cjs');
@@ -54,12 +55,8 @@ const { repository, createOutput, removeFixture } = require('./desktop-e2e-suppo
     const milliseconds = performance.now() - start;
     // Read the timing before pagination evicts it from the bounded event history.
     await request('diagnostics.export', { rootPath: root, outputPath: diagnosticsPath });
-    const content = process.platform === 'win32'
-      ? execFileSync('tar.exe', ['-xOf', diagnosticsPath, 'recent-events.json'], { encoding: 'utf8', windowsHide: true })
-      : execFileSync('unzip', ['-p', diagnosticsPath, 'recent-events.json'], { encoding: 'utf8' });
-    const event = JSON.parse(content).find(event => event.category === 'ScanTiming' && event.message.startsWith(`request=${id};`));
-    assert(event, `Missing ScanTiming for ${id}`);
-    const fields = Object.fromEntries(event.message.split('; ').map(field => field.split('=')));
+    const fields = readScanTimings(diagnosticsPath).get(id);
+    assert(fields, `Missing ScanTiming for ${id}`);
     assert.equal(fields.incremental, expectedMode ? 'True' : 'False', name);
     assert.equal(Number(fields.readEntries), expectedReads, name);
     samples.push({ name, requestId: id, milliseconds, videos: result.totalItems, parts: result.includedEntries,

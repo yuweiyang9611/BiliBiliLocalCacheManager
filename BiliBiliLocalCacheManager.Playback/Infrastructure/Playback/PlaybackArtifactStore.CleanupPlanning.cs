@@ -28,7 +28,7 @@ public sealed partial class PlaybackArtifactStore
         PlaybackArtifactCleanupOptions? options = null)
     {
         var policy = CreateCleanupPolicy(options);
-        if (!Directory.Exists(RootDirectory))
+        if (!ArtifactRootExists())
         {
             return new PlaybackArtifactCleanupPreview(0, 0, 0);
         }
@@ -41,7 +41,7 @@ public sealed partial class PlaybackArtifactStore
         PlaybackArtifactCleanupOptions? options = null)
     {
         var policy = CreateCleanupPolicy(options);
-        if (!Directory.Exists(RootDirectory))
+        if (!ArtifactRootExists())
         {
             var emptyStatistics = new PlaybackArtifactCacheStatistics(RootDirectory, 0, 0);
             return new PlaybackArtifactCleanupResult(0, 0, 0, 0, emptyStatistics);

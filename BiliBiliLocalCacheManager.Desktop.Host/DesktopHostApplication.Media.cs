@@ -13,6 +13,7 @@ namespace BiliBiliLocalCacheManager.Desktop.Host;
 internal sealed partial class DesktopHostApplication
 {
     private ICacheExportMaterializationService? _exportService;
+    internal Action<string>? BeforeExportStagingGuardForTesting { get; set; }
 
     private async Task<object> PlayAsync(
         string requestId, JsonElement parameters, CancellationToken cancellationToken)
@@ -104,8 +105,8 @@ internal sealed partial class DesktopHostApplication
         if (requests.Count == 0 || failures.Count > 0) return new ExportBatchResultDto(null, 0, failures, false, requirements);
         using var destinationGuard = new ExportDirectoryGuard(requestedOutputPath, allowRename: false);
         var destination = ResolveBatchExportDirectory(requestedOutputPath);
-        string? stagingDirectory = CreateBatchExportStagingDirectory(destination);
-        using var stagingGuard = new ExportDirectoryGuard(stagingDirectory, allowRename: true);
+        string? stagingDirectory = null;
+        ExportDirectoryGuard? stagingGuard = null;
         var exportService = _exportService ??= new CacheExportService(_artifactStore);
         var store = new PlaybackArtifactStore(_artifactStore.RootDirectory);
         await using var protection = new PlaybackPreparationProtection(store, cancellationToken);
@@ -121,6 +122,11 @@ internal sealed partial class DesktopHostApplication
 
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            destinationGuard.Validate();
+            stagingDirectory = CreateBatchExportStagingDirectory(destination);
+            BeforeExportStagingGuardForTesting?.Invoke(stagingDirectory);
+            stagingGuard = new ExportDirectoryGuard(stagingDirectory, allowRename: true);
             for (var ordinal = 0; ordinal < requests.Count; ordinal++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -224,13 +230,19 @@ internal sealed partial class DesktopHostApplication
         catch (OperationCanceledException) { throw; }
         catch (Exception exception)
         {
+            if (stagingDirectory is not null && stagingGuard is null)
+                return FailedBatch(new IOException($"无法确认暂存目录的身份，已跳过清理。{exception.Message} 请核对：{stagingDirectory}", exception));
             return FailedBatch(exception);
         }
         finally
         {
-            foreach (var lease in outputLeases) lease.Dispose();
-            if (stagingDirectory is not null && destinationGuard.IsCurrent && stagingGuard.IsCurrent)
-                TryDeleteDirectory(stagingDirectory);
+            try
+            {
+                foreach (var lease in outputLeases) lease.Dispose();
+                if (stagingDirectory is not null && stagingGuard is not null && destinationGuard.IsCurrent && stagingGuard.IsCurrent)
+                    TryDeleteDirectory(stagingDirectory);
+            }
+            finally { stagingGuard?.Dispose(); }
         }
     }
 

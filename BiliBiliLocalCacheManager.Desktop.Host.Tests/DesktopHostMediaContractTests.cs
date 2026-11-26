@@ -172,6 +172,33 @@ public sealed partial class DesktopHostContractTests
     }
 
     [Fact]
+    public async Task Export_ReportsUnconfirmedStagingDuringSetupAndLeavesReplacementAlone()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Setup failure");
+        var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
+        var application = workspace.CreateCopyExportApplication();
+        string? replaced = null;
+        application.BeforeExportStagingGuardForTesting = path =>
+        {
+            replaced = path;
+            Directory.Move(path, path + ".original");
+            File.WriteAllText(path, "replacement");
+        };
+        var result = await DispatchAsync(application, "export", JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot,
+            outputPath = destination, targets = new[] { new { avid = "101" } } }));
+
+        Assert.NotNull(replaced);
+        Assert.False(result.GetProperty("published").GetBoolean());
+        Assert.Equal(0, result.GetProperty("exportedCount").GetInt32());
+        var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+        Assert.Equal("", failure.GetProperty("avid").GetString());
+        Assert.Contains(replaced, failure.GetProperty("message").GetString());
+        Assert.Equal("replacement", File.ReadAllText(replaced));
+        Assert.False(Directory.Exists(Path.Combine(destination, "cache-export")));
+    }
+
+    [Fact]
     public async Task Export_ReplacedStagingDirectoryIsNeitherWrittenNorCleaned()
     {
         using var workspace = new HostTestWorkspace();

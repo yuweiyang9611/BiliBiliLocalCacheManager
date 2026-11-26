@@ -12,14 +12,16 @@ public sealed partial class PlaybackArtifactStore
     // Runs only after a real sharing violation has started a retry wait.
     internal Action? CrossProcessLockWaitStartedForTesting { get; set; }
 
-    public PlaybackArtifactCacheStatistics GetStatistics()
+    public PlaybackArtifactCacheStatistics GetStatistics() => GetStatistics(CancellationToken.None);
+
+    public PlaybackArtifactCacheStatistics GetStatistics(CancellationToken cancellationToken)
     {
-        return CreateCacheStatistics(SnapshotAllManagedFilesStrict());
+        return CreateCacheStatistics(SnapshotAllManagedFilesStrict(cancellationToken), cancellationToken);
     }
 
     public PlaybackArtifactCleanupResult Clear()
     {
-        if (!Directory.Exists(RootDirectory))
+        if (!ArtifactRootExists())
         {
             var emptyStatistics = new PlaybackArtifactCacheStatistics(RootDirectory, 0, 0);
             return new PlaybackArtifactCleanupResult(0, 0, 0, 0, emptyStatistics);

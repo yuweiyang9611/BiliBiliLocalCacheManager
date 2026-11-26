@@ -324,7 +324,7 @@ jobs:
         shell: pwsh
         run: |
           $version = [string](Get-Content BiliBiliLocalCacheManager.Desktop/package.json -Raw | ConvertFrom-Json).version
-          ./scripts/test-windows-electron-packages.ps1 -Version $version
+          ./scripts/test-windows-electron-packages.ps1 -Version $version -TestMediaExport
 
       - name: Collect native packages
         shell: pwsh

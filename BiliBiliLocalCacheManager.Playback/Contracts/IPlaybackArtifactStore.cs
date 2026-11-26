@@ -32,6 +32,12 @@ public interface IPlaybackArtifactStore
 
     PlaybackArtifactCacheStatistics GetStatistics();
 
+    PlaybackArtifactCacheStatistics GetStatistics(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return GetStatistics();
+    }
+
     PlaybackArtifactCleanupPreview PreviewCleanup(PlaybackArtifactCleanupOptions? options = null);
 
     PlaybackArtifactCleanupResult Cleanup(PlaybackArtifactCleanupOptions? options = null);

@@ -121,6 +121,13 @@ public sealed class ReparsePointSafetyTests
             Assert.Contains(result.Issues, issue =>
                 issue.Kind == CacheScanIssueKind.InaccessibleDirectory &&
                 string.Equals(issue.Path, segmentLink, StringComparison.OrdinalIgnoreCase));
+
+            var filtered = new FileSystemCacheIndexBuilder().BuildIndexWithReport(root,
+                new CacheIndexBuildOptions { AvidFilter = new HashSet<long> { 111 } });
+            Assert.Empty(filtered.Index.VideoCaches);
+            var selectedIssue = Assert.Single(filtered.Issues);
+            Assert.Equal(CacheScanIssueKind.InaccessibleDirectory, selectedIssue.Kind);
+            Assert.Equal(avidLink, selectedIssue.Path);
         }
         finally
         {

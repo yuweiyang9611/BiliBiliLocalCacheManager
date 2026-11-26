@@ -22,6 +22,24 @@ async function identifyHost(dll) {
   return { hostPath, sha256 };
 }
 
+async function hostRuntime(request) {
+  const health = await request('health', {});
+  return { runtime: health.runtime, rid: health.runtimeIdentifier };
+}
+
+function readScanTimings(zipPath) {
+  const content = process.platform === 'win32'
+    ? execFileSync('tar.exe', ['-xOf', zipPath, 'recent-events.json'], { encoding: 'utf8', windowsHide: true })
+    : execFileSync('unzip', ['-p', zipPath, 'recent-events.json'], { encoding: 'utf8' });
+  const timings = new Map();
+  for (const event of JSON.parse(content)) {
+    if (event.category !== 'ScanTiming') continue;
+    const fields = Object.fromEntries(event.message.split('; ').map(field => field.split('=')));
+    timings.set(fields.request, fields);
+  }
+  return timings;
+}
+
 function startHost(hostPath, output) {
   const child = spawn('dotnet', [hostPath], { cwd: repository, windowsHide: true,
     env: { ...process.env, BILIBILI_LOCAL_CACHE_MANAGER_SETTINGS_PATH: path.join(output, 'settings.json'),
@@ -83,4 +101,4 @@ async function summaryDigest(scan, request) {
   return digest.digest('hex');
 }
 
-module.exports = { measurementSource, identifyHost, startHost, summaryDigest };
+module.exports = { measurementSource, identifyHost, hostRuntime, readScanTimings, startHost, summaryDigest };

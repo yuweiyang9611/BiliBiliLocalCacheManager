@@ -8,6 +8,41 @@ namespace BiliBiliLocalCacheManager.Core.Tests;
 public sealed class FileSystemCacheIndexBuilderTests
 {
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BuildIndex_AvidFilterPreservesSelectedAliasesAndIgnoresUnrelatedEntries(bool requireCanonical)
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            foreach (var name in new[] { "101", "0101", "00202" })
+            {
+                var part = Directory.CreateDirectory(Path.Combine(root, name, "one")).FullName;
+                File.WriteAllText(Path.Combine(part, "entry.json"), name == "00202" ? "invalid" :
+                    BuildEntryJson(101, "Video", name, true));
+            }
+            File.WriteAllText(Path.Combine(root, "404"), "ordinary file");
+            var report = new FileSystemCacheIndexBuilder().BuildIndexWithReport(root, new CacheIndexBuildOptions
+            {
+                AvidFilter = new HashSet<long> { 101, 404, 505 }, RequireCanonicalAvidDirectory = requireCanonical,
+            });
+            var cache = Assert.Single(report.Index.VideoCaches);
+            Assert.Equal(101, cache.Avid);
+            Assert.Equal(requireCanonical ? 1 : 2, report.ScannedAvidDirectories);
+            Assert.Equal(requireCanonical ? new[] { "101" } : new[] { "0101", "101" },
+                cache.Segments.Select(segment => segment.PartName).Order(StringComparer.Ordinal));
+            if (requireCanonical)
+            {
+                var issue = Assert.Single(report.Issues);
+                Assert.Equal(CacheScanIssueKind.InvalidEntry, issue.Kind);
+                Assert.Equal(Path.Combine(root, "0101"), issue.Path);
+            }
+            else Assert.Empty(report.Issues);
+        }
+        finally { SafeDeleteDirectory(root); }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void BuildIndex_OnlyBindsUniqueIncludedCandidates(bool includeIncomplete)

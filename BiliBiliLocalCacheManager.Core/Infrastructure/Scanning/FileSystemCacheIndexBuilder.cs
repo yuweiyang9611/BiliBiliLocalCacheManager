@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.IO.Enumeration;
 using BiliBiliLocalCacheManager.Core.Application.Contracts;
 using BiliBiliLocalCacheManager.Core.Application.Models;
 using BiliBiliLocalCacheManager.Core.Domain.Models;
@@ -137,6 +138,8 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                 }
                 catch (FileNotFoundException)
                 {
+                    // Missing entry.json is normal only while the enumerated part directory still exists.
+                    TryValidatePhysicalDirectory(segmentDirectory, state);
                     continue;
                 }
                 using var partLease = metadata;
@@ -170,9 +173,8 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
             }
             catch (Exception ex) when (IsEntryFailure(ex))
             {
-                // A part can vanish or become a link after enumeration. The Windows lease performs
-                // the normal check; classify its failed directory check the same way as the portable path.
-                if (parentLease is not null && !TryValidatePhysicalDirectory(segmentDirectory, state)) continue;
+                // A directory can change between its initial check and the failing read on either platform.
+                if (!TryValidatePhysicalDirectory(segmentDirectory, state)) continue;
                 if (options.ThrowOnInvalidEntry) throw;
                 state.InvalidEntries++;
                 state.AddIssue(new CacheScanIssue(
@@ -197,11 +199,12 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
         try
         {
             var directories = new List<string>();
-            foreach (var directory in new DirectoryInfo(path).GetDirectories()
-                         .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+            var entries = avidFilter is null
+                ? new DirectoryInfo(path).EnumerateDirectories()
+                : EnumerateFilteredAvidDirectories(path, avidFilter, cancellationToken);
+            foreach (var directory in entries.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (avidFilter is not null && (!TryGetDirectoryAvid(directory.FullName, out var avid) || !avidFilter.Contains(avid))) continue;
                 // DirectoryInfo already carries the attributes observed during enumeration.
                 // Revalidate the path immediately before use in ScanAvidDirectory.
                 if (!directory.Attributes.HasFlag(FileAttributes.ReparsePoint)) directories.Add(directory.FullName);
@@ -219,6 +222,22 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
                 ex.Message));
             return Array.Empty<string>();
         }
+    }
+
+    private static IEnumerable<FileSystemInfo> EnumerateFilteredAvidDirectories(
+        string root, IReadOnlySet<long> avidFilter, CancellationToken cancellationToken)
+    {
+        // Inspect names first, including leading-zero aliases. Only selected directories need
+        // FileSystemInfo objects, their attributes and stable ordering in a partial refresh.
+        return new FileSystemEnumerable<FileSystemInfo>(root, static (ref FileSystemEntry entry) => entry.ToFileSystemInfo(),
+            new EnumerationOptions { IgnoreInaccessible = false, AttributesToSkip = 0 })
+        {
+            ShouldIncludePredicate = (ref FileSystemEntry entry) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return TryParseAvid(entry.FileName, out var avid) && avidFilter.Contains(avid) && entry.IsDirectory;
+            }
+        };
     }
 
     private static IReadOnlyCollection<string> EnumerateVideoFiles(
@@ -313,15 +332,10 @@ public sealed class FileSystemCacheIndexBuilder : ICacheIndexBuilder
     }
 
     private static bool TryGetDirectoryAvid(string path, out long avid)
-    {
-        var directoryName = Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
-        return long.TryParse(
-                   directoryName,
-                   NumberStyles.None,
-                   CultureInfo.InvariantCulture,
-                   out avid) &&
-               avid > 0;
-    }
+        => TryParseAvid(Path.GetFileName(Path.TrimEndingDirectorySeparator(path.AsSpan())), out avid);
+
+    private static bool TryParseAvid(ReadOnlySpan<char> name, out long avid)
+        => long.TryParse(name, NumberStyles.None, CultureInfo.InvariantCulture, out avid) && avid > 0;
 
     private static void ValidateRawEntry(CacheEntryRaw raw, long directoryAvid, long? maximumCacheBytes)
     {
