@@ -245,3 +245,4 @@ dl { margin: 0; } dl > div { display: flex; justify-content: space-between; padd
 .history-entry p { margin: 8px 0; }
 .history-entry code, .export-output code { font-size: 12px; white-space: normal; overflow-wrap: anywhere; user-select: text; }
 .history-entry ul { padding-inline-start: 22px; }
+.history-entry .history-warning { color: #f5c66f; user-select: text; }

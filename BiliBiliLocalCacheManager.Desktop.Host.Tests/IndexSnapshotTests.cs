@@ -8,6 +8,23 @@ namespace BiliBiliLocalCacheManager.Desktop.Host.Tests;
 public sealed class IndexSnapshotTests(ITestOutputHelper output)
 {
     [Fact]
+    public void ScanIssueLocationAcceptsAChildOfTheVolumeRoot()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var missingPart = Path.Combine(root, $"missing-cache-part-{Guid.NewGuid():N}", "entry.json");
+        Assert.Equal(root, DesktopHostApplication.ResolveScanIssueDirectory(root, missingPart));
+    }
+
+    [Fact]
+    public void ScanIssueLocationRejectsASiblingWithTheSamePrefix()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cache");
+        var issue = Path.Combine(root + "-other", "entry.json");
+        var error = Assert.Throws<Rpc.RpcException>(() => DesktopHostApplication.ResolveScanIssueDirectory(root, issue));
+        Assert.Equal("unsafe_path", error.Code);
+    }
+
+    [Fact]
     public void QueriesReuseResultsAndEvictTheLeastRecentlyUsedOfEight()
     {
         var snapshot = Snapshot(100);

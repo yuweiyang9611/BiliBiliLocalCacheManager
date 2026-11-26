@@ -36,10 +36,15 @@ export function TaskHistoryPanel() {
     {snapshot?.warning && <p role="status">{snapshot.warning}</p>}
     {!snapshot && !error && <p role="status">正在读取任务历史…</p>}
     {snapshot?.entries.length === 0 && <p>暂无任务记录。之后执行的播放、导出和回收站操作会显示在这里。</p>}
-    {snapshot?.entries.map(entry => <details key={entry.id} className="history-entry">
+    {snapshot?.entries.map(entry => {
+      // Only an entry explicitly flagged by the main process (an export staging directory
+      // left behind) stands out; the summary text is never guessed at.
+      const needsReview = entry.needsInspection === true;
+      return <details key={entry.id} className="history-entry">
       <summary><strong>{names[entry.operation]}</strong><span>{outcomes[entry.status]}</span>
+        {needsReview && <span className="badge warning">需要核对</span>}
         <time dateTime={entry.startedAt}>{new Date(entry.startedAt).toLocaleString('zh-CN')}</time></summary>
-      <p>{entry.summary}</p>
+      <p className={needsReview ? 'history-warning' : undefined}>{entry.summary}</p>
       {entry.status !== 'running' && entry.status !== 'unknown' && <p>成功 {entry.succeeded} 项 · 失败 {entry.failed} 项 · 未处理 {entry.unprocessed} 项</p>}
       {entry.rootPath && <p>缓存目录：<code>{entry.rootPath}</code></p>}
       {entry.operation === 'export' && entry.status === 'succeeded' && entry.succeeded > 0 && entry.outputPath &&
@@ -48,6 +53,7 @@ export function TaskHistoryPanel() {
         <strong>{formatFailureTarget(failure)}</strong><p>{failure.message}</p>
       </li>)}</ul>}
       {entry.failed > entry.failures.length && <p>仅保留前 {entry.failures.length} 项失败明细，失败总数为 {entry.failed} 项。</p>}
-    </details>)}
+    </details>;
+    })}
   </section>;
 }

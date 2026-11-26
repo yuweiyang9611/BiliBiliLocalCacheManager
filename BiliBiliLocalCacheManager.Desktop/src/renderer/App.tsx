@@ -5,6 +5,7 @@ import { Icon, type IconName } from './components/Icon';
 import { buildPlaybackRetryTargets } from './playback-retry-targets';
 import { cacheManager } from './cache-manager';
 import { errorCode } from '../shared/ipc-result';
+import { cancellationWarning, isCancellationCode } from '../shared/cancellation';
 import { OperationProgress } from './components/OperationProgress';
 import { FailureList } from './components/FailureList';
 import { ExportOutputActions } from './components/ExportOutputActions';
@@ -241,7 +242,7 @@ export function App() {
         setTrashSnapshot(null);
         notify('info', '回收站快照已失效，请刷新后重试。');
       } else {
-        notify(isCancellationError(error) ? 'info' : 'error', isCancellationError(error) ? '操作已取消。' : describeError(error));
+        notify(...errorNotice(error, '操作已取消。'));
       }
       return undefined;
     } finally {
@@ -261,7 +262,7 @@ export function App() {
       return await operation();
     } catch (error) {
       if (errorCode(error) === 'stale_trash') setTrashSnapshot(null);
-      notify(isCancellationError(error) ? 'info' : 'error', isCancellationError(error) ? '核对操作已取消。' : describeError(error));
+      notify(...errorNotice(error, '核对操作已取消。'));
       return undefined;
     } finally {
       inspectionInFlight.current = false;
@@ -363,18 +364,19 @@ export function App() {
             invalidateIndex();
             const cancelled = isCancellationError(error);
             setStartupScanStatus(cancelled ? 'cancelled' : 'failed');
-            notify(cancelled ? 'info' : 'error', cancelled ? '启动扫描已取消。' : `启动扫描失败：${describeError(error)}`);
+            if (cancelled) notify(...errorNotice(error, '启动扫描已取消。'));
+            else notify('error', `启动扫描失败：${describeError(error)}`);
           }
         }
         if (disposed) return;
         setBootstrapStatus('ready');
       } catch (error) {
         if (disposed) return;
-        const message = isCancellationError(error) ? '初始化已取消。' : describeError(error);
+        const [kind, message] = errorNotice(error, '初始化已取消。');
         setStartupScanStatus((current) => current === 'running' ? 'failed' : current);
         setBootstrapError(safeBootstrapError(message));
         setBootstrapStatus('failed');
-        notify(isCancellationError(error) ? 'info' : 'error', message);
+        notify(kind, message);
       } finally {
         if (disposed) return;
         operationInFlight.current = false;
@@ -419,7 +421,7 @@ export function App() {
           invalidateIndex();
           notify('info', '缓存索引已失效，请重新扫描。');
         } else {
-          notify(isCancellationError(error) ? 'info' : 'error', isCancellationError(error) ? '分段加载已取消。' : describeError(error));
+          notify(...errorNotice(error, '分段加载已取消。'));
         }
       } finally {
         if (detailsRevision.current === revision) setDetailsLoading(false);
@@ -628,8 +630,7 @@ export function App() {
         ? await cacheManager.play(context.rootPath, requestedTargets, context.playerPreference, context.includeIncomplete, context.indexToken)
         : await cacheManager.play(context.rootPath, requestedTargets, context.playerPreference, context.includeIncomplete); }
       catch (error) {
-        setBatchReport({ ...context, status: isUnknownOutcome(error) ? 'unknown' : isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
-          failures: [{ avid: '', pageIndex: null, title: '', message: describeError(error) }] });
+        setBatchReport({ ...context, ...thrownBatchOutcome(error) });
         throw error;
       }
     }, true);
@@ -661,8 +662,7 @@ export function App() {
         : confirmation ? await cacheManager.exportMedia(context.rootPath, requestedTargets, `${title}.mp4`, context.includeIncomplete, confirmation)
         : await cacheManager.exportMedia(context.rootPath, requestedTargets, `${title}.mp4`, context.includeIncomplete); }
       catch (error) {
-        setBatchReport({ ...context, status: isUnknownOutcome(error) ? 'unknown' : isCancellationError(error) ? 'cancelled' : 'failed', succeeded: 0,
-          failures: [{ avid: '', pageIndex: null, title: '', message: describeError(error) }] });
+        setBatchReport({ ...context, ...thrownBatchOutcome(error) });
         throw error;
       }
     }, true);
@@ -1171,8 +1171,26 @@ function diskFailureDetails(result: TrashMoveResult | TrashRestoreResult | Trash
   return projectOperationResult(result).failures;
 }
 
+// A request that threw has no per-item results. A cancellation lists a failure row only
+// when the Host reported an explicit export rollback warning; an ordinary cancellation,
+// plain or Electron-prefixed, is a confirmed outcome with nothing to inspect.
+function thrownBatchOutcome(error: unknown): Pick<BatchReport, 'status' | 'succeeded' | 'failures'> {
+  const failure = (message: string): MediaFailure[] => [{ avid: '', pageIndex: null, title: '', message }];
+  if (isUnknownOutcome(error)) return { status: 'unknown', succeeded: 0, failures: failure(describeError(error)) };
+  if (!isCancellationError(error)) return { status: 'failed', succeeded: 0, failures: failure(describeError(error)) };
+  const warning = cancellationWarning(error);
+  return { status: 'cancelled', succeeded: 0, failures: warning ? failure(warning) : [] };
+}
 function isCancellationError(error: unknown): boolean {
-  return ['cancelled', 'CANCELLED'].includes(errorCode(error) ?? '');
+  return isCancellationCode(errorCode(error));
+}
+// Only the Host's explicit export rollback warning (a staging directory left for
+// inspection) elevates a cancellation to an error with its own text; any other
+// cancellation, prefixed or not, stays an informational notice.
+function errorNotice(error: unknown, cancelledMessage: string): readonly [Notice['kind'], string] {
+  if (!isCancellationError(error)) return ['error', describeError(error)];
+  const warning = cancellationWarning(error);
+  return warning ? ['error', warning] : ['info', cancelledMessage];
 }
 function isStaleIndexError(error: unknown): boolean {
   return errorCode(error) === 'stale_index';

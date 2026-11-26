@@ -6,12 +6,14 @@ import type { JsonObject, TaskHistoryEntry, TaskHistorySnapshot, TaskOperation, 
 import { validateExportBatchResult, validatePlaybackBatchResult, validateTrashMoveResult,
   validateTrashRestoreResult, validateTrashPurgeResult, validateTrashSnapshotPurgeResult } from './host-contract-validation';
 import { projectOperationResult } from '../shared/operation-result';
+import { cancellationWarning, isCancellationCode } from '../shared/cancellation';
 
 const operations = new Set<TaskOperation>(['play', 'export', 'trash.move', 'trash.restore', 'trash.purge', 'trash.purgeSnapshot']);
 const statuses = new Set<TaskOutcome>(['running', 'succeeded', 'partial', 'failed', 'cancelled', 'confirmation', 'unknown']);
 const capacity = 100;
 const retention = 30 * 24 * 60 * 60 * 1000;
 const maximumFileBytes = 64 * 1024 * 1024;
+const summaryLimit = 1024;
 const bounded = (value: unknown, maximum = 32768): string | undefined => typeof value === 'string'
   ? value.length > maximum ? value.slice(0, maximum - 1) + '…' : value : undefined;
 const count = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
@@ -97,15 +99,20 @@ export class TaskHistoryStore extends EventEmitter {
       const entry = this.#entries.find(value => value.id === id);
       if (!entry) return;
       entry.recordedAt = new Date(this.now()).toISOString();
+      delete entry.needsInspection;
       try {
         if (error !== undefined) throw error;
         Object.assign(entry, summarize(operation, result));
       } catch (failure) {
         const code = failure && typeof failure === 'object' && 'code' in failure ? failure.code : undefined;
-        const cancelled = code === 'cancelled' || code === 'CANCELLED';
+        const cancelled = isCancellationCode(code);
+        // Only the Host's export rollback warning is persisted verbatim: it names a staging
+        // directory left for inspection. Every other error message stays generic.
+        const warning = operation === 'export' ? cancellationWarning(failure) : undefined;
         entry.status = cancelled ? 'cancelled' : 'unknown';
-        entry.summary = cancelled ? '任务已取消。'
+        entry.summary = warning ? bounded(warning, summaryLimit)! : cancelled ? '任务已取消。'
           : '未取得可确认的完成结果，请核对输出文件或缓存状态；历史记录不会自动重试。';
+        if (warning) entry.needsInspection = true;
       }
     });
   }
@@ -147,9 +154,11 @@ function validateEntry(value: unknown): TaskHistoryEntry {
     || typeof item.startedAt !== 'string' || item.startedAt.length > 40 || !Number.isFinite(Date.parse(item.startedAt))
     || (item.recordedAt !== undefined && (typeof item.recordedAt !== 'string' || item.recordedAt.length > 40 || !Number.isFinite(Date.parse(item.recordedAt))))
     || !count(item.succeeded) || !count(item.failed) || !count(item.unprocessed)
-    || !Array.isArray(item.failures) || item.failures.length > 20 || typeof item.summary !== 'string') throw new Error('Invalid entry');
+    || !Array.isArray(item.failures) || item.failures.length > 20 || typeof item.summary !== 'string'
+    || (item.needsInspection !== undefined && typeof item.needsInspection !== 'boolean')) throw new Error('Invalid entry');
   return { id: item.id, operation: item.operation, status: item.status, startedAt: item.startedAt, recordedAt: item.recordedAt,
-    rootPath: bounded(item.rootPath), outputPath: bounded(item.outputPath), summary: bounded(item.summary, 1024)!,
+    rootPath: bounded(item.rootPath), outputPath: bounded(item.outputPath), summary: bounded(item.summary, summaryLimit)!,
+    ...(item.needsInspection === true ? { needsInspection: true as const } : {}),
     succeeded: item.succeeded, failed: item.failed, unprocessed: item.unprocessed,
     failures: item.failures.map(failure => {
       if (!failure || typeof failure.avid !== 'string' || (failure.pageIndex !== null && !count(failure.pageIndex))

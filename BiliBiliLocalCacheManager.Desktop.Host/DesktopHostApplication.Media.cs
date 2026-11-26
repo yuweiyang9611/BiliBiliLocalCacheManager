@@ -13,7 +13,8 @@ namespace BiliBiliLocalCacheManager.Desktop.Host;
 internal sealed partial class DesktopHostApplication
 {
     private ICacheExportMaterializationService? _exportService;
-    internal Action<string>? BeforeExportStagingGuardForTesting { get; set; }
+    internal TimeProvider? ExportProtectionTimeProviderForTesting { get; set; }
+    internal Action<string>? AfterExportStagingCreatedForTesting { get; set; }
 
     private async Task<object> PlayAsync(
         string requestId, JsonElement parameters, CancellationToken cancellationToken)
@@ -109,24 +110,53 @@ internal sealed partial class DesktopHostApplication
         ExportDirectoryGuard? stagingGuard = null;
         var exportService = _exportService ??= new CacheExportService(_artifactStore);
         var store = new PlaybackArtifactStore(_artifactStore.RootDirectory);
-        await using var protection = new PlaybackPreparationProtection(store, cancellationToken);
+        await using var protection = new PlaybackPreparationProtection(store, cancellationToken, ExportProtectionTimeProviderForTesting);
         var preparedCount = 0;
         var prepared = new List<(CachePlaybackPlan Plan, PlaybackMaterializationResult Result, string Output)>();
         var outputLeases = new List<FileStream>();
-        ExportBatchResultDto FailedBatch(Exception exception, CachePlaybackPlan? plan = null)
+        void ReleaseOutputs()
         {
-            failures.Add(new(plan?.Avid.ToString() ?? "", plan?.PageIndex,
-                BoundWireString(plan?.Title), BoundWireString(exception.Message)));
+            foreach (var lease in outputLeases) lease.Dispose();
+            outputLeases.Clear();
+        }
+
+        string? RollbackStaging()
+        {
+            ReleaseOutputs();
+            if (stagingDirectory is null) return null;
+            var location = ExportDirectoryGuard.FormatStagingLocation(stagingDirectory);
+            if (stagingGuard is null || !destinationGuard.IsCurrent || !stagingGuard.IsCurrent)
+                return $"无法确认暂存目录的身份，已跳过清理。请核对：{location}";
+            try { Directory.Delete(stagingDirectory, recursive: true); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return $"导出暂存目录未能完全清理，请核对：{location}";
+            }
+            return null;
+        }
+
+        ExportBatchResultDto RollbackBatch(Exception? exception = null, CachePlaybackPlan? plan = null)
+        {
+            if (exception is not null)
+                failures.Add(new(plan?.Avid.ToString() ?? "", plan?.PageIndex,
+                    BoundWireString(plan?.Title), BoundWireString(exception.Message)));
+            if (RollbackStaging() is { } warning)
+            {
+                if (failures.Count == 0) failures.Add(new("", null, "", warning));
+                else failures[0] = failures[0] with { Message = BoundWireString(warning + Environment.NewLine + failures[0].Message) };
+                // A failed rollback needs attention before starting a fresh export and consent flow.
+                return new(null, 0, failures, false, []);
+            }
             return new(null, 0, failures, false, requirements);
         }
 
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            destinationGuard.Validate();
-            stagingDirectory = CreateBatchExportStagingDirectory(destination);
-            BeforeExportStagingGuardForTesting?.Invoke(stagingDirectory);
-            stagingGuard = new ExportDirectoryGuard(stagingDirectory, allowRename: true);
+            var stagingName = $".{Path.GetFileName(destination)}.{Guid.NewGuid():N}.staging";
+            stagingGuard = destinationGuard.CreateStagingDirectory(stagingName);
+            stagingDirectory = Path.Combine(requestedOutputPath, stagingName);
+            AfterExportStagingCreatedForTesting?.Invoke(stagingDirectory);
             for (var ordinal = 0; ordinal < requests.Count; ordinal++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -176,7 +206,7 @@ internal sealed partial class DesktopHostApplication
                         BoundWireString(cache.Title), BoundWireString(exception.Message)));
                 }
             }
-            if (failures.Count > 0 || requirements.Count > 0) return new ExportBatchResultDto(null, 0, failures, false, requirements);
+            if (failures.Count > 0 || requirements.Count > 0) return RollbackBatch();
             for (var ordinal = 0; ordinal < prepared.Count; ordinal++)
             {
                 var item = prepared[ordinal];
@@ -189,9 +219,14 @@ internal sealed partial class DesktopHostApplication
                             Total: requests.Count * 2, Details: new { bytesProcessed = value.ProcessedBytes }, Phase: value.Phase)));
                     await exportService.ValidatePreparedAsync(item.Plan, item.Result, progress, protection.Token, item.Output);
                 }
+                catch (Exception) when (protection.Failure is not null)
+                {
+                    return RollbackBatch(new IOException("Export preparation protection failed: " + protection.Failure.Message,
+                        protection.Failure), item.Plan);
+                }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
-                    return FailedBatch(exception, item.Plan);
+                    return RollbackBatch(exception, item.Plan);
                 }
             }
             await protection.StopAsync();
@@ -199,8 +234,7 @@ internal sealed partial class DesktopHostApplication
             cancellationToken.ThrowIfCancellationRequested();
             // Windows can refuse a parent-directory rename while a child file is open.
             // Keep outputs read-only through verification, then release just before publication.
-            foreach (var lease in outputLeases) lease.Dispose();
-            outputLeases.Clear();
+            ReleaseOutputs();
             while (true)
             {
                 destinationGuard.Validate();
@@ -210,7 +244,7 @@ internal sealed partial class DesktopHostApplication
                     try { PlaybackBatchLauncher.ValidateLocalFile(item.Output); }
                     catch (Exception exception) when (exception is not OperationCanceledException)
                     {
-                        return FailedBatch(exception, item.Plan);
+                        return RollbackBatch(exception, item.Plan);
                     }
                 }
                 try
@@ -227,22 +261,18 @@ internal sealed partial class DesktopHostApplication
             }
             return new ExportBatchResultDto(destination, preparedCount, failures, true, requirements);
         }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException)
+        {
+            if (RollbackStaging() is { } warning) throw new RpcException("cancelled", $"导出已取消。{warning}");
+            throw;
+        }
         catch (Exception exception)
         {
-            if (stagingDirectory is not null && stagingGuard is null)
-                return FailedBatch(new IOException($"无法确认暂存目录的身份，已跳过清理。{exception.Message} 请核对：{stagingDirectory}", exception));
-            return FailedBatch(exception);
+            return RollbackBatch(exception);
         }
         finally
         {
-            try
-            {
-                foreach (var lease in outputLeases) lease.Dispose();
-                if (stagingDirectory is not null && stagingGuard is not null && destinationGuard.IsCurrent && stagingGuard.IsCurrent)
-                    TryDeleteDirectory(stagingDirectory);
-            }
-            finally { stagingGuard?.Dispose(); }
+            stagingGuard?.Dispose();
         }
     }
 

@@ -171,7 +171,105 @@ it.each(['cancelled', 'CANCELLED'])('preserves confirmed cancellation (%s) inste
   await history.finish('cancelled', 'export', undefined, Object.assign(new Error('Cancelled'), { code }));
   const entry = (await new TaskHistoryStore(file).snapshot()).entries[0];
   expect(entry.status).toBe('cancelled');
-  expect(entry.summary).toContain('已取消');
+  expect(entry.summary).toBe('任务已取消。');
+  expect(entry.failures).toEqual([]);
+});
+
+it.each(['', 'The request was cancelled.', 'The operation was cancelled.', 'Request cancelled.', '操作已取消。'])(
+  'keeps the generic summary for a plain cancellation message %j', async message => {
+    const history = new TaskHistoryStore(file);
+    await history.start('plain', 'export', {});
+    await history.finish('plain', 'export', undefined, Object.assign(new Error(message), { code: 'cancelled' }));
+    expect((await new TaskHistoryStore(file).snapshot()).entries[0]).toMatchObject({ status: 'cancelled', summary: '任务已取消。', failures: [] });
+  });
+
+it('persists an actionable rollback warning carried by a cancellation and reloads it', async () => {
+  const warning = '导出已取消。无法确认暂存目录的身份，已跳过清理。请核对：D:\\exports\\.blcm-staging-1';
+  const history = new TaskHistoryStore(file);
+  await history.start('rollback', 'export', { rootPath: 'D:\\cache' });
+  await history.finish('rollback', 'export', undefined, Object.assign(new Error(warning), { code: 'cancelled' }));
+  expect((await history.snapshot()).entries[0]).toMatchObject({ status: 'cancelled', summary: warning, needsInspection: true });
+  const written = await readFile(file, 'utf8');
+  const reloaded = new TaskHistoryStore(file);
+  const snapshot = await reloaded.snapshot();
+  expect(snapshot.warning).toBeUndefined();
+  expect(snapshot.entries[0]).toMatchObject({ id: 'rollback', status: 'cancelled', summary: warning, needsInspection: true,
+    failures: [], rootPath: 'D:\\cache' });
+  expect(await readFile(file, 'utf8')).toBe(written);
+});
+
+it.each<{ operation: TaskOperation; message: string }>([
+  { operation: 'export', message: '诊断信息：D:\\private\\host.log' },
+  { operation: 'export', message: "Error invoking remote method 'cache:export': The request was cancelled." },
+  { operation: 'play', message: '导出已取消。导出暂存目录未能完全清理，请核对：D:\\private' },
+  { operation: 'trash.move', message: '导出已取消。无法确认暂存目录的身份，已跳过清理。请核对：D:\\private' },
+])('keeps a coded $operation cancellation generic unless it is the Host export rollback warning ($message)', async ({ operation, message }) => {
+  const history = new TaskHistoryStore(file);
+  await history.start('other', operation, {});
+  await history.finish('other', operation, undefined, Object.assign(new Error(message), { code: 'cancelled' }));
+  const entry = (await new TaskHistoryStore(file).snapshot()).entries[0];
+  expect(entry).toMatchObject({ status: 'cancelled', summary: '任务已取消。' });
+  expect(entry.needsInspection).toBeUndefined();
+  expect(await readFile(file, 'utf8')).not.toContain('private');
+});
+
+it.each<{ operation: TaskOperation; result: unknown; summary: string }>([
+  { operation: 'trash.move', result: { moved: [], failed: [], cancelled: true, unprocessed: ['123:P2'] }, summary: '已完成 0 项。' },
+  { operation: 'trash.restore', result: { restored: [], failed: [], cancelled: true, unprocessed: ['one'] }, summary: '已完成 0 项。' },
+  { operation: 'trash.purge', result: { purged: [], failed: [], cancelled: true, unprocessed: ['one'] }, summary: '已完成 0 项。' },
+])('does not flag a structured $operation cancellation for inspection', async ({ operation, result, summary }) => {
+  const history = new TaskHistoryStore(file);
+  await history.start('structured', operation, {});
+  await history.finish('structured', operation, result);
+  const entry = (await new TaskHistoryStore(file).snapshot()).entries[0];
+  expect(entry).toMatchObject({ status: 'cancelled', summary });
+  expect(entry.needsInspection).toBeUndefined();
+  expect(await readFile(file, 'utf8')).not.toContain('needsInspection');
+});
+
+it('reloads entries written before the inspection flag existed without rewriting the file', async () => {
+  const original = JSON.stringify({ schemaVersion: 1, entries: [{ id: 'legacy', operation: 'trash.move', status: 'cancelled',
+    startedAt: new Date().toISOString(), summary: '已完成 0 项。', succeeded: 0, failed: 0, unprocessed: 1, failures: [] }] });
+  await writeFile(file, original);
+  const snapshot = await new TaskHistoryStore(file).snapshot();
+  expect(snapshot.warning).toBeUndefined();
+  expect(snapshot.entries[0]).not.toHaveProperty('needsInspection');
+  expect(await readFile(file, 'utf8')).toBe(original);
+});
+
+it.each(['yes', 1, null])('rejects a history file whose inspection flag is %j without overwriting it', async needsInspection => {
+  const original = JSON.stringify({ schemaVersion: 1, entries: [{ id: 'bad', operation: 'export', status: 'cancelled',
+    startedAt: new Date().toISOString(), summary: '任务已取消。', needsInspection, succeeded: 0, failed: 0, unprocessed: 0, failures: [] }] });
+  await writeFile(file, original);
+  const history = new TaskHistoryStore(file);
+  expect((await history.snapshot()).warning).toContain('无法读取任务历史');
+  await history.start('next', 'play', {});
+  expect(await readFile(file, 'utf8')).toBe(original);
+});
+
+it('bounds a long rollback warning to the persisted summary limit so the file reloads unchanged', async () => {
+  const warning = '导出已取消。导出暂存目录未能完全清理，请核对：' + 'D:\\exports\\'.padEnd(4000, 'x');
+  const history = new TaskHistoryStore(file);
+  await history.start('long', 'export', {});
+  await history.finish('long', 'export', undefined, Object.assign(new Error(warning), { code: 'CANCELLED' }));
+  const summary = (await history.snapshot()).entries[0].summary;
+  expect(summary).toHaveLength(1024);
+  expect(summary.endsWith('…')).toBe(true);
+  expect(warning.startsWith(summary.slice(0, -1))).toBe(true);
+  const written = await readFile(file, 'utf8');
+  const reloaded = await new TaskHistoryStore(file).snapshot();
+  expect(reloaded.warning).toBeUndefined();
+  expect(reloaded.entries[0]).toMatchObject({ status: 'cancelled', summary });
+  await new TaskHistoryStore(file).flush();
+  expect(await readFile(file, 'utf8')).toBe(written);
+});
+
+it('does not persist the message of a non-cancellation failure', async () => {
+  const history = new TaskHistoryStore(file);
+  await history.start('broken', 'export', {});
+  await history.finish('broken', 'export', undefined, Object.assign(new Error('请核对：D:\\private'), { code: 'HOST_EXITED' }));
+  expect((await history.snapshot()).entries[0].status).toBe('unknown');
+  expect(await readFile(file, 'utf8')).not.toContain('private');
 });
 
 it.each(['{broken', JSON.stringify({ schemaVersion: 2, entries: [] })])('preserves unreadable or future files verbatim', async original => {

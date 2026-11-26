@@ -298,6 +298,8 @@ export interface TaskHistoryEntry {
   rootPath?: string;
   outputPath?: string;
   summary: string;
+  /** Set only when the summary is an actionable warning the user must inspect (an export staging directory left behind). */
+  needsInspection?: true;
   succeeded: number;
   failed: number;
   unprocessed: number;

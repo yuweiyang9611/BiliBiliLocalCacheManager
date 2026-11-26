@@ -15,8 +15,12 @@ internal sealed class DiagnosticExporter(
     private static readonly Regex UrlPattern = new(
         @"https?://[^\s\""'<>]+",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    // Spaces separate an authorization scheme from its value; semicolons separate cookie pairs.
+    private static readonly Regex CredentialHeaderPattern = new(
+        @"\b(authorization|cookie)\b\s*[:=]\s*[^\r\n]*",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex CredentialPattern = new(
-        @"\b(token|authorization|cookie|secret|api[-_]?key)\b\s*[:=]\s*[^\s,;]+",
+        """\b(token|secret|api[-_]?key)\b\s*[:=]\s*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"?|'(?:\\[^\r\n]|[^'\\\r\n])*'?|[^\s,;]+)""",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -40,7 +44,7 @@ internal sealed class DiagnosticExporter(
             throw new DirectoryNotFoundException($"Diagnostic destination directory not found: {parent}");
         }
 
-        var temporaryPath = $"{outputPath}.{Guid.NewGuid():N}.writing";
+        var temporaryPath = Path.Combine(parent, $"{Guid.NewGuid():N}.writing");
         var events = eventRecorder.Snapshot()
             .Select(item => item with
             {
@@ -189,6 +193,7 @@ internal sealed class DiagnosticExporter(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             "[USER_HOME]");
         redacted = UrlPattern.Replace(redacted, "[URL]");
+        redacted = CredentialHeaderPattern.Replace(redacted, "$1=[REDACTED]");
         return CredentialPattern.Replace(redacted, "$1=[REDACTED]");
     }
 
