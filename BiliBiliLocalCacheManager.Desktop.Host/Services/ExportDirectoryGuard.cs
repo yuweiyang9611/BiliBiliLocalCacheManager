@@ -4,20 +4,47 @@ using Microsoft.Win32.SafeHandles;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host.Services;
 
-internal sealed class ExportDirectoryGuard : IDisposable
+internal sealed partial class ExportDirectoryGuard : IDisposable
 {
     private readonly string _path;
     private readonly string _identity;
-    private readonly SafeFileHandle? _lease;
+    private readonly SafeFileHandle _lease;
 
     public ExportDirectoryGuard(string path, bool allowRename)
     {
         _path = Path.GetFullPath(path);
         ValidatePath();
-        if (OperatingSystem.IsWindows()) _lease = OpenDirectory(_path, allowRename);
+        _lease = OperatingSystem.IsWindows() ? OpenDirectory(_path, allowRename)
+            : OperatingSystem.IsLinux() ? OpenLinuxDirectory(_path)
+            : throw new PlatformNotSupportedException("Export directory identity requires Windows or Linux.");
         try { _identity = ReadIdentity(_path, _lease); }
-        catch { _lease?.Dispose(); throw; }
+        catch { _lease.Dispose(); throw; }
     }
+
+    private ExportDirectoryGuard(string path, SafeFileHandle createdDirectory)
+    {
+        _path = path;
+        _lease = createdDirectory;
+        try { _identity = ReadIdentity(path, createdDirectory); }
+        catch { createdDirectory.Dispose(); throw; }
+    }
+
+    internal ExportDirectoryGuard CreateStagingDirectory(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name is "." or ".." || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            throw new ArgumentException("A staging directory name must be a single filename.", nameof(name));
+        Validate();
+        var path = Path.Combine(_path, name);
+        var created = OperatingSystem.IsWindows()
+            ? CreateWindowsStagingDirectory(_lease, name)
+            : CreateLinuxStagingDirectory(_lease, _path, name);
+        try { return new ExportDirectoryGuard(path, created); }
+        catch (IOException ex) { throw new IOException($"无法确认新建暂存目录的身份，请核对：{FormatStagingLocation(path)}", ex); }
+    }
+
+    internal static string FormatStagingLocation(string path) =>
+        path.Length <= DesktopHostApplication.MaximumWireTextLength / 2
+            ? path : $"所选导出目录中的 {Path.GetFileName(path)}";
 
     public bool IsCurrent
     {
@@ -62,7 +89,7 @@ internal sealed class ExportDirectoryGuard : IDisposable
 
     private static string ReadIdentity(string path, SafeFileHandle? handle)
     {
-        if (handle is not null)
+        if (OperatingSystem.IsWindows() && handle is not null)
         {
             if (!GetIdentity(handle, 18, out var identity, 24))
                 throw new IOException($"Cannot identify export directory (error {Marshal.GetLastPInvokeError()}).");
@@ -73,7 +100,10 @@ internal sealed class ExportDirectoryGuard : IDisposable
         try
         {
             // Match the fixed Linux statx UAPI layout used by cache part identity checks.
-            if (Statx(-100, path, 0x100, 0x901, buffer) != 0)
+            var result = handle is null
+                ? Statx(-100, path, 0x100, 0x901, buffer)
+                : StatxByHandle(handle, "", 0x1000, 0x901, buffer); // AT_EMPTY_PATH
+            if (result != 0)
                 throw new IOException($"Cannot identify export directory (errno {Marshal.GetLastPInvokeError()}).");
             var mask = Marshal.ReadInt32(buffer);
             if ((mask & 0x101) != 0x101 || (Marshal.ReadInt16(buffer, 28) & 0xf000) != 0x4000)
@@ -85,7 +115,7 @@ internal sealed class ExportDirectoryGuard : IDisposable
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
-    public void Dispose() => _lease?.Dispose();
+    public void Dispose() => _lease.Dispose();
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DirectoryId { public ulong Volume; public ulong Low; public ulong High; }
@@ -101,4 +131,7 @@ internal sealed class ExportDirectoryGuard : IDisposable
     private static extern bool GetAttributes(SafeFileHandle handle, int infoClass, out AttributeInfo information, uint size);
     [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
     private static extern int Statx(int directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, IntPtr buffer);
+
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    private static extern int StatxByHandle(SafeFileHandle directory, string path, int flags, uint mask, IntPtr buffer);
 }

@@ -21,7 +21,7 @@ internal sealed partial class DesktopHostApplication
     private const int DefaultPageSize = 100;
     private const int MaximumPageSize = 200;
     private const int MaximumIndexTokenLength = 128;
-    private const int MaximumWireTextLength = 4096;
+    internal const int MaximumWireTextLength = 4096;
     private const long MaximumWireBytes = 9_007_199_254_740_991;
     private const int MaximumSessionProtectedArtifactCount = 64;
     private static readonly TimeSpan MaximumSessionProtectionAge = TimeSpan.FromHours(6);
@@ -153,7 +153,7 @@ internal sealed partial class DesktopHostApplication
             _eventRecorder.Record("Rpc", "Information", $"Completed {method} ({requestId}).");
             return result;
         }
-        catch (OperationCanceledException)
+        catch (Exception exception) when (exception is OperationCanceledException or RpcException { Code: "cancelled" })
         {
             _eventRecorder.Record("Rpc", "Information", $"Cancelled {method} ({requestId}).");
             throw;
@@ -379,27 +379,6 @@ internal sealed partial class DesktopHostApplication
         }
 
         return candidate;
-    }
-
-    private static string CreateBatchExportStagingDirectory(string destination)
-    {
-        var parent = Path.GetDirectoryName(destination) ??
-                     throw new IOException("The export output path has no parent directory.");
-        var destinationName = Path.GetFileName(destination);
-        while (true)
-        {
-            var stagingDirectory = Path.Combine(
-                parent,
-                $".{destinationName}.{Guid.NewGuid():N}.staging");
-            try
-            {
-                Directory.CreateDirectory(stagingDirectory);
-                return stagingDirectory;
-            }
-            catch (IOException) when (Directory.Exists(stagingDirectory) || File.Exists(stagingDirectory))
-            {
-            }
-        }
     }
 
     private static async Task CopyAtomicallyAsync(
@@ -669,20 +648,6 @@ internal sealed partial class DesktopHostApplication
             if (File.Exists(path))
             {
                 File.Delete(path);
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private static void TryDeleteDirectory(string path)
-    {
-        try
-        {
-            if (Directory.Exists(path))
-            {
-                Directory.Delete(path, recursive: true);
             }
         }
         catch

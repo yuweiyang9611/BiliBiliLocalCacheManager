@@ -91,3 +91,65 @@ it('shows which same-titled video and part failed final export verification afte
     await rm(folder, { recursive: true, force: true });
   }
 });
+
+it('highlights a cancelled export that left a staging directory to inspect after reopening history', async () => {
+  const folder = await mkdtemp(path.join(tmpdir(), 'blcm-cancel-history-'));
+  try {
+    const file = path.join(folder, 'history.json');
+    const history = new TaskHistoryStore(file);
+    const warning = '导出已取消。导出暂存目录未能完全清理，请核对：D:\\exports\\.blcm-staging-1';
+    await history.start('rollback', 'export', {});
+    await history.finish('rollback', 'export', undefined, Object.assign(new Error(warning), { code: 'cancelled' }));
+    await history.start('plain', 'play', {});
+    await history.finish('plain', 'play', undefined, Object.assign(new Error('The operation was cancelled.'), { code: 'cancelled' }));
+
+    const reopened = new TaskHistoryStore(file);
+    Object.defineProperty(window, 'cacheManager', { configurable: true, value: {
+      getTaskHistory: () => reopened.snapshot(), onTaskHistoryChanged: () => () => undefined,
+    } });
+    render(<TaskHistoryPanel />);
+    fireEvent.click(await screen.findByText('导出'));
+    fireEvent.click(screen.getByText('播放'));
+    expect(screen.getAllByText('已取消')).toHaveLength(2);
+    const detail = screen.getByText(warning);
+    expect(detail).toBeVisible();
+    expect(detail).toHaveClass('history-warning');
+    expect(detail).toHaveTextContent('D:\\exports\\.blcm-staging-1');
+    expect(screen.getAllByText('需要核对')).toHaveLength(1);
+    expect(detail.closest('details')).toHaveTextContent('需要核对');
+    expect(screen.getByText('任务已取消。')).not.toHaveClass('history-warning');
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});
+
+it('does not flag ordinary structured trash cancellations for inspection after reopening history', async () => {
+  const folder = await mkdtemp(path.join(tmpdir(), 'blcm-structured-cancel-'));
+  try {
+    const file = path.join(folder, 'history.json');
+    const history = new TaskHistoryStore(file);
+    await history.start('move', 'trash.move', {});
+    await history.finish('move', 'trash.move', { moved: [], failed: [], cancelled: true, unprocessed: ['123:P2'] });
+    await history.start('purge', 'trash.purge', {});
+    await history.finish('purge', 'trash.purge', { purged: [], failed: [], cancelled: true, unprocessed: ['one'] });
+
+    const reopened = new TaskHistoryStore(file);
+    Object.defineProperty(window, 'cacheManager', { configurable: true, value: {
+      getTaskHistory: () => reopened.snapshot(), onTaskHistoryChanged: () => () => undefined,
+    } });
+    const view = render(<TaskHistoryPanel />);
+    fireEvent.click(await screen.findByText('移入回收站'));
+    fireEvent.click(screen.getByText('永久删除'));
+    expect(screen.getAllByText('已取消')).toHaveLength(2);
+    const summaries = screen.getAllByText('已完成 0 项。');
+    expect(summaries).toHaveLength(2);
+    for (const summary of summaries) {
+      expect(summary).toBeVisible();
+      expect(summary).not.toHaveClass('history-warning');
+    }
+    expect(screen.queryByText('需要核对')).not.toBeInTheDocument();
+    expect(view.container.querySelector('.history-warning')).toBeNull();
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});

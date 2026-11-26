@@ -785,3 +785,47 @@ function createFakeChild(writes: Array<{ id: string; method: string; params: Rec
   });
   return child;
 }
+
+describe('Host cancellation warnings across the IPC envelope', () => {
+  const rollback = '导出已取消。无法确认暂存目录的身份，已跳过清理。请核对：D:\\exports\\.blcm-staging-1';
+
+  it.each([
+    { message: rollback, warning: rollback },
+    { message: 'The request was cancelled.', warning: undefined },
+    { message: "Error invoking remote method 'cache:export': The request was cancelled.", warning: undefined },
+  ])('carries a Host-shaped cancelled error $message to the renderer and the history unchanged', async ({ message, warning }) => {
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const { TaskHistoryStore } = await import('./task-history');
+    const { ipcFailure, unwrapIpcResult } = await import('../shared/ipc-result');
+    const { cancellationWarning } = await import('../shared/cancellation');
+    const folder = await mkdtemp(path.join(tmpdir(), 'blcm-bridge-cancel-'));
+    const fake = createFakeHostProcess();
+    hostMocks.spawn.mockReturnValue(fake.child);
+    const history = new TaskHistoryStore(path.join(folder, 'tasks.json'));
+    const bridge = new DesktopHostBridge({ taskHistory: history });
+    try {
+      const call = bridge.call('export', { rootPath: 'D:\\cache' });
+      const settled = call.promise.then(() => undefined, (error: unknown) => error);
+      await vi.waitFor(() => expect(fake.writes).toHaveLength(1));
+      fake.child.stdout.emit('data', JSON.stringify({ id: call.id, error: { code: 'cancelled', message } }) + '\n');
+      const hostError = await settled;
+      // Same envelope the main-process IPC handler returns and the preload unwraps.
+      const envelope = JSON.parse(JSON.stringify(ipcFailure(hostError)));
+      expect(envelope).toEqual({ ipcFailure: { code: 'cancelled', message } });
+      let rendererError: unknown;
+      try { unwrapIpcResult(envelope); } catch (error) { rendererError = error; }
+      expect(rendererError).toMatchObject({ name: 'IpcError', code: 'cancelled', message });
+      expect(cancellationWarning(rendererError)).toBe(warning);
+      const entry = (await history.snapshot()).entries[0];
+      expect(entry).toMatchObject({ id: call.id, status: 'cancelled', summary: warning ?? '任务已取消。' });
+      expect(entry.needsInspection).toBe(warning ? true : undefined);
+      if (warning) expect(entry.summary).toContain('D:\\exports\\.blcm-staging-1');
+    } finally {
+      await bridge.dispose();
+      await history.flush();
+      await rm(folder, { recursive: true, force: true });
+    }
+  });
+});

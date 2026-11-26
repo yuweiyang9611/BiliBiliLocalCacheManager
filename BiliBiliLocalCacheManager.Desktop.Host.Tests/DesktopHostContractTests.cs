@@ -1098,6 +1098,46 @@ public sealed partial class DesktopHostContractTests
     }
 
     [Fact]
+    public async Task DiagnosticExport_ReplacesAnExistingReportWithALongValidFileName()
+    {
+        using var workspace = new HostTestWorkspace();
+        var destination = Path.Combine(workspace.Root, new string('a', 216) + ".zip");
+        File.WriteAllText(destination, "previous report");
+
+        var result = await DispatchAsync(workspace.CreateApplication(), "diagnostics.export",
+            JsonSerializer.Serialize(new { outputPath = destination }));
+
+        Assert.Equal(destination, result.GetProperty("outputPath").GetString());
+        using var archive = ZipFile.OpenRead(destination);
+        Assert.NotNull(archive.GetEntry("diagnostics.json"));
+        Assert.NotNull(archive.GetEntry("recent-events.json"));
+        Assert.Empty(Directory.GetFiles(workspace.Root, "*.writing"));
+    }
+
+    [Theory]
+    [InlineData("Authorization=Bearer private-tail")]
+    [InlineData("Cookie=session=first; refresh=private-tail")]
+    [InlineData("secret='two words private-tail'")]
+    public async Task DiagnosticExport_RedactsWholeCredentialValuesInFailedRequests(string folder)
+    {
+        using var workspace = new HostTestWorkspace();
+        var application = workspace.CreateApplication();
+        var missing = Path.Combine(workspace.Root, folder, "unavailable.zip");
+        await Assert.ThrowsAsync<DirectoryNotFoundException>(() => DispatchAsync(application, "diagnostics.export",
+            JsonSerializer.Serialize(new { outputPath = missing })));
+
+        var destination = Path.Combine(workspace.Root, "diagnostics.zip");
+        await DispatchAsync(application, "diagnostics.export", JsonSerializer.Serialize(new { outputPath = destination }));
+        using var archive = ZipFile.OpenRead(destination);
+        using var stream = archive.GetEntry("recent-events.json")!.Open();
+        using var events = await JsonDocument.ParseAsync(stream);
+        var message = Assert.Single(events.RootElement.EnumerateArray(), item =>
+            item.GetProperty("level").GetString() == "Error").GetProperty("message").GetString()!;
+        Assert.Contains("[REDACTED]", message);
+        Assert.DoesNotContain("private-tail", message);
+    }
+
+    [Fact]
     public async Task DiagnosticExport_RedactsKnownPathsUrlsAndCredentials()
     {
         using var workspace = new HostTestWorkspace();
@@ -1105,7 +1145,8 @@ public sealed partial class DesktopHostContractTests
         recorder.Record(
             "Playback",
             "Error",
-            $"Failed at {workspace.CacheRoot}: https://example.invalid/media?token=query token=top-secret");
+            $"Failed at {workspace.CacheRoot}: https://example.invalid/media?token=query token=top-secret\n" +
+            "api-key=\r\n folded-scalar\nAuthorization:\r\n Bearer folded-header");
         var exporter = new DiagnosticExporter(
             recorder,
             new BundledFfmpegDiagnosticsProvider(),
@@ -1131,6 +1172,8 @@ public sealed partial class DesktopHostContractTests
         Assert.DoesNotContain(workspace.CacheRoot, message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("example.invalid", message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("top-secret", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("folded-scalar", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("folded-header", message, StringComparison.Ordinal);
         Assert.Contains("[CACHE_ROOT]", message, StringComparison.Ordinal);
         Assert.Contains("[URL]", message, StringComparison.Ordinal);
         Assert.Contains("[REDACTED]", message, StringComparison.Ordinal);

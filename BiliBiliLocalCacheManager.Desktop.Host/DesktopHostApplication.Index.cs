@@ -26,16 +26,23 @@ internal sealed partial class DesktopHostApplication
         var snapshot = ResolveCurrentIndex(RequireIndexToken(parameters));
         var id = parameters.OptionalInt32("issueId") ?? -1;
         if (id < 0 || id >= snapshot.Issues.Count) throw new RpcException("invalid_params", "Unknown scan issue.");
-        var root = Path.TrimEndingDirectorySeparator(snapshot.Root);
-        var issuePath = Path.GetFullPath(snapshot.Issues[id].Path);
-        if (!PathsEqual(issuePath, root) && !issuePath.StartsWith(root + Path.DirectorySeparatorChar,
-                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+        var location = ResolveScanIssueDirectory(snapshot.Root, snapshot.Issues[id].Path);
+        EnsureIndexStillCurrent(snapshot);
+        return new { path = location };
+    }
+
+    internal static string ResolveScanIssueDirectory(string root, string issuePath)
+    {
+        root = Path.TrimEndingDirectorySeparator(root);
+        var relative = Path.GetRelativePath(root, issuePath);
+        if (Path.IsPathRooted(relative) || relative == ".." ||
+            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
             throw new RpcException("unsafe_path", "The scan issue is outside the current root.");
         // Only traverse existing physical ancestors; links and inaccessible targets resolve to their safe parent.
         var location = root;
         if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
             throw new RpcException("unsafe_path", "The cache root is no longer a physical directory.");
-        foreach (var part in Path.GetRelativePath(root, issuePath).Split(Path.DirectorySeparatorChar))
+        foreach (var part in relative.Split(Path.DirectorySeparatorChar))
         {
             if (part == ".") break;
             var candidate = Path.Combine(location, part);
@@ -47,8 +54,7 @@ internal sealed partial class DesktopHostApplication
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { break; }
         }
-        EnsureIndexStillCurrent(snapshot);
-        return new { path = location };
+        return location;
     }
 
     internal sealed class CurrentIndexSnapshot

@@ -887,6 +887,48 @@ describe('desktop renderer', () => {
     expect(vi.mocked(api.exportMedia).mock.calls[1][1]).toEqual([{ avid: '100' }]);
   });
 
+  it('surfaces a staging rollback warning carried by an export cancellation', async () => {
+    const warning = '导出已取消。导出暂存目录未能完全清理，请核对：D:\\exports\\.blcm-staging-1';
+    vi.mocked(api.exportMedia).mockRejectedValue(new IpcError(warning, 'cancelled'));
+    await renderScannedLibrary();
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    expect(await screen.findByText('导出结果：已取消')).toBeInTheDocument();
+    const report = screen.getByRole('region', { name: '操作结果' });
+    expect(within(report).getByText('已发布 0 项，失败 1 项。')).toBeInTheDocument();
+    expect(within(report).getByText(warning)).toBeInTheDocument();
+    const toast = document.querySelector('.toast-stack')!;
+    expect(within(toast as HTMLElement).getByText(warning).closest('.toast')).toHaveClass('error');
+    expect(screen.queryByText('操作已取消。')).not.toBeInTheDocument();
+  });
+
+  it.each(['The operation was cancelled.', "Error invoking remote method 'cache:export': The request was cancelled.",
+    '诊断信息：D:\\private\\host.log'])('keeps a coded export cancellation without a rollback warning informational (%s)', async message => {
+    vi.mocked(api.exportMedia).mockRejectedValue(new IpcError(message, 'cancelled'));
+    await renderScannedLibrary();
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    expect(await screen.findByText('导出结果：已取消')).toBeInTheDocument();
+    expect((await screen.findByText('操作已取消。')).closest('.toast')).toHaveClass('info');
+    const report = screen.getByRole('region', { name: '操作结果' });
+    expect(within(report).getByText('已发布 0 项，失败 0 项。')).toBeInTheDocument();
+    expect(within(report).queryByText(message)).not.toBeInTheDocument();
+    expect(within(report).queryByText('失败明细')).not.toBeInTheDocument();
+  });
+
+  it.each(['The operation was cancelled.', "Error invoking remote method 'cache:play': The request was cancelled."])(
+    'reports a coded playback cancellation without a failure row (%s)', async message => {
+      vi.mocked(api.play).mockRejectedValue(new IpcError(message, 'cancelled'));
+      await renderScannedLibrary();
+      fireEvent.click(screen.getByRole('checkbox', { name: '选择 测试缓存' }));
+      fireEvent.click(screen.getByRole('button', { name: '播放' }));
+      expect(await screen.findByText('播放结果：已取消')).toBeInTheDocument();
+      const report = screen.getByRole('region', { name: '操作结果' });
+      expect(within(report).getByText('已交给播放器 0 项，失败 0 项。')).toBeInTheDocument();
+      expect(within(report).queryByText(message)).not.toBeInTheDocument();
+      expect(within(report).queryByText('失败明细')).not.toBeInTheDocument();
+    });
+
   it('groups more than 1000 failed playback pages into one bounded retry request', async () => {
     const pages = Array.from({ length: 1001 }, (_, index) => index + 2);
     vi.mocked(api.play).mockResolvedValueOnce({ queued: 1, failures: pages.map(pageIndex => ({

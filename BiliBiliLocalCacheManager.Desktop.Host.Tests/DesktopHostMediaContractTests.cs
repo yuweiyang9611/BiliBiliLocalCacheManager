@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text;
 using System.Text.Json.Nodes;
 using BiliBiliLocalCacheManager.Core.Infrastructure.Scanning;
+using BiliBiliLocalCacheManager.Desktop.Host.Services;
 using BiliBiliLocalCacheManager.Playback.Contracts;
 using BiliBiliLocalCacheManager.Playback.Infrastructure.Playback;
 using BiliBiliLocalCacheManager.Playback.Models;
@@ -172,6 +173,72 @@ public sealed partial class DesktopHostContractTests
     }
 
     [Fact]
+    public async Task Export_CancellationAfterStagingCleansOnlyTheNewBatch()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Clip");
+        var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
+        var previous = Directory.CreateDirectory(Path.Combine(destination, "cache-export")).FullName;
+        var previousFile = Path.Combine(previous, "previous.mp4");
+        File.WriteAllText(previousFile, "previous export");
+        using var cancellation = new CancellationTokenSource();
+        var application = workspace.CreateCopyExportApplication();
+        application.ProgressReported += (_, progress) =>
+        {
+            if (progress.Stage == "copying") cancellation.Cancel();
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DispatchAsync(application, "export",
+            JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot, outputPath = destination,
+                targets = new[] { new { avid = "101" } } }), cancellation.Token));
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(previous, Assert.Single(Directory.EnumerateFileSystemEntries(destination)));
+        Assert.Equal("previous export", File.ReadAllText(previousFile));
+    }
+
+    [Fact]
+    public async Task Export_SetupFailureCleansTheNewStagingDirectory()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Clip");
+        var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
+        var application = workspace.CreateCopyExportApplication();
+        application.AfterExportStagingCreatedForTesting = _ => throw new IOException("Export setup interrupted.");
+
+        var result = await DispatchAsync(application, "export", JsonSerializer.Serialize(new
+        {
+            rootPath = workspace.CacheRoot, outputPath = destination, targets = new[] { new { avid = "101" } }
+        }));
+
+        Assert.False(result.GetProperty("published").GetBoolean());
+        Assert.Equal(0, result.GetProperty("exportedCount").GetInt32());
+        var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+        Assert.Equal("Export setup interrupted.", failure.GetProperty("message").GetString());
+        Assert.Empty(Directory.EnumerateFileSystemEntries(destination));
+    }
+
+    [Fact]
+    public void CreateStagingDirectoryRefusesAnExistingFileOrDirectory()
+    {
+        using var workspace = new HostTestWorkspace();
+        var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
+        var existingDirectory = Directory.CreateDirectory(Path.Combine(destination, "existing.staging")).FullName;
+        var existingMedia = Path.Combine(existingDirectory, "previous.mp4");
+        var existingFile = Path.Combine(destination, "existing.file");
+        File.WriteAllText(existingMedia, "prior batch");
+        File.WriteAllText(existingFile, "existing file");
+        using var parent = new ExportDirectoryGuard(destination, allowRename: false);
+
+        Assert.ThrowsAny<IOException>(() => parent.CreateStagingDirectory(Path.GetFileName(existingDirectory)));
+        Assert.ThrowsAny<IOException>(() => parent.CreateStagingDirectory(Path.GetFileName(existingFile)));
+
+        Assert.Equal("prior batch", File.ReadAllText(existingMedia));
+        Assert.Equal("existing file", File.ReadAllText(existingFile));
+        Assert.Equal(2, Directory.GetFileSystemEntries(destination).Length);
+    }
+
+    [Fact]
     public async Task Export_ReportsUnconfirmedStagingDuringSetupAndLeavesReplacementAlone()
     {
         using var workspace = new HostTestWorkspace();
@@ -179,7 +246,7 @@ public sealed partial class DesktopHostContractTests
         var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
         var application = workspace.CreateCopyExportApplication();
         string? replaced = null;
-        application.BeforeExportStagingGuardForTesting = path =>
+        application.AfterExportStagingCreatedForTesting = path =>
         {
             replaced = path;
             Directory.Move(path, path + ".original");
@@ -220,8 +287,97 @@ public sealed partial class DesktopHostContractTests
             outputPath = destination, targets = new[] { new { avid = "101" } } }));
         Assert.NotNull(replaced);
         Assert.False(result.GetProperty("published").GetBoolean());
+        var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+        Assert.Equal("101", failure.GetProperty("avid").GetString());
+        Assert.Equal(2, failure.GetProperty("pageIndex").GetInt32());
+        Assert.Contains(replaced, failure.GetProperty("message").GetString());
         Assert.Equal("keep", File.ReadAllText(Path.Combine(replaced, "keep.txt")));
         Assert.Empty(Directory.EnumerateFiles(replaced, "*.mp4", SearchOption.AllDirectories));
+    }
+
+    [Theory]
+    [Trait("Category", "WindowsOnly")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Export_LockedStagingReportsRecoveryLocationOnFailureOrCancellation(bool cancel)
+    {
+        if (!OperatingSystem.IsWindows()) return; // Open files can be unlinked on Linux.
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Clip", segmentCount: 2);
+        var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
+        var application = workspace.CreateCopyExportApplication();
+        using var cancellation = new CancellationTokenSource();
+        string? staging = null;
+        FileStream? reader = null;
+        application.ProgressReported += (_, progress) =>
+        {
+            if (reader is not null || progress.Current != 2 || progress.Phase != "source-hash") return;
+            staging = Directory.EnumerateDirectories(destination, "*.staging").Single();
+            var copiedPart = Directory.EnumerateFiles(staging, "*.mp4", SearchOption.AllDirectories).Single();
+            reader = File.Open(copiedPart, FileMode.Open, FileAccess.Read, FileShare.None);
+            if (cancel) cancellation.Cancel();
+        };
+        try
+        {
+            var export = DispatchAsync(application, "export", JsonSerializer.Serialize(new
+            {
+                rootPath = workspace.CacheRoot, outputPath = destination, targets = new[] { new { avid = "101" } }
+            }), cancellation.Token);
+            string? message;
+            if (cancel)
+            {
+                var error = await Assert.ThrowsAsync<Rpc.RpcException>(() => export);
+                Assert.Equal("cancelled", error.Code);
+                message = error.Message;
+            }
+            else
+            {
+                var result = await export;
+                Assert.False(result.GetProperty("published").GetBoolean());
+                Assert.Equal(0, result.GetProperty("exportedCount").GetInt32());
+                var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+                Assert.Equal("101", failure.GetProperty("avid").GetString());
+                Assert.Equal(1, failure.GetProperty("pageIndex").GetInt32());
+                message = failure.GetProperty("message").GetString();
+            }
+            Assert.NotNull(staging);
+            Assert.Contains(staging, message);
+            Assert.True(Directory.Exists(staging));
+            Assert.False(Directory.Exists(Path.Combine(destination, "cache-export")));
+        }
+        finally { reader?.Dispose(); }
+    }
+
+    [Fact]
+    [Trait("Category", "WindowsOnly")]
+    public async Task Export_RollbackFailureDefersTranscodeConsentUntilANewBatch()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Clip");
+        var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
+        var service = new CacheExportService(new PlaybackArtifactStore(workspace.TranscodeRoot), new ExportProcessor());
+        var application = new DesktopHostApplication(exportService: service);
+        FileStream? held = null;
+        application.AfterExportStagingCreatedForTesting = path =>
+            held = File.Open(Path.Combine(path, "open-file"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        var request = JsonSerializer.Serialize(new
+        {
+            rootPath = workspace.CacheRoot, outputPath = destination, targets = new[] { new { avid = "101" } }
+        });
+        try
+        {
+            var result = await DispatchAsync(application, "export", request);
+            var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+            Assert.Contains(Directory.EnumerateDirectories(destination, "*.staging").Single(), failure.GetProperty("message").GetString());
+            Assert.Empty(result.GetProperty("transcodeRequirements").EnumerateArray());
+            Assert.False(result.GetProperty("published").GetBoolean());
+        }
+        finally { held?.Dispose(); }
+        application.AfterExportStagingCreatedForTesting = null;
+        var retry = await DispatchAsync(application, "export", request);
+        Assert.Empty(retry.GetProperty("failures").EnumerateArray());
+        Assert.Single(retry.GetProperty("transcodeRequirements").EnumerateArray());
     }
 
     [Theory]
@@ -281,6 +437,52 @@ public sealed partial class DesktopHostContractTests
         Assert.Equal(new[] { 1, 2 }, failures.Select(failure => failure.GetProperty("pageIndex").GetInt32()));
         Assert.DoesNotContain("protection failed", failures[0].GetProperty("message").GetString());
         Assert.Contains("protection failed", failures[1].GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task ExportProtectionFailure_DuringFinalValidationReturnsFailureAndRollsBack()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Fixture");
+        var destination = Directory.CreateDirectory(Path.Combine(workspace.Root, "exports")).FullName;
+        var clock = new ExportProtectionClock();
+        var application = workspace.CreateCopyExportApplication();
+        application.ExportProtectionTimeProviderForTesting = clock;
+        var renewalTriggered = false;
+        application.ProgressReported += (_, progress) =>
+        {
+            if (renewalTriggered || progress.Phase != "final-source-verify") return;
+            var metadata = Directory.EnumerateFiles(workspace.TranscodeRoot, "*.protected-until", SearchOption.AllDirectories).Single();
+            File.Delete(metadata);
+            Directory.CreateDirectory(metadata);
+            renewalTriggered = true;
+            clock.Tick();
+        };
+
+        var result = await DispatchAsync(application, "export", JsonSerializer.Serialize(new
+        {
+            rootPath = workspace.CacheRoot, outputPath = destination, targets = new[] { new { avid = "101" } }
+        }));
+
+        Assert.True(renewalTriggered);
+        Assert.False(result.GetProperty("published").GetBoolean());
+        var failure = Assert.Single(result.GetProperty("failures").EnumerateArray());
+        Assert.Equal(1, failure.GetProperty("pageIndex").GetInt32());
+        Assert.StartsWith("Export preparation protection failed: ", failure.GetProperty("message").GetString());
+        Assert.Empty(Directory.EnumerateFileSystemEntries(destination));
+    }
+
+    private sealed class ExportProtectionClock : TimeProvider
+    {
+        private Action? _tick;
+
+        public void Tick() => _tick!();
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            _tick = () => callback(state);
+            return base.CreateTimer(callback, state, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        }
     }
 
     // Host publication tests use labelled bytes so they can assert which page was copied without FFmpeg.
