@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using BiliBiliLocalCacheManager.Core.Infrastructure;
 using Microsoft.Win32.SafeHandles;
 
 namespace BiliBiliLocalCacheManager.Desktop.Host.Services;
@@ -48,7 +49,7 @@ internal sealed class ExportDirectoryGuard : IDisposable
     private static SafeFileHandle OpenDirectory(string path, bool allowRename)
     {
         var share = FileShare.Read | FileShare.Write | (allowRename ? FileShare.Delete : 0);
-        var handle = CreateFile(path, 0x80, share, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero);
+        var handle = CreateFile(WindowsNativePath.ForFileApi(path), 0x80, share, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero);
         try
         {
             if (handle.IsInvalid || !GetAttributes(handle, 9, out var attributes, 8) ||

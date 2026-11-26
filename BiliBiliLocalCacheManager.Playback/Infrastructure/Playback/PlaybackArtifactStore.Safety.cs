@@ -61,20 +61,9 @@ public sealed partial class PlaybackArtifactStore
 
     private IReadOnlyList<ManagedFileSnapshot> SnapshotAllManagedFilesStrictOnce(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!TryGetAttributesStrict(RootDirectory, out var rootAttributes))
+        if (!ArtifactRootExists(cancellationToken))
         {
             return Array.Empty<ManagedFileSnapshot>();
-        }
-
-        if (rootAttributes.HasFlag(FileAttributes.ReparsePoint))
-        {
-            throw new InvalidOperationException(
-                "The playback artifact root must not be a symbolic link or directory junction.");
-        }
-        if (!rootAttributes.HasFlag(FileAttributes.Directory))
-        {
-            throw new InvalidOperationException("The playback artifact root must be a directory.");
         }
 
         var snapshots = new List<ManagedFileSnapshot>();
@@ -157,6 +146,24 @@ public sealed partial class PlaybackArtifactStore
         }
 
         return snapshots;
+    }
+
+    private bool ArtifactRootExists(CancellationToken cancellationToken = default)
+    {
+        var root = Path.TrimEndingDirectorySeparator(RootDirectory);
+        // A missing descendant and a path blocked by a regular file can both report "not found".
+        for (string? path = root; path is not null; path = Path.GetDirectoryName(path))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!TryGetAttributesStrict(path, out var attributes)) continue;
+            if (path == root && attributes.HasFlag(FileAttributes.ReparsePoint))
+                throw new InvalidOperationException("The playback artifact root must not be a symbolic link or directory junction.");
+            if (!attributes.HasFlag(FileAttributes.Directory))
+                throw new InvalidOperationException(path == root ? "The playback artifact root must be a directory."
+                    : "A parent of the playback artifact root must be a directory.");
+            return path == root;
+        }
+        return false;
     }
 
     private static List<string> GetEntriesStrict(string path, Func<string, IEnumerable<string>> enumerate,

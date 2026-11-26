@@ -325,7 +325,8 @@ Assert-NativeCommandSucceeded "dotnet publish Desktop Host"
 $hostExecutable = Join-Path $hostPublishPath "BiliBiliLocalCacheManager.Desktop.Host$executableExtension"
 Invoke-HostSmokeTest $hostExecutable
 if ($isWindowsPlatform -and -not $SkipTests) {
-    node (Join-Path $PSScriptRoot "test-windows-published-host-paths.mjs") $hostExecutable
+    $hostTestArgs = @(if ($RunFfmpegIntegrationTests) { '--export' })
+    node (Join-Path $PSScriptRoot "test-windows-published-host-paths.mjs") $hostExecutable @hostTestArgs
     Assert-NativeCommandSucceeded "Published Windows Host long-path test"
 }
 

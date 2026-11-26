@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 const { createOutput, removeFixture } = require('./desktop-e2e-support.cjs');
-const { measurementSource, identifyHost, startHost, summaryDigest } = require('./scan-measurement-support.cjs');
+const { measurementSource, identifyHost, hostRuntime, startHost, summaryDigest } = require('./scan-measurement-support.cjs');
 
 const videos = 350;
 const profiles = [
@@ -88,6 +88,8 @@ async function measureProfile(root, profile, hosts) {
       report.profiles.push(result);
       console.log(profile.name, result.medianMs);
     }
+    for (const [version, host] of Object.entries(hosts))
+      Object.assign(report.binaries[version], await hostRuntime(host.request));
     await fs.writeFile(path.join(output, 'results.json'), JSON.stringify(report, null, 2));
   } finally {
     await Promise.all(Object.values(hosts).map(host => host.close()));

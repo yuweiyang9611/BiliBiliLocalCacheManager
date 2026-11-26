@@ -3,8 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { execFileSync } = require('node:child_process');
-const { measurementSource, identifyHost, startHost, summaryDigest } = require('./scan-measurement-support.cjs');
+const { measurementSource, identifyHost, hostRuntime, readScanTimings, startHost, summaryDigest } = require('./scan-measurement-support.cjs');
 const { performance } = require('node:perf_hooks');
 const assert = require('node:assert/strict');
 const repository = path.resolve(__dirname, '..');
@@ -40,14 +39,10 @@ const repository = path.resolve(__dirname, '..');
       lastScan = result;
     }
     await request('diagnostics.export', { outputPath: report.diagnosticsPath, rootPath: path.join(fixture, 'cache') });
-    const contents = process.platform === 'win32'
-      ? execFileSync('tar.exe', ['-xOf', report.diagnosticsPath, 'recent-events.json'], { encoding: 'utf8', windowsHide: true })
-      : execFileSync('unzip', ['-p', report.diagnosticsPath, 'recent-events.json'], { encoding: 'utf8' });
-    const events = JSON.parse(contents);
+    const timings = readScanTimings(report.diagnosticsPath);
     for (const sample of report.scans) {
-      const event = events.find(e => e.category === 'ScanTiming' && e.message.startsWith(`request=${sample.requestId};`));
-      assert(event, `Missing ScanTiming for ${sample.requestId}`);
-      const fields = Object.fromEntries(event.message.split('; ').map(field => field.split('=')));
+      const fields = timings.get(sample.requestId);
+      assert(fields, `Missing ScanTiming for ${sample.requestId}`);
       sample.timings = {};
       for (const name of ['waitMs', 'buildMs', 'snapshotMs', 'pageMs', 'totalMs']) {
         const value = Number(fields[name]);
@@ -57,6 +52,7 @@ const repository = path.resolve(__dirname, '..');
     }
     // Compare every published summary between implementations without adding paging to a timed scan.
     report.summarySha256 = await summaryDigest(lastScan, request);
+    Object.assign(report.measuredHost, await hostRuntime(request));
   } finally {
     await close();
     await fs.writeFile(path.join(output, 'results.json'), JSON.stringify(report, null, 2));

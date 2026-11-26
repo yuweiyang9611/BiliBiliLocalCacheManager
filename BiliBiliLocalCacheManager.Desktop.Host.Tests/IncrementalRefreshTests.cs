@@ -10,6 +10,44 @@ public sealed partial class DesktopHostContractTests
         => DispatchAsync(application, method, JsonSerializer.Serialize(parameters));
 
     [Fact]
+    public async Task Scan_ReportsOnlyThePartDirectoryThatDisappearsAndNextRefreshScansTheWholeRoot()
+    {
+        using var workspace = new HostTestWorkspace();
+        workspace.CreateCache(101, "Video", 2);
+        var video = Path.Combine(workspace.CacheRoot, "101");
+        var firstPart = Path.Combine(video, "c_1");
+        var removedPart = Path.Combine(video, "c_2");
+        // A physical directory that never had entry.json is an ordinary non-cache directory.
+        Directory.CreateDirectory(Path.Combine(video, "z-no-metadata"));
+        var application = workspace.CreateApplication();
+        var relocated = false;
+        application.ProgressReported += (_, update) =>
+        {
+            if (relocated || update.Stage != "scanning" || update.Message != firstPart) return;
+            Directory.Move(removedPart, Path.Combine(workspace.Root, "relocated"));
+            relocated = true;
+        };
+
+        var scan = await RefreshDispatchAsync(application, "scan", new { rootPath = workspace.CacheRoot });
+        Assert.True(relocated);
+        Assert.Equal(3, scan.GetProperty("scannedSegmentDirectories").GetInt32());
+        Assert.Equal(1, scan.GetProperty("includedEntries").GetInt32());
+        Assert.Equal(0, scan.GetProperty("invalidEntries").GetInt32());
+        Assert.Equal(1, scan.GetProperty("inaccessibleDirectories").GetInt32());
+        Assert.True(scan.GetProperty("hasWarnings").GetBoolean());
+        var issue = Assert.Single(scan.GetProperty("issues").EnumerateArray());
+        Assert.Equal("InaccessibleDirectory", issue.GetProperty("kind").GetString());
+        Assert.Equal(removedPart, issue.GetProperty("path").GetString());
+
+        var moved = await RefreshDispatchAsync(application, "trash.move", new { rootPath = workspace.CacheRoot,
+            indexToken = scan.GetProperty("indexToken").GetString(), targets = new[] { new { avid = "101", pageIndexes = new[] { 1 } } } });
+        Assert.Equal("101:P1", Assert.Single(moved.GetProperty("moved").EnumerateArray()).GetString());
+        workspace.CreateCache(202, "External video");
+        var refresh = await RefreshDispatchAsync(application, "scan", new { rootPath = workspace.CacheRoot, incremental = true });
+        Assert.Equal("202", Assert.Single(refresh.GetProperty("items").EnumerateArray()).GetProperty("avid").GetString());
+    }
+
+    [Fact]
     public async Task MutationRefresh_ReusesUnchangedVideosUntilExplicitFullScan()
     {
         using var workspace = new HostTestWorkspace();

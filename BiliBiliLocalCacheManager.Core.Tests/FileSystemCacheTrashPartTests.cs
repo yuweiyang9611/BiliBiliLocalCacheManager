@@ -1,4 +1,5 @@
 using System.Text.Json;
+using BiliBiliLocalCacheManager.Core.Infrastructure;
 using BiliBiliLocalCacheManager.Core.Infrastructure.Management;
 using BiliBiliLocalCacheManager.Core.Infrastructure.Scanning;
 
@@ -18,11 +19,11 @@ public sealed class FileSystemCacheTrashPartTests : IDisposable
         var unc = @"\\server\share\cache\" + tail;
         var extendedUnc = @"\\?\UNC\server\share\cache\" + tail;
         var device = @"\\.\C:\cache\" + tail;
-        Assert.Equal(@"C:\cache\entry.json", FileSystemCacheTrashService.GetWindowsApiPath(@"C:\cache\entry.json"));
-        Assert.Equal(@"\\?\" + disk, FileSystemCacheTrashService.GetWindowsApiPath(disk));
-        Assert.Equal(extendedUnc, FileSystemCacheTrashService.GetWindowsApiPath(unc));
-        Assert.Equal(extendedUnc, FileSystemCacheTrashService.GetWindowsApiPath(extendedUnc));
-        Assert.Equal(device, FileSystemCacheTrashService.GetWindowsApiPath(device));
+        Assert.Equal(@"C:\cache\entry.json", WindowsNativePath.ForFileApi(@"C:\cache\entry.json"));
+        Assert.Equal(@"\\?\" + disk, WindowsNativePath.ForFileApi(disk));
+        Assert.Equal(extendedUnc, WindowsNativePath.ForFileApi(unc));
+        Assert.Equal(extendedUnc, WindowsNativePath.ForFileApi(extendedUnc));
+        Assert.Equal(device, WindowsNativePath.ForFileApi(device));
     }
 
     [Fact]

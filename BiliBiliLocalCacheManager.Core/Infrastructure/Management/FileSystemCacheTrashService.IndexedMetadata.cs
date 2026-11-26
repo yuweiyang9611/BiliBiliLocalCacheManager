@@ -13,8 +13,8 @@ public sealed partial class FileSystemCacheTrashService
 {
     private const int MaximumEntryMetadataBytes = 4 * 1024 * 1024;
 
-    // The root and AV are shared by all parts in this scan batch. A Windows directory lease
-    // pins the AV (and prevents ancestor renames); individual part leases remain short lived.
+    // Reuse the Windows AV directory handle across its parts. Concurrent changes to the
+    // directory tree still need to be detected; individual part leases remain short lived.
     internal static SafeFileHandle? LeaseScanParent(string root, string parent, bool captureIdentity, out string? error)
     {
         error = null;

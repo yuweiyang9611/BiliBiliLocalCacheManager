@@ -1000,6 +1000,104 @@ public sealed partial class DesktopHostContractTests
     }
 
     [Fact]
+    public async Task DiagnosticExport_PreservesRuntimeAndEventsWhenArtifactRootIsBlocked()
+    {
+        using var workspace = new HostTestWorkspace();
+        Directory.Delete(workspace.TranscodeRoot);
+        File.WriteAllText(workspace.TranscodeRoot, "keep");
+        var app = workspace.CreateApplication();
+        await DispatchAsync(app, "health", "{}");
+        var zip = Path.Combine(workspace.Root, "partial-diagnostics.zip");
+        var parameters = JsonSerializer.Serialize(new { outputPath = zip, rootPath = workspace.CacheRoot });
+
+        var exported = await DispatchAsync(app, "diagnostics.export", parameters);
+        Assert.Equal(zip, exported.GetProperty("outputPath").GetString());
+        using var archive = ZipFile.OpenRead(zip);
+        using var diagnosticsStream = archive.GetEntry("diagnostics.json")!.Open();
+        using var diagnostics = await JsonDocument.ParseAsync(diagnosticsStream);
+        Assert.NotEmpty(diagnostics.RootElement.GetProperty("runtime").GetProperty("framework").GetString()!);
+        var artifacts = diagnostics.RootElement.GetProperty("transcodeCache");
+        Assert.Equal("[TRANSCODE_CACHE_ROOT]", artifacts.GetProperty("rootDirectory").GetString());
+        Assert.False(artifacts.TryGetProperty("totalBytes", out _));
+        Assert.False(artifacts.TryGetProperty("fileCount", out _));
+        Assert.Contains("directory", artifacts.GetProperty("measurementWarning").GetString());
+        Assert.DoesNotContain(workspace.Root, artifacts.ToString(), StringComparison.OrdinalIgnoreCase);
+        using var eventsStream = archive.GetEntry("recent-events.json")!.Open();
+        using var events = await JsonDocument.ParseAsync(eventsStream);
+        Assert.Contains(events.RootElement.EnumerateArray(),
+            item => item.GetProperty("message").GetString()!.Contains("Completed health"));
+        Assert.Equal("keep", File.ReadAllText(workspace.TranscodeRoot));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ArtifactMaintenance_DistinguishesAnOccupiedComponentFromAMissingDirectory(bool blockedAncestor)
+    {
+        using var workspace = new HostTestWorkspace();
+        Directory.Delete(workspace.TranscodeRoot);
+        if (blockedAncestor) Environment.SetEnvironmentVariable("BILIBILI_LOCAL_CACHE_MANAGER_TRANSCODE_CACHE_ROOT",
+            Path.Combine(workspace.TranscodeRoot, "not-yet-created", "artifacts"));
+        var app = workspace.CreateApplication();
+        var root = JsonSerializer.Serialize(new { rootPath = workspace.CacheRoot });
+        var missing = await DispatchAsync(app, "storage.get", root);
+        Assert.Equal(0L, missing.GetProperty("policyReclaimableBytes").GetInt64());
+        foreach (var method in new[] { "artifacts.cleanup", "artifacts.clear" })
+        {
+            var empty = await DispatchAsync(app, method, """{"confirmed":true}""");
+            Assert.Equal(0L, empty.GetProperty("deletedFileCount").GetInt64());
+        }
+
+        File.WriteAllText(workspace.TranscodeRoot, "keep");
+        var occupied = await DispatchAsync(app, "storage.get", root);
+        Assert.False(occupied.TryGetProperty("policyReclaimableBytes", out var amount) && amount.ValueKind == JsonValueKind.Number);
+        Assert.Contains("directory", occupied.GetProperty("measurementWarning").GetString());
+        foreach (var method in new[] { "artifacts.cleanup", "artifacts.clear" })
+            await Assert.ThrowsAsync<InvalidOperationException>(() => DispatchAsync(app, method, """{"confirmed":true}"""));
+        Assert.Equal("keep", File.ReadAllText(workspace.TranscodeRoot));
+    }
+
+    [Fact]
+    public async Task DiagnosticExport_CancelsDuringStatisticsAndPreservesThePublishedFile()
+    {
+        using var workspace = new HostTestWorkspace();
+        using var cancel = new CancellationTokenSource();
+        var directory = Directory.CreateDirectory(Path.Combine(workspace.TranscodeRoot, "7", "Page_1")).FullName;
+        foreach (var name in new[] { "aaaaaaaaaaaaaaaaaaaaaaaa.mp4", "bbbbbbbbbbbbbbbbbbbbbbbb.mp4" })
+            File.WriteAllText(Path.Combine(directory, name), "fixture");
+        var visits = 0;
+        var store = new PlaybackArtifactStore(workspace.TranscodeRoot, () => { visits++; cancel.Cancel(); });
+        var exporter = new DiagnosticExporter(new DiagnosticEventRecorder(), new BundledFfmpegDiagnosticsProvider(), store);
+        var destination = Path.Combine(workspace.Root, "existing.zip");
+        File.WriteAllText(destination, "previous report");
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => exporter.ExportAsync(destination,
+            new SettingsState(new DesktopSettings(), true, DesktopSettings.CurrentSchemaVersion, null), null, null, cancel.Token));
+        Assert.Equal(cancel.Token, exception.CancellationToken);
+        Assert.Equal(1, visits);
+        Assert.Equal("previous report", File.ReadAllText(destination));
+        Assert.Empty(Directory.GetFiles(workspace.Root, "*.writing"));
+    }
+
+    [Fact]
+    public async Task DiagnosticExport_PropagatesPublicationFailureEvenWhenStatisticsAreUnavailable()
+    {
+        using var workspace = new HostTestWorkspace();
+        Directory.Delete(workspace.TranscodeRoot);
+        File.WriteAllText(workspace.TranscodeRoot, "occupied");
+        var directory = Directory.CreateDirectory(Path.Combine(workspace.Root, "existing.zip")).FullName;
+        var sentinel = Path.Combine(directory, "existing-file");
+        File.WriteAllText(sentinel, "keep");
+        var app = workspace.CreateApplication();
+        var error = await Record.ExceptionAsync(() => DispatchAsync(app, "diagnostics.export",
+            JsonSerializer.Serialize(new { outputPath = directory })));
+
+        Assert.True(error is IOException or UnauthorizedAccessException, error?.ToString());
+        Assert.Equal("keep", File.ReadAllText(sentinel));
+        Assert.Empty(Directory.GetFiles(workspace.Root, "*.writing"));
+    }
+
+    [Fact]
     public async Task DiagnosticExport_RedactsKnownPathsUrlsAndCredentials()
     {
         using var workspace = new HostTestWorkspace();
@@ -1042,6 +1140,10 @@ public sealed partial class DesktopHostContractTests
             item => item.FullName == "diagnostics.json");
         using var diagnosticsStream = diagnosticsEntry.Open();
         using var diagnosticsDocument = await JsonDocument.ParseAsync(diagnosticsStream);
+        var statistics = diagnosticsDocument.RootElement.GetProperty("transcodeCache");
+        Assert.Equal(0, statistics.GetProperty("fileCount").GetInt32());
+        Assert.Equal(0L, statistics.GetProperty("totalBytes").GetInt64());
+        Assert.False(statistics.TryGetProperty("measurementWarning", out _));
         Assert.Equal(
             DesktopHostApplication.ProtocolVersion,
             diagnosticsDocument.RootElement
